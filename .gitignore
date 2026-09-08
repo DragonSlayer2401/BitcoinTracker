@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+.swc/
+.next/
+out/
+coverage/
+.env*
+!.env.example
+*.log
+.DS_Store
+test-artifacts/

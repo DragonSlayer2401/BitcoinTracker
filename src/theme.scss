@@ -1,0 +1,113 @@
+$primary: #4de6a2;
+$secondary: #a2b4a8;
+$success: #4de6a2;
+$danger: #ff7a88;
+$warning: #f0c577;
+$body-color: #e7f0e9;
+$body-bg: #0b1110;
+$border-color: #2c3b33;
+$body-color-dark: #e7f0e9;
+$body-bg-dark: #0b1110;
+$body-secondary-color-dark: #a2b4a8;
+$body-secondary-bg-dark: #17201d;
+$body-tertiary-color-dark: #91a397;
+$body-tertiary-bg-dark: #121b17;
+$body-emphasis-color-dark: #f5faf6;
+$border-color-dark: #2c3b33;
+$border-color-translucent-dark: rgba(162, 180, 168, 0.2);
+$primary-text-emphasis-dark: #72efb7;
+$success-text-emphasis-dark: #72efb7;
+$danger-text-emphasis-dark: #ff9aa5;
+$warning-text-emphasis-dark: #f0d39d;
+$primary-bg-subtle-dark: #153526;
+$success-bg-subtle-dark: #153526;
+$danger-bg-subtle-dark: #3b2028;
+$warning-bg-subtle-dark: #312a1d;
+$primary-border-subtle-dark: #2e684a;
+$success-border-subtle-dark: #2e684a;
+$danger-border-subtle-dark: #7c414d;
+$warning-border-subtle-dark: #786039;
+$font-family-sans-serif:
+  'Inter',
+  'Segoe UI',
+  -apple-system,
+  BlinkMacSystemFont,
+  sans-serif;
+$font-size-base: 0.9375rem;
+$border-radius: 0.5rem;
+$border-radius-lg: 0.75rem;
+$input-border-color: #60796b;
+$input-focus-border-color: #4de6a2;
+$input-focus-box-shadow: 0 0 0 0.2rem rgba(77, 230, 162, 0.18);
+$input-placeholder-color: #91a397;
+$link-color: #4de6a2;
+$link-hover-color: #99f4cb;
+$link-color-dark: #4de6a2;
+$link-hover-color-dark: #99f4cb;
+$form-valid-color-dark: #4de6a2;
+$form-valid-border-color-dark: #4de6a2;
+$form-invalid-color-dark: #ff7a88;
+$form-invalid-border-color-dark: #ff7a88;
+$modal-content-bg: #121b17;
+$modal-content-border-color: #2c3b33;
+$modal-backdrop-opacity: 0.7;
+
+@import 'bootstrap/scss/bootstrap';
+
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+html[data-bs-theme='dark'] {
+  color-scheme: dark;
+}
+
+button,
+a,
+input,
+select {
+  touch-action: manipulation;
+}
+
+:focus-visible,
+.btn:focus-visible,
+.btn-close:focus-visible,
+.form-control:focus-visible,
+.form-select:focus-visible {
+  outline: 3px solid #72efb7;
+  outline-offset: 4px;
+}
+
+::selection {
+  background: #4de6a2;
+  color: #0b2117;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.skip-link {
+  position: fixed;
+  top: -100px;
+  left: 1rem;
+  z-index: 1100;
+  padding: 0.75rem 1rem;
+  background: #17201d;
+  border: 2px solid $primary;
+
+  &:focus {
+    top: 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

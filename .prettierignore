@@ -1,0 +1,8 @@
+node_modules
+.pnpm-store
+.swc
+.next
+out
+coverage
+pnpm-lock.yaml
+test-artifacts
