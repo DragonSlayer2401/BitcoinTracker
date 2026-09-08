@@ -3,7 +3,7 @@ import Icon from './Icon';
 import StartTimeControl from './StartTimeControl';
 import ForecastStatus from './ForecastStatus';
 import ForecastPrediction from './ForecastPrediction';
-import { formatPrice, formatTime } from '../utils/format.utils';
+import { formatCountdown, formatPrice, formatTime } from '../utils/format.utils';
 import {
   formatLocalDateTime,
   getNextQuarterHour,
@@ -11,6 +11,71 @@ import {
   getEndScheduleError,
   parseScheduledStart,
 } from '../utils/schedule.utils';
+
+const WITHHELD_REASONS = {
+  'insufficient-time': 'Not enough time for observation and at least one minute before the end.',
+  'no-consensus': 'No direction met the signal rule before the decision window closed.',
+  'market-data-unavailable': 'Fresh, uninterrupted market data was unavailable during observation.',
+  'model-unavailable': 'The saved model version is unavailable; no replacement call was issued.',
+};
+
+function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
+  const isWithheld = entry.status === 'withheld';
+  const observationRemaining =
+    progress?.observationRemainingMs ?? Math.max(0, (entry.analysis?.earliestAt ?? now) - now);
+  const isObserving = !isWithheld && observationRemaining > 0;
+  const isConfirming = !isObserving && progress?.sampleCount > 0;
+  const progressRemaining = isObserving
+    ? observationRemaining
+    : isConfirming
+      ? progress.confirmationRemainingMs
+      : Math.max(0, (entry.analysis?.deadline ?? now) - now);
+
+  return (
+    <section aria-label="Fixed prediction" className="fixed-prediction-status">
+      <div className="forecast-result neutral">
+        <span className="small text-secondary">Fixed prediction</span>
+        <h3 className="result-heading mt-1 mb-1" aria-live="polite">
+          {isWithheld
+            ? 'No clear signal'
+            : progress?.phase === 'ready'
+              ? 'Recording fixed call…'
+              : isObserving
+                ? 'Observing market'
+                : 'Waiting for a clear signal'}
+        </h3>
+        <p className="small text-secondary mb-0">
+          {isWithheld
+            ? WITHHELD_REASONS[entry.withholdingReason] || 'No fixed prediction was issued.'
+            : progress?.reason ||
+              'Observe for 3–5 minutes; a direction must stay at ≥65% model probability for 60 seconds.'}
+        </p>
+        {!isWithheld && (
+          <div className="fixed-progress d-flex justify-content-between align-items-center flex-wrap gap-1 mt-1 small">
+            <span>
+              {isObserving
+                ? 'Minimum observation'
+                : isConfirming
+                  ? 'Signal confirmation'
+                  : 'Decision window'}{' '}
+              <strong
+                className="countdown"
+                role="timer"
+                aria-label="Time until fixed prediction check"
+              >
+                {Number.isFinite(progressRemaining) ? formatCountdown(progressRemaining) : '—'}
+              </strong>
+            </span>
+            <span className="text-secondary">Qualifying quotes: {progress?.sampleCount ?? 0}</span>
+          </div>
+        )}
+        {hasDifferentTarget && (
+          <p className="small text-secondary mt-1 mb-0">Saved target {formatPrice(entry.target)}</p>
+        )}
+      </div>
+    </section>
+  );
+}
 
 export default function ForecastPanel({
   targetInput,
@@ -22,6 +87,7 @@ export default function ForecastPanel({
   onTimingChange,
   activeForecast,
   recordedForecast,
+  fixedProgress,
   scheduledForecast,
   now,
   onRecord,
@@ -44,7 +110,10 @@ export default function ForecastPanel({
       : null;
   const hasActiveSchedule = scheduledForecast?.status === 'scheduled';
   const startsImmediately = scheduleMode === 'now' || (isEndTime && startsAt <= now);
-  const isCompleted = recordedForecast && recordedForecast.status !== 'pending';
+  const isAnalyzing = recordedForecast?.status === 'analyzing';
+  const isWithheld = recordedForecast?.status === 'withheld';
+  const isCompleted =
+    recordedForecast && !['analyzing', 'pending'].includes(recordedForecast.status);
   const hasWindowEnded = recordedForecast && now >= recordedForecast.expiresAt;
   const liveDescription = forecast.available
     ? recordedForecast
@@ -119,7 +188,14 @@ export default function ForecastPanel({
             previewEndsAt={isEndTime ? selectedAt : undefined}
             showRecordedDetails={false}
           />
-          {recordedForecast && (
+          {recordedForecast && (isAnalyzing || isWithheld) ? (
+            <FixedPredictionStatus
+              entry={recordedForecast}
+              progress={fixedProgress}
+              now={now}
+              hasDifferentTarget={hasDifferentTarget}
+            />
+          ) : recordedForecast ? (
             <ForecastPrediction
               forecast={{ ...recordedForecast, available: true }}
               label="Fixed prediction"
@@ -130,7 +206,7 @@ export default function ForecastPanel({
                   : null
               }
             />
-          )}
+          ) : null}
           <ForecastPrediction
             forecast={forecast}
             label="Live estimate"
@@ -145,7 +221,7 @@ export default function ForecastPanel({
               forecast.available && hasDifferentTarget
                 ? `Preview target ${formatPrice(target)}`
                 : hasActiveSchedule && forecast.available
-                  ? 'Fixed prediction will be captured at the scheduled start.'
+                  ? 'Observation begins at the scheduled start; the fixed call comes later.'
                   : liveDescription
             }
             unavailableLabel={
@@ -232,7 +308,9 @@ export default function ForecastPanel({
               {isCompleted
                 ? 'New forecast'
                 : activeForecast
-                  ? 'Forecast in progress'
+                  ? isAnalyzing
+                    ? 'Observing market'
+                    : 'Forecast in progress'
                   : hasActiveSchedule
                     ? 'Start scheduled'
                     : startsImmediately
@@ -244,12 +322,14 @@ export default function ForecastPanel({
               {isCompleted
                 ? 'Edit the target for your next forecast. The original result stays saved.'
                 : activeForecast
-                  ? 'Target edits update Live. Fixed keeps its recorded target and end.'
+                  ? isAnalyzing
+                    ? 'Observing the saved target. Edits update Live; the end time stays fixed.'
+                    : 'Target edits update Live. Fixed keeps its recorded target and end.'
                   : isEndTime && startsImmediately
-                    ? 'Records this estimate and counts down to the selected end.'
+                    ? 'Observes first, then saves a clear call before the selected end.'
                     : hasActiveSchedule || scheduleMode !== 'now'
-                      ? 'The target is saved now; the estimate is captured at the start.'
-                      : 'Locks the prediction now and starts the 15-minute countdown.'}
+                      ? 'Saves the target now; observation begins at the scheduled start.'
+                      : 'Starts the countdown and observes for 3–5 minutes before a fixed call.'}
             </p>
           </div>
         </section>

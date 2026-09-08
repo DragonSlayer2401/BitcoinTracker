@@ -13,6 +13,7 @@ const scheduleStartGrace = 15 * 1000;
 
 const initialState = { forecasts: [], scheduledForecast: null, storageWarning: null };
 const isTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
+const isActiveForecast = (forecast) => ['analyzing', 'pending'].includes(forecast.status);
 
 function canObserveForecast(forecast, ticker, now) {
   return (
@@ -41,10 +42,10 @@ const trackerSlice = createSlice({
       const forecast = getValidatedForecast(action.payload);
       if (
         forecast === null ||
-        forecast.status !== 'pending' ||
+        !isActiveForecast(forecast) ||
         state.scheduledForecast?.status === 'scheduled' ||
         state.forecasts.some(
-          (existing) => existing.id === forecast.id || existing.status === 'pending',
+          (existing) => existing.id === forecast.id || isActiveForecast(existing),
         )
       ) {
         return;
@@ -61,7 +62,7 @@ const trackerSlice = createSlice({
         schedule.status !== 'scheduled' ||
         state.scheduledForecast?.status === 'scheduled' ||
         state.forecasts.some(
-          (forecast) => forecast.status === 'pending' || forecast.id === schedule.id,
+          (forecast) => isActiveForecast(forecast) || forecast.id === schedule.id,
         )
       ) {
         return;
@@ -90,7 +91,7 @@ const trackerSlice = createSlice({
         !isTimestamp(now) ||
         schedule?.status !== 'scheduled' ||
         forecast === null ||
-        forecast.status !== 'pending' ||
+        !isActiveForecast(forecast) ||
         forecast.id !== schedule.id ||
         forecast.target !== schedule.target ||
         forecast.startsAt !== schedule.startsAt ||
@@ -99,7 +100,7 @@ const trackerSlice = createSlice({
         now < schedule.startsAt ||
         now > schedule.startsAt + scheduleStartGrace ||
         state.forecasts.some(
-          (existing) => existing.id === forecast.id || existing.status === 'pending',
+          (existing) => existing.id === forecast.id || isActiveForecast(existing),
         )
       ) {
         return;
@@ -108,6 +109,49 @@ const trackerSlice = createSlice({
       state.scheduledForecast = null;
       state.forecasts.unshift(forecast);
       state.forecasts = state.forecasts.slice(0, maximumForecasts);
+    },
+    fixedForecastPublished(state, action) {
+      const { id, now, forecast: snapshot } = action.payload ?? {};
+      const existing = state.forecasts.find((forecast) => forecast.id === id);
+      const forecast = getValidatedForecast(snapshot);
+      if (
+        existing?.status !== 'analyzing' ||
+        !isTimestamp(now) ||
+        now < existing.analysis.earliestAt ||
+        now > existing.analysis.deadline ||
+        forecast === null ||
+        forecast.status !== 'pending' ||
+        forecast.createdAt !== now ||
+        !['id', 'target', 'startsAt', 'expiresAt', 'timingMode', 'modelVersion'].every(
+          (field) => forecast[field] === existing[field],
+        ) ||
+        !['startedAt', 'earliestAt', 'deadline', 'policyVersion'].every(
+          (field) => forecast.analysis?.[field] === existing.analysis[field],
+        )
+      ) {
+        return;
+      }
+
+      state.forecasts[state.forecasts.findIndex((entry) => entry.id === id)] = forecast;
+    },
+    fixedForecastWithheld(state, action) {
+      const { id, now, reason } = action.payload ?? {};
+      const forecast = state.forecasts.find((entry) => entry.id === id);
+      if (forecast?.status !== 'analyzing' || !isTimestamp(now)) return;
+      const hasInsufficientTime = forecast.analysis.earliestAt > forecast.analysis.deadline;
+      if (
+        now < forecast.analysis.startedAt ||
+        (!hasInsufficientTime && now < forecast.analysis.deadline)
+      ) {
+        return;
+      }
+      const withheld = getValidatedForecast({
+        ...forecast,
+        status: 'withheld',
+        withholdingReason: reason,
+      });
+      if (withheld === null) return;
+      state.forecasts[state.forecasts.findIndex((entry) => entry.id === id)] = withheld;
     },
     forecastsObserved(state, action) {
       const { ticker, now } = action.payload ?? {};
@@ -136,16 +180,13 @@ const trackerSlice = createSlice({
       });
     },
     historyCleared(state) {
-      state.forecasts = state.forecasts.filter((forecast) => forecast.status === 'pending');
+      state.forecasts = state.forecasts.filter(isActiveForecast);
     },
     storageWarningChanged(state, action) {
       state.storageWarning = typeof action.payload === 'string' ? action.payload : null;
     },
     historyRestored(state, action) {
-      if (
-        state.scheduledForecast !== null ||
-        state.forecasts.some((forecast) => forecast.status === 'pending')
-      ) {
+      if (state.scheduledForecast !== null || state.forecasts.some(isActiveForecast)) {
         return;
       }
       const journal = getValidatedJournalState(
@@ -167,6 +208,8 @@ export const {
   scheduleCancelled,
   scheduleStartMissed,
   scheduledForecastStarted,
+  fixedForecastPublished,
+  fixedForecastWithheld,
   forecastsObserved,
   historyCleared,
   storageWarningChanged,

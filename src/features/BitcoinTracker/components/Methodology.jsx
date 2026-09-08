@@ -12,8 +12,8 @@ export default function Methodology() {
         <h2 className="section-title mb-0">Model and data rules</h2>
       </div>
       <p className="small text-secondary mb-2">
-        Unvalidated volatility model. Quotes must be within 20 seconds; starts and outcomes require
-        this tab to remain open.
+        Observes for 3–5 minutes before a fixed call. Signals and probabilities are unvalidated.
+        Keep this tab open for observation and outcomes.
       </p>
       <Button size="sm" variant="outline-secondary" onClick={() => setShowRules(true)}>
         View model rules
@@ -43,12 +43,30 @@ export default function Methodology() {
               </p>
               <p className="mb-0">
                 Probabilities are bounded to 1–99%. Below 55% for either direction, the result is
-                “Too close to call.” Once captured, the main prediction keeps its original
-                probabilities through the countdown, result, and reload. A separate live estimate
-                uses the editable preview target and the saved deadline. Editing the target never
-                changes the recorded prediction. The live estimate, chart's live 80% model range,
-                and live window volatility stop at the deadline. Predictive accuracy and interval
-                coverage have not been independently validated.
+                “Too close to call” in the live estimate. The baseline stays in use until historical
+                evaluation supports a better model. Once captured, the fixed prediction keeps its
+                original probabilities through the countdown, result, and reload. A separate live
+                estimate uses the editable preview target and the saved deadline. Editing the target
+                never changes the recorded prediction. The live estimate, chart's live 80% model
+                range, and live window volatility stop at the deadline. Predictive accuracy and
+                interval coverage have not been independently validated.
+              </p>
+            </div>
+            <div className="col-md-6">
+              <h3 className="h6">Fixed prediction observation</h3>
+              <p>
+                New windows first observe fresh market data for at least 3 minutes. A fixed call
+                requires the same direction to stay at or above 65% model probability for 60
+                seconds, with at least 7 distinct qualifying quotes. This publication threshold is
+                not a measured 65% accuracy rate. Live estimates remain visible during observation.
+              </p>
+              <p className="mb-0">
+                The decision window closes after 5 minutes or one minute before the original end,
+                whichever comes first. A late join never extends the end. Insufficient time,
+                interrupted market data, or a signal that does not meet the rule produces “No clear
+                signal,” with no fixed probabilities or scored call. Editing the live target does
+                not change the target being observed. Older immediate forecasts keep their original
+                captured predictions.
               </p>
             </div>
             <div className="col-md-6">
@@ -70,28 +88,32 @@ export default function Methodology() {
                 Choose Start now, End time, or Start time. An end time sets the window start 15
                 minutes earlier. The deadline is exactly 15 minutes after that start. If the end is
                 12 minutes away, submitting joins that window now with fresh data and a 12:00
-                countdown. The estimate covers only the remaining time; nothing is backfilled to the
-                earlier start. End times must be in the future.
+                countdown. Observation starts when you join, and estimates cover only the remaining
+                time; nothing is backfilled to the earlier start. End times must be in the future.
               </p>
               <p className="mb-0">
                 Future starts can be up to 24 hours ahead. Before the start, 15:00 stays visible
                 with a separate Starts in countdown; original probabilities wait for capture while
                 the live preview covers 15 minutes from now. A scheduled or recorded target stays
                 saved while target edits update only the preview. Choose New forecast after
-                completion to start another window with your edited target. Scheduled capture has up
-                to 15 seconds of grace and never moves the deadline; a missed start is not
-                automatically recovered. Outcomes use the first fresh quote this tab observes with
-                an exchange time within 15 seconds after the deadline. A missed outcome stays
-                unobserved. Keep this tab open for scheduled starts and sampled outcomes.
+                completion or a no-call decision to start another window with your edited target.
+                Starting scheduled observation has up to 15 seconds of grace and never moves the
+                deadline; a missed start is not automatically recovered. Outcomes use the first
+                fresh quote this tab observes with an exchange time within 15 seconds after the
+                deadline. A missed outcome stays unobserved. Keep this tab open for scheduled
+                starts, continuous observation, and sampled outcomes.
               </p>
             </div>
             <div className="col-md-6">
               <h3 className="h6">Journal metrics</h3>
               <p>
-                Directional accuracy excludes neutral calls and ties. Brier score measures mean
-                squared probability error; lower is better and constant 50% forecasts score 0.25.
-                Ties are excluded. The editable, browser-local sample does not establish a
-                predictive edge or calibrated probabilities.
+                Directional accuracy excludes neutral calls, ties, and no-call windows. Brier score
+                measures mean squared probability error; lower is better and constant 50% forecasts
+                score 0.25. Ties and no-call windows are excluded. Call coverage reports how often
+                completed observation decisions issued a prediction, alongside accuracy so selective
+                calls cannot hide withheld windows. Ongoing observation and older immediate
+                forecasts are excluded from coverage. The editable, browser-local sample does not
+                establish a predictive edge or calibrated probabilities.
               </p>
               <p className="mb-0">
                 History retains up to 100 forecasts and does not sync between tabs or devices.

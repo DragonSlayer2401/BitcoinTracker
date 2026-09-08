@@ -13,7 +13,9 @@ import Methodology from './components/Methodology';
 import useClock from './hooks/useClock';
 import useForecastJournal from './hooks/useForecastJournal';
 import useScheduledForecast from './hooks/useScheduledForecast';
+import useFixedPrediction from './hooks/useFixedPrediction';
 import { getForecast } from './utils/forecast.utils';
+import { getFixedForecastAnalysis } from './utils/fixedPrediction.utils';
 import { formatPercent, formatPrice, formatTime } from './utils/format.utils';
 import {
   forecastRecorded,
@@ -108,6 +110,13 @@ export default function BitcoinTracker() {
       reason: 'The market feed could not be refreshed. Retrying automatically.',
     };
   }, [candles, ticker, target, now, hasRequestError, horizonMinutes]);
+  const fixedProgress = useFixedPrediction({
+    forecast: isJournalReady ? activeForecast : null,
+    candles,
+    ticker,
+    now,
+    hasRequestError,
+  });
 
   useEffect(() => {
     if (isJournalReady && !hasEditedTarget && (savedTarget !== undefined || ticker)) {
@@ -174,16 +183,18 @@ export default function BitcoinTracker() {
     dispatch(
       forecastRecorded({
         id: crypto.randomUUID(),
-        ...(isEndTime ? { startsAt, timingMode: 'end' } : {}),
+        startsAt: isEndTime ? startsAt : createdAt,
+        timingMode: 'end',
         createdAt,
         expiresAt,
         price: ticker.price,
         target,
-        aboveProbability: current.aboveProbability,
-        belowProbability: current.belowProbability,
-        direction: current.direction,
+        aboveProbability: null,
+        belowProbability: null,
+        direction: 'neutral',
         modelVersion: current.modelVersion,
-        status: 'pending',
+        status: 'analyzing',
+        analysis: getFixedForecastAnalysis({ startedAt: createdAt, expiresAt }),
       }),
     );
     setIsPreparingForecast(false);
@@ -231,7 +242,10 @@ export default function BitcoinTracker() {
             >
               <span>
                 Market data is temporarily unavailable. Estimates are paused while we reconnect.
-                {recordedForecast && ' The fixed prediction is retained.'}
+                {recordedForecast &&
+                  (['analyzing', 'withheld'].includes(recordedForecast.status)
+                    ? ' The saved target and end time are retained.'
+                    : ' The fixed prediction is retained.')}
               </span>
               <Button
                 variant="outline-secondary"
@@ -295,6 +309,7 @@ export default function BitcoinTracker() {
               onTargetChange={changeTarget}
               ticker={isQuoteFresh && !quoteQuery.isError ? ticker : null}
               forecast={forecast}
+              fixedProgress={fixedProgress}
               forecastDeadline={forecastDeadline}
               timingSelection={timingSelection}
               onTimingChange={setTimingSelection}

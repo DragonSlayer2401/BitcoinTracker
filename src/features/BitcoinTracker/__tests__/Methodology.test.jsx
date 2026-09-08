@@ -8,7 +8,7 @@ describe('Model and data rules panel', () => {
     render(<Methodology />);
     const panel = within(screen.getByRole('region', { name: 'Model and data rules' }));
 
-    expect(panel.getByText(/Unvalidated volatility model/)).toBeInTheDocument();
+    expect(panel.getByText(/Signals and probabilities are unvalidated/)).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Probability model' })).not.toBeInTheDocument();
     await user.click(panel.getByRole('button', { name: 'View model rules' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Model and data rules' }));
@@ -21,8 +21,10 @@ describe('Model and data rules panel', () => {
     expect(dialog.getByRole('heading', { name: 'Journal metrics' })).toBeInTheDocument();
     expect(dialog.getByText(/deadline is exactly 15 minutes after that start/)).toBeInTheDocument();
     expect(
-      dialog.getByText(/main prediction keeps its original probabilities/),
+      dialog.getByText(/fixed prediction keeps its original probabilities/),
     ).toBeInTheDocument();
+    expect(dialog.getByRole('heading', { name: 'Fixed prediction observation' })).toBeVisible();
+    expect(dialog.getByText(/not a measured 65% accuracy rate/)).toBeVisible();
     expect(dialog.getByText(/probabilities wait for capture/)).toBeInTheDocument();
     expect(dialog.getByRole('link', { name: 'Coinbase Exchange ticker' })).toHaveAttribute(
       'href',

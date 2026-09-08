@@ -1,5 +1,7 @@
+import { getFixedForecastAnalysis, getQualifyingDirection } from './fixedPrediction.utils';
+
 const journalKey = 'bitcoin-tracker:journal:v1';
-const journalVersion = 2;
+const journalVersion = 3;
 const forecastDuration = 15 * 60 * 1000;
 const observationWindow = 15 * 1000;
 const scheduleStartGrace = 15 * 1000;
@@ -20,6 +22,13 @@ const snapshotFields = [
 ];
 const resultFields = ['observedPrice', 'observedAt', 'outcome', 'correct'];
 const scheduleFields = ['id', 'createdAt', 'startsAt', 'expiresAt', 'target', 'status'];
+const analysisFields = ['startedAt', 'earliestAt', 'deadline', 'policyVersion'];
+const withholdingReasons = [
+  'insufficient-time',
+  'no-consensus',
+  'market-data-unavailable',
+  'model-unavailable',
+];
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -35,10 +44,14 @@ export function getValidatedForecast(value) {
 
   const hasStartsAt = Object.prototype.hasOwnProperty.call(value, 'startsAt');
   const hasTimingMode = Object.prototype.hasOwnProperty.call(value, 'timingMode');
+  const hasAnalysis = Object.prototype.hasOwnProperty.call(value, 'analysis');
   const isEndTimeCapture = hasTimingMode && value.timingMode === 'end';
+  const hasNoFixedPrediction = ['analyzing', 'withheld'].includes(value.status);
   const fields = [...snapshotFields];
   if (hasStartsAt) fields.push('startsAt');
   if (hasTimingMode) fields.push('timingMode');
+  if (hasAnalysis) fields.push('analysis');
+  if (value.status === 'withheld') fields.push('withholdingReason');
   if (value.status === 'resolved') fields.push(...resultFields);
   const startsAt = hasStartsAt ? value.startsAt : value.createdAt;
   if (
@@ -57,11 +70,56 @@ export function getValidatedForecast(value) {
     value.expiresAt - startsAt !== forecastDuration ||
     !isPositiveNumber(value.price) ||
     !isPositiveNumber(value.target) ||
-    !isProbability(value.aboveProbability) ||
-    !isProbability(value.belowProbability) ||
-    Math.abs(value.aboveProbability + value.belowProbability - 1) > 0.000001 ||
+    (hasNoFixedPrediction
+      ? value.aboveProbability !== null ||
+        value.belowProbability !== null ||
+        value.direction !== 'neutral' ||
+        !hasAnalysis
+      : !isProbability(value.aboveProbability) ||
+        !isProbability(value.belowProbability) ||
+        Math.abs(value.aboveProbability + value.belowProbability - 1) > 0.000001) ||
     !['above', 'below', 'neutral'].includes(value.direction) ||
-    !['pending', 'resolved', 'unobserved'].includes(value.status)
+    !['analyzing', 'pending', 'resolved', 'unobserved', 'withheld'].includes(value.status)
+  ) {
+    return null;
+  }
+
+  if (hasAnalysis) {
+    const analysis = value.analysis;
+    if (
+      !isEndTimeCapture ||
+      !isRecord(analysis) ||
+      Object.keys(analysis).length !== analysisFields.length ||
+      !analysisFields.every((field) => Object.prototype.hasOwnProperty.call(analysis, field)) ||
+      !isTimestamp(analysis.startedAt) ||
+      !isTimestamp(analysis.earliestAt) ||
+      !isTimestamp(analysis.deadline) ||
+      analysis.startedAt < startsAt ||
+      analysis.startedAt >= value.expiresAt
+    ) {
+      return null;
+    }
+    const expectedAnalysis = getFixedForecastAnalysis({
+      startedAt: analysis.startedAt,
+      expiresAt: value.expiresAt,
+    });
+    if (
+      !analysisFields.every((field) => analysis[field] === expectedAnalysis[field]) ||
+      (hasNoFixedPrediction
+        ? value.createdAt !== analysis.startedAt
+        : value.createdAt < analysis.earliestAt ||
+          value.createdAt > analysis.deadline ||
+          value.direction !== getQualifyingDirection({ ...value, available: true }))
+    ) {
+      return null;
+    }
+  }
+
+  if (
+    value.status === 'withheld' &&
+    (!withholdingReasons.includes(value.withholdingReason) ||
+      (value.withholdingReason === 'insufficient-time') !==
+        value.analysis.earliestAt > value.analysis.deadline)
   ) {
     return null;
   }
@@ -88,7 +146,14 @@ export function getValidatedForecast(value) {
     if (value.outcome !== outcome || value.correct !== correct) return null;
   }
 
-  return Object.fromEntries(fields.map((field) => [field, value[field]]));
+  return Object.fromEntries(
+    fields.map((field) => [
+      field,
+      field === 'analysis'
+        ? Object.fromEntries(analysisFields.map((key) => [key, value.analysis[key]]))
+        : value[field],
+    ]),
+  );
 }
 
 export function getValidatedJournal(value) {
@@ -98,7 +163,7 @@ export function getValidatedJournal(value) {
   if (
     forecasts.some((forecast) => forecast === null) ||
     new Set(forecasts.map((forecast) => forecast.id)).size !== forecasts.length ||
-    forecasts.filter((forecast) => forecast.status === 'pending').length > 1
+    forecasts.filter((forecast) => ['analyzing', 'pending'].includes(forecast.status)).length > 1
   ) {
     return null;
   }
@@ -145,7 +210,9 @@ export function getValidatedJournalState(value) {
     (value.scheduledForecast !== null && scheduledForecast === null) ||
     (scheduledForecast !== null &&
       forecasts.some(
-        (forecast) => forecast.status === 'pending' || forecast.id === scheduledForecast.id,
+        (forecast) =>
+          ['analyzing', 'pending'].includes(forecast.status) ||
+          forecast.id === scheduledForecast.id,
       ))
   ) {
     return null;
@@ -173,7 +240,7 @@ export function loadJournal(storage) {
     const parsedJournal = JSON.parse(savedJournal);
     if (
       !isRecord(parsedJournal) ||
-      ![1, journalVersion].includes(parsedJournal.version) ||
+      ![1, 2, journalVersion].includes(parsedJournal.version) ||
       Object.keys(parsedJournal).length !== (parsedJournal.version === 1 ? 2 : 3)
     ) {
       throw new Error('Invalid journal version.');
@@ -183,6 +250,14 @@ export function loadJournal(storage) {
       scheduledForecast: parsedJournal.version === 1 ? null : parsedJournal.scheduledForecast,
     });
     if (journal === null) throw new Error('Invalid forecast history.');
+    if (
+      parsedJournal.version < journalVersion &&
+      journal.forecasts.some((forecast) =>
+        Object.prototype.hasOwnProperty.call(forecast, 'analysis'),
+      )
+    ) {
+      throw new Error('Analysis requires the current journal version.');
+    }
     return { ...journal, warning: null };
   } catch {
     return {

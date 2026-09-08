@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { selectScheduledForecast } from '../state/selectors/trackerSelectors';
 import { scheduledForecastStarted, scheduleStartMissed } from '../state/slices/trackerSlice';
 import { getForecast } from '../utils/forecast.utils';
+import { getFixedForecastAnalysis } from '../utils/fixedPrediction.utils';
 
 export default function useScheduledForecast({
   ticker,
@@ -57,14 +58,19 @@ export default function useScheduledForecast({
           id: schedule.id,
           createdAt: capturedAt,
           startsAt: schedule.startsAt,
+          timingMode: 'end',
           expiresAt: schedule.expiresAt,
           price: ticker.price,
           target: schedule.target,
-          aboveProbability: estimate.aboveProbability,
-          belowProbability: estimate.belowProbability,
-          direction: estimate.direction,
+          aboveProbability: null,
+          belowProbability: null,
+          direction: 'neutral',
           modelVersion: estimate.modelVersion,
-          status: 'pending',
+          status: 'analyzing',
+          analysis: getFixedForecastAnalysis({
+            startedAt: capturedAt,
+            expiresAt: schedule.expiresAt,
+          }),
         },
       }),
     );

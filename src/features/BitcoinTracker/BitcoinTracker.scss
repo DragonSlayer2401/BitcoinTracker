@@ -523,6 +523,16 @@
     }
   }
 
+  .fixed-prediction-status {
+    .result-heading {
+      font-size: 20px;
+      letter-spacing: -0.3px;
+    }
+    .fixed-progress {
+      font-size: 11px;
+    }
+  }
+
   .forecast-action {
     padding-top: 4px;
   }
@@ -750,6 +760,19 @@
     }
     .market-data-grid {
       row-gap: 8px;
+    }
+    .journal-summary {
+      padding-bottom: 4px;
+    }
+    .journal-preview-table {
+      thead th {
+        padding-bottom: 4px;
+      }
+      tbody td,
+      tbody th {
+        padding-top: 5px;
+        padding-bottom: 5px;
+      }
     }
     .estimate-panel {
       .forecast-status {

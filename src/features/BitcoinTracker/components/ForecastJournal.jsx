@@ -38,13 +38,21 @@ function ForecastTable({ forecasts, now, compact = false }) {
             </th>
             <td>
               <span className={`direction-label ${entry.direction}`}>
-                {entry.direction === 'neutral' ? 'Too close to call' : `Likely ${entry.direction}`}
+                {entry.status === 'analyzing'
+                  ? 'Observing'
+                  : entry.status === 'withheld'
+                    ? 'No clear signal'
+                    : entry.direction === 'neutral'
+                      ? 'Too close to call'
+                      : `Likely ${entry.direction}`}
               </span>
             </td>
             {!compact && (
               <>
                 <td className="tabular">
-                  {formatPercent(entry.aboveProbability)} / {formatPercent(entry.belowProbability)}
+                  {['analyzing', 'withheld'].includes(entry.status)
+                    ? 'Not issued'
+                    : `${formatPercent(entry.aboveProbability)} / ${formatPercent(entry.belowProbability)}`}
                 </td>
                 <td className="tabular">
                   {formatPrice(entry.observedPrice)}
@@ -57,7 +65,11 @@ function ForecastTable({ forecasts, now, compact = false }) {
               </>
             )}
             <td>
-              {entry.status === 'pending' ? (
+              {entry.status === 'analyzing' ? (
+                <span className="result-chip">Observing</span>
+              ) : entry.status === 'withheld' ? (
+                <span className="result-chip">No call · unscored</span>
+              ) : entry.status === 'pending' ? (
                 <span className="result-chip">
                   <Icon name="clock" size={13} />{' '}
                   {formatCountdown(entry.expiresAt - Math.max(now, entry.createdAt))}
@@ -85,7 +97,7 @@ function ForecastTable({ forecasts, now, compact = false }) {
   );
 }
 
-function JournalSummary({ summary }) {
+function JournalSummary({ summary, compact = false }) {
   return (
     <div className="journal-summary d-flex gap-3 flex-wrap small text-secondary">
       <span>
@@ -94,12 +106,31 @@ function JournalSummary({ summary }) {
       <span>
         Observed accuracy: <strong className="text-body">{formatPercent(summary.accuracy)}</strong>
       </span>
+      {!compact && (
+        <span>
+          Brier:{' '}
+          <strong className="text-body">
+            {Number.isFinite(summary.brierScore) ? summary.brierScore.toFixed(3) : '—'}
+          </strong>
+        </span>
+      )}
       <span>
-        Brier:{' '}
-        <strong className="text-body">
-          {summary.brierScore === null ? '—' : summary.brierScore.toFixed(3)}
-        </strong>
+        No calls: <strong className="text-body">{summary.withheldCount ?? 0}</strong>
       </span>
+      <span>
+        Call coverage: <strong className="text-body">{formatPercent(summary.coverage)}</strong>
+      </span>
+      {!compact && (
+        <>
+          <span>
+            Observing: <strong className="text-body">{summary.analysisCount ?? 0}</strong>
+          </span>
+          <span>
+            Issued after observation:{' '}
+            <strong className="text-body">{summary.callCount ?? 0}</strong>
+          </span>
+        </>
+      )}
     </div>
   );
 }
@@ -119,7 +150,9 @@ export default function ForecastJournal({ forecasts, summary, now, onClear }) {
   const [showHistory, setShowHistory] = useState(false);
   const [showClear, setShowClear] = useState(false);
   const historyButton = useRef(null);
-  const hasCompletedForecasts = forecasts.some((entry) => entry.status !== 'pending');
+  const hasCompletedForecasts = forecasts.some(
+    (entry) => !['analyzing', 'pending'].includes(entry.status),
+  );
 
   return (
     <section id="journal" className="journal-section" aria-labelledby="journal-heading">
@@ -139,7 +172,7 @@ export default function ForecastJournal({ forecasts, summary, now, onClear }) {
           View history
         </Button>
       </div>
-      <JournalSummary summary={summary} />
+      <JournalSummary summary={summary} compact />
       {forecasts.length ? (
         <ForecastTable forecasts={forecasts.slice(0, 1)} now={now} compact />
       ) : (
@@ -174,8 +207,10 @@ export default function ForecastJournal({ forecasts, summary, now, onClear }) {
           </div>
           <p className="small text-secondary mt-2 mb-0">
             Brier score is probability error; lower is better. Personal, overlapping observations
-            are not an independent validation set. Ties and neutral calls are excluded from
-            directional accuracy.
+            are not an independent validation set. Ties, neutral calls, and no-call windows are
+            excluded from directional accuracy. No-call windows have no probability error score.
+            Call coverage is the fraction of completed observation decisions that issued a fixed
+            prediction; ongoing observation and older immediate forecasts are excluded.
           </p>
         </Modal.Body>
         <Modal.Footer>
@@ -200,8 +235,8 @@ export default function ForecastJournal({ forecasts, summary, now, onClear }) {
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
-          This removes completed and unobserved entries from this browser. Your active forecast will
-          stay in place.
+          This removes completed, unobserved, and no-call entries from this browser. Active
+          observation and pending forecasts stay in place.
         </Modal.Body>
         <Modal.Footer>
           <Button variant="outline-secondary" onClick={() => setShowClear(false)}>

@@ -106,6 +106,37 @@ describe('BitcoinTracker interactions', () => {
   let quoteQuery;
   let candleQuery;
 
+  function advanceWithFreshMarket(rerenderTracker, duration, price = 50_000) {
+    for (let elapsed = 0; elapsed < duration; elapsed += 5000) {
+      act(() => jest.advanceTimersByTime(Math.min(5000, duration - elapsed)));
+      market = createMarket(Date.now(), price);
+      quoteQuery = createQuery(market.ticker);
+      candleQuery = createQuery(market.candles);
+      rerenderTracker();
+    }
+  }
+
+  function saveLegacyPrediction() {
+    const estimate = getForecast({ ...market, target: 49_750, now: NOW });
+    const snapshot = {
+      id: 'recorded-forecast-1',
+      createdAt: NOW,
+      expiresAt: NOW + 15 * MINUTE,
+      price: market.ticker.price,
+      target: 49_750,
+      aboveProbability: estimate.aboveProbability,
+      belowProbability: estimate.belowProbability,
+      direction: estimate.direction,
+      modelVersion: estimate.modelVersion,
+      status: 'pending',
+    };
+    window.localStorage.setItem(
+      'bitcoin-tracker:journal:v1',
+      JSON.stringify({ version: 2, forecasts: [snapshot], scheduledForecast: null }),
+    );
+    return snapshot;
+  }
+
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(NOW);
@@ -199,7 +230,7 @@ describe('BitcoinTracker interactions', () => {
     expect(store.getState().tracker.forecasts).toEqual([]);
   });
 
-  test('starts both countdown displays at fifteen minutes when recording between clock ticks', async () => {
+  test('starts the deadline countdown and observation period when starting between clock ticks', async () => {
     const { store } = renderTracker();
     const capturedAt = NOW + 750;
     jest.setSystemTime(capturedAt);
@@ -209,15 +240,20 @@ describe('BitcoinTracker interactions', () => {
     const [snapshot] = store.getState().tracker.forecasts;
     expect(snapshot.createdAt).toBe(capturedAt);
     expect(snapshot.expiresAt).toBe(capturedAt + 15 * MINUTE);
+    expect(snapshot.status).toBe('analyzing');
+    expect(snapshot.aboveProbability).toBeNull();
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^15:00$/);
-    const journal = within(screen.getByRole('region', { name: 'Forecast history' }));
-    expect(journal.getByText('15:00')).toBeInTheDocument();
+    expect(
+      screen.getByRole('timer', { name: 'Time until fixed prediction check' }),
+    ).toHaveTextContent(/^03:00$/);
     expect(screen.queryByText('15:01')).not.toBeInTheDocument();
 
     act(() => jest.advanceTimersByTime(1000));
 
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:59$/);
-    expect(journal.getByText('14:59')).toBeInTheDocument();
+    expect(
+      screen.getByRole('timer', { name: 'Time until fixed prediction check' }),
+    ).toHaveTextContent(/^02:59$/);
     expect(store.getState().tracker.forecasts).toEqual([snapshot]);
   });
 
@@ -309,16 +345,18 @@ describe('BitcoinTracker interactions', () => {
   });
 
   test('allows target edits for the live estimate while preserving the recorded prediction and deadline', async () => {
-    const { store } = renderTracker();
+    const { store, rerenderTracker } = renderTracker();
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE);
 
     const [snapshot] = store.getState().tracker.forecasts;
     expect(snapshot).toMatchObject({
       id: 'recorded-forecast-1',
-      createdAt: NOW,
+      createdAt: NOW + 3 * MINUTE,
+      startsAt: NOW,
       expiresAt: NOW + 15 * MINUTE,
       price: 50_000,
       target: 49_750,
@@ -358,16 +396,93 @@ describe('BitcoinTracker interactions', () => {
     expect(saved.forecasts).toEqual([snapshot]);
   });
 
+  test('observes the saved target while live edits change independently and publishes only after three minutes', async () => {
+    const { store, rerenderTracker } = renderTracker();
+    const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
+    fireEvent.change(targetInput, { target: { value: '49750' } });
+    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    const fixedPanel = within(screen.getByRole('region', { name: 'Fixed prediction' }));
+
+    expect(fixedPanel.getByRole('heading', { name: 'Observing market' })).toBeInTheDocument();
+    expect(fixedPanel.queryByRole('img')).not.toBeInTheDocument();
+    fireEvent.change(targetInput, { target: { value: '50250' } });
+    expect(
+      within(screen.getByRole('region', { name: 'Live estimate' })).getByRole('heading', {
+        name: 'Likely below',
+      }),
+    ).toBeInTheDocument();
+    expect(fixedPanel.getByText('Saved target $49,750.00')).toBeInTheDocument();
+
+    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE - 5000);
+
+    expect(store.getState().tracker.forecasts[0]).toMatchObject({
+      status: 'analyzing',
+      target: 49_750,
+      aboveProbability: null,
+    });
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^12:05$/);
+    advanceWithFreshMarket(rerenderTracker, 5000);
+
+    const [snapshot] = store.getState().tracker.forecasts;
+    expect(snapshot).toMatchObject({
+      status: 'pending',
+      target: 49_750,
+      createdAt: NOW + 3 * MINUTE,
+      expiresAt: NOW + 15 * MINUTE,
+      direction: 'above',
+    });
+    expect(snapshot.aboveProbability).toBeGreaterThanOrEqual(0.65);
+    expectFixedPrediction(snapshot);
+    expect(targetInput).toHaveValue(50_250);
+    expect(
+      within(screen.getByRole('region', { name: 'Live estimate' })).getByRole('heading', {
+        name: 'Likely below',
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^12:00$/);
+  });
+
+  test('withholds an inconclusive fixed call after five minutes and records its coverage without scoring it', async () => {
+    const { store, rerenderTracker } = renderTracker();
+    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    advanceWithFreshMarket(rerenderTracker, 5 * MINUTE);
+
+    const [snapshot] = store.getState().tracker.forecasts;
+    expect(snapshot).toMatchObject({
+      status: 'withheld',
+      withholdingReason: 'no-consensus',
+      aboveProbability: null,
+      belowProbability: null,
+      expiresAt: NOW + 15 * MINUTE,
+    });
+    const fixedPanel = within(screen.getByRole('region', { name: 'Fixed prediction' }));
+    expect(fixedPanel.getByRole('heading', { name: 'No clear signal' })).toBeInTheDocument();
+    expect(fixedPanel.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^10:00$/);
+    const journal = within(screen.getByRole('region', { name: 'Forecast history' }));
+    expect(journal.getByText('No call · unscored')).toBeInTheDocument();
+    expect(journal.getByText('No calls:')).toHaveTextContent('No calls: 1');
+    expect(journal.getByText('Scored:')).toHaveTextContent('Scored: 0');
+    expect(journal.getByText('Call coverage:')).toHaveTextContent('Call coverage: 0.0%');
+
+    await user.click(screen.getByRole('button', { name: 'New forecast' }));
+
+    expect(screen.queryByRole('region', { name: 'Fixed prediction' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
+    expect(store.getState().tracker.forecasts).toEqual([snapshot]);
+  });
+
   test('restores a persisted active forecast into a new store and prevents a second recording', async () => {
     const firstView = renderTracker();
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    advanceWithFreshMarket(firstView.rerenderTracker, 3 * MINUTE);
     const recordedForecasts = firstView.store.getState().tracker.forecasts;
     firstView.unmount();
 
-    jest.setSystemTime(NOW + MINUTE);
+    jest.setSystemTime(NOW + 4 * MINUTE);
     market = createMarket(Date.now(), 49_000);
     quoteQuery = createQuery(market.ticker);
     candleQuery = createQuery(market.candles);
@@ -386,7 +501,7 @@ describe('BitcoinTracker interactions', () => {
     ).toBeInTheDocument();
     const journal = within(screen.getByRole('region', { name: 'Forecast history' }));
     expect(journal.getByRole('rowheader')).toHaveTextContent('$49,750.00');
-    expect(journal.getByText('14:00')).toBeInTheDocument();
+    expect(journal.getByText('11:00')).toBeInTheDocument();
   });
 
   test('keeps the original call while separately updating the live estimate for the same target and end', async () => {
@@ -395,6 +510,7 @@ describe('BitcoinTracker interactions', () => {
       target: { value: '49750' },
     });
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE);
     const [snapshot] = store.getState().tracker.forecasts;
     expectFixedPrediction(snapshot);
 
@@ -408,7 +524,7 @@ describe('BitcoinTracker interactions', () => {
       ...market,
       target: snapshot.target,
       now: Date.now(),
-      horizonMinutes: 14,
+      horizonMinutes: 11,
     });
     expect(liveEstimate.direction).toBe('below');
     expect(liveEstimate.aboveProbability).not.toBe(snapshot.aboveProbability);
@@ -420,19 +536,15 @@ describe('BitcoinTracker interactions', () => {
         name: `Above target ${formatPercent(liveEstimate.aboveProbability)}, below target ${formatPercent(liveEstimate.belowProbability)}`,
       }),
     ).toBeInTheDocument();
-    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:00$/);
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^11:00$/);
     expect(store.getState().tracker.forecasts).toEqual([snapshot]);
   });
 
   test.each(['quote', 'candles'])(
-    'retains the fixed prediction while a failed %s request pauses only the live estimate',
+    'retains a legacy fixed prediction while a failed %s request pauses only the live estimate',
     async (failedQuery) => {
+      const snapshot = saveLegacyPrediction();
       const { store, rerenderTracker } = renderTracker();
-      fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
-        target: { value: '49750' },
-      });
-      await user.click(screen.getByRole('button', { name: 'Start forecast' }));
-      const [snapshot] = store.getState().tracker.forecasts;
 
       if (failedQuery === 'quote') quoteQuery = { ...quoteQuery, isError: true };
       else candleQuery = { ...candleQuery, isError: true };
@@ -449,13 +561,9 @@ describe('BitcoinTracker interactions', () => {
     },
   );
 
-  test('preserves the original prediction through stale data, its deadline, and an unobserved result', async () => {
+  test('preserves a legacy prediction through stale data, its deadline, and an unobserved result', async () => {
+    const snapshot = saveLegacyPrediction();
     const { store, rerenderTracker } = renderTracker();
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
-      target: { value: '49750' },
-    });
-    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
-    const [snapshot] = store.getState().tracker.forecasts;
 
     act(() => jest.advanceTimersByTime(21_000));
 
@@ -510,8 +618,9 @@ describe('BitcoinTracker interactions', () => {
       target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
     });
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE);
     const [snapshot] = store.getState().tracker.forecasts;
-    act(() => jest.advanceTimersByTime(12 * MINUTE));
+    act(() => jest.advanceTimersByTime(9 * MINUTE));
     market = createMarket(Date.now(), 49_000);
     quoteQuery = createQuery({ ...market.ticker, time: Date.now() });
     candleQuery = createQuery(market.candles);
@@ -631,8 +740,8 @@ describe('BitcoinTracker interactions', () => {
     expect(store.getState().tracker.forecasts).toEqual([]);
   });
 
-  test('joins a selected end twelve minutes away immediately with the remaining model horizon', async () => {
-    const { store } = renderTracker();
+  test('joins a twelve-minute remaining window and publishes after observation without extending its end', async () => {
+    const { store, rerenderTracker } = renderTracker();
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
       target: { value: '49750' },
     });
@@ -640,7 +749,6 @@ describe('BitcoinTracker interactions', () => {
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
     });
-    const expected = getForecast({ ...market, target: 49_750, now: NOW, horizonMinutes: 12 });
 
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^12:00$/);
     expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
@@ -655,17 +763,32 @@ describe('BitcoinTracker interactions', () => {
       expiresAt: NOW + 12 * MINUTE,
       timingMode: 'end',
       target: 49_750,
-      aboveProbability: expected.aboveProbability,
-      belowProbability: expected.belowProbability,
-      status: 'pending',
+      aboveProbability: null,
+      belowProbability: null,
+      status: 'analyzing',
     });
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^12:00$/);
     expect(screen.queryByRole('timer', { name: 'Time until start' })).not.toBeInTheDocument();
     const timing = within(screen.getByRole('region', { name: 'Forecast timing' }));
     expect(timing.getByText(formatDateTime(NOW + 12 * MINUTE))).toBeInTheDocument();
+
+    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE);
+
+    const expected = getForecast({ ...market, target: 49_750, now: Date.now(), horizonMinutes: 9 });
+    const [snapshot] = store.getState().tracker.forecasts;
+    expect(snapshot).toMatchObject({
+      createdAt: NOW + 3 * MINUTE,
+      startsAt: NOW - 3 * MINUTE,
+      expiresAt: NOW + 12 * MINUTE,
+      aboveProbability: expected.aboveProbability,
+      belowProbability: expected.belowProbability,
+      status: 'pending',
+    });
+    expectFixedPrediction(snapshot);
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^09:00$/);
   });
 
-  test('updates an end-time preview as time passes and captures only the time still remaining', async () => {
+  test('updates an end-time preview as time passes and starts observation with only the time remaining', async () => {
     const { store, rerenderTracker } = renderTracker();
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
       target: { value: '49750' },
@@ -712,12 +835,14 @@ describe('BitcoinTracker interactions', () => {
       startsAt: NOW - 3 * MINUTE,
       expiresAt: NOW + 12 * MINUTE,
       timingMode: 'end',
-      aboveProbability: updatedEstimate.aboveProbability,
+      aboveProbability: null,
+      status: 'analyzing',
+      analysis: { startedAt: NOW + MINUTE, earliestAt: NOW + 4 * MINUTE },
     });
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^11:00$/);
   });
 
-  test('restores a joined end-time forecast without adding time to its deadline', async () => {
+  test('restores a joined observation without adding time to its decision or end deadline', async () => {
     const firstView = renderTracker();
     await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
@@ -739,9 +864,14 @@ describe('BitcoinTracker interactions', () => {
       startsAt: NOW - 3 * MINUTE,
       expiresAt: NOW + 12 * MINUTE,
       timingMode: 'end',
+      status: 'analyzing',
+      analysis: { startedAt: NOW, earliestAt: NOW + 3 * MINUTE, deadline: NOW + 5 * MINUTE },
     });
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^11:00$/);
-    expect(screen.getByRole('button', { name: 'Forecast in progress' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Observing market' })).toBeDisabled();
+    expect(
+      within(screen.getByRole('region', { name: 'Fixed prediction' })).queryByRole('img'),
+    ).not.toBeInTheDocument();
   });
 
   test('blocks joining an end-time window during an outage but allows a future window to be saved', async () => {
@@ -977,7 +1107,7 @@ describe('BitcoinTracker interactions', () => {
     expect(store.getState().tracker.forecasts).toEqual([]);
   });
 
-  test('captures new data after the chosen start using the saved target and original deadline', async () => {
+  test('starts observation after the chosen start and publishes against the saved target and deadline', async () => {
     const { store, rerenderTracker } = renderTracker();
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
@@ -1005,27 +1135,39 @@ describe('BitcoinTracker interactions', () => {
     candleQuery = createQuery(market.candles);
     rerenderTracker();
 
-    const [snapshot] = store.getState().tracker.forecasts;
-    expect(snapshot).toMatchObject({
+    expect(store.getState().tracker.forecasts[0]).toMatchObject({
       id: 'recorded-forecast-1',
       startsAt: NOW + MINUTE,
       createdAt: NOW + MINUTE + 5000,
       expiresAt: NOW + 16 * MINUTE,
       target: 49_750,
       price: 49_700,
-      direction: 'below',
-      status: 'pending',
+      direction: 'neutral',
+      status: 'analyzing',
+      aboveProbability: null,
+      belowProbability: null,
     });
-    expect(snapshot.aboveProbability).toBeGreaterThan(0.3);
-    expect(snapshot.aboveProbability).toBeLessThan(0.5);
     expect(store.getState().tracker.scheduledForecast).toBeNull();
     expect(targetInput).toHaveValue(50_250);
-    expectFixedPrediction(snapshot);
     const timing = within(screen.getByRole('region', { name: 'Forecast timing' }));
     expect(timing.getByText('Countdown running')).toBeInTheDocument();
     expect(timing.getByText('$49,750.00')).toBeInTheDocument();
     expect(timing.getByText(formatDateTime(NOW + 16 * MINUTE))).toBeInTheDocument();
     expect(timing.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent('14:55');
+
+    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE, 49_500);
+
+    const [snapshot] = store.getState().tracker.forecasts;
+    expect(snapshot).toMatchObject({
+      createdAt: NOW + 4 * MINUTE + 5000,
+      startsAt: NOW + MINUTE,
+      expiresAt: NOW + 16 * MINUTE,
+      target: 49_750,
+      direction: 'below',
+      status: 'pending',
+    });
+    expectFixedPrediction(snapshot);
+    expect(timing.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent('11:55');
     const journal = within(screen.getByRole('region', { name: 'Forecast history' }));
     expect(journal.getByRole('rowheader')).toHaveTextContent('$49,750.00');
     expect(journal.getByText('Likely below')).toBeInTheDocument();

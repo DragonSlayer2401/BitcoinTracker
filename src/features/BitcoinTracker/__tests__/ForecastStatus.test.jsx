@@ -26,6 +26,41 @@ const makeSchedule = (overrides = {}) => ({
 });
 
 describe('forecast countdown display', () => {
+  test('counts observation against the original end without showing unissued probabilities', () => {
+    const analyzing = makeForecast({
+      status: 'analyzing',
+      aboveProbability: null,
+      belowProbability: null,
+    });
+    render(<ForecastStatus activeForecast={analyzing} now={NOW + 2 * 60_000} />);
+
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^13:00$/);
+    expect(
+      screen.getByText('Observing fresh data before issuing a fixed prediction.'),
+    ).toBeVisible();
+    expect(screen.queryByText('Recorded forecast details')).not.toBeInTheDocument();
+    expect(screen.queryByText('Result unobserved')).not.toBeInTheDocument();
+  });
+
+  test('keeps a withheld window deadline visible and labels it as a no-call decision', () => {
+    const withheld = makeForecast({ status: 'withheld', withholdingReason: 'no-consensus' });
+    const { rerender } = render(
+      <ForecastStatus completedForecast={withheld} now={NOW + 5 * 60_000} />,
+    );
+    expect(screen.getByRole('heading', { name: 'No fixed call' })).toBeVisible();
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^10:00$/);
+    expect(screen.getByText('Until original end')).toBeVisible();
+    expect(screen.getByText('No prediction was issued for this window.')).toBeVisible();
+    expect(screen.queryByText('Result unobserved')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('No eligible price was observed at the deadline.'),
+    ).not.toBeInTheDocument();
+
+    rerender(<ForecastStatus completedForecast={withheld} now={NOW + DURATION + 1000} />);
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^00:00$/);
+    expect(screen.getByText('Window complete')).toBeVisible();
+  });
+
   test('shows the full 15-minute countdown before a forecast is configured', () => {
     render(<ForecastStatus activeForecast={null} schedule={null} now={NOW} />);
 

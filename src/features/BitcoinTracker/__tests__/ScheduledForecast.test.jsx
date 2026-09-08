@@ -3,7 +3,7 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import useScheduledForecast from '../hooks/useScheduledForecast';
 import trackerReducer, { scheduleCancelled, scheduleCreated } from '../state/slices/trackerSlice';
-import { getForecast } from '../utils/forecast.utils';
+import { getFixedForecastAnalysis } from '../utils/fixedPrediction.utils';
 
 const MINUTE = 60_000;
 const NOW = Date.UTC(2026, 8, 7, 12, 0, 15);
@@ -117,7 +117,9 @@ describe('scheduled forecast capture', () => {
       expiresAt: STARTS_AT + 15 * MINUTE,
       price: 50_000,
       target: view.schedule.target,
-      status: 'pending',
+      status: 'analyzing',
+      aboveProbability: null,
+      belowProbability: null,
     });
     view.update({ ...createMarket(STARTS_AT + 2000), now: STARTS_AT + 2000 });
     expect(view.store.getState().tracker.forecasts).toEqual([forecast]);
@@ -184,37 +186,29 @@ describe('scheduled forecast capture', () => {
   });
 
   test.each([12_000, 15_000])(
-    'captures %s milliseconds late with the remaining horizon and the original deadline',
+    'starts observation %s milliseconds late while retaining the original deadline',
     (delay) => {
       const view = renderScheduledForecast();
       const capturedAt = STARTS_AT + delay;
       const market = createMarket(capturedAt);
-      const expectedForecast = getForecast({
-        ...market,
-        target: view.schedule.target,
-        now: capturedAt,
-        horizonMinutes: (view.schedule.expiresAt - capturedAt) / MINUTE,
-      });
-      const fullForecast = getForecast({
-        ...market,
-        target: view.schedule.target,
-        now: capturedAt,
-      });
       view.update({ ...market, now: capturedAt });
 
       const [forecast] = view.store.getState().tracker.forecasts;
-      expect(expectedForecast.available).toBe(true);
       expect(forecast).toMatchObject({
         createdAt: capturedAt,
         startsAt: STARTS_AT,
         expiresAt: view.schedule.expiresAt,
-        aboveProbability: expectedForecast.aboveProbability,
-        belowProbability: expectedForecast.belowProbability,
-        direction: expectedForecast.direction,
+        aboveProbability: null,
+        belowProbability: null,
+        direction: 'neutral',
+        status: 'analyzing',
+        analysis: getFixedForecastAnalysis({
+          startedAt: capturedAt,
+          expiresAt: view.schedule.expiresAt,
+        }),
       });
       expect(forecast.expiresAt - forecast.startsAt).toBe(15 * MINUTE);
       expect(forecast.expiresAt - forecast.createdAt).toBe(15 * MINUTE - delay);
-      expect(forecast.aboveProbability).toBeLessThan(fullForecast.aboveProbability);
     },
   );
 

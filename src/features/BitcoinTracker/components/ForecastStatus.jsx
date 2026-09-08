@@ -12,6 +12,8 @@ export default function ForecastStatus({
 }) {
   const isIdle = !activeForecast && !completedForecast && !schedule;
   const isMissed = schedule?.status === 'missed';
+  const isAnalyzing = activeForecast?.status === 'analyzing';
+  const isWithheld = completedForecast?.status === 'withheld';
   const isStarting = schedule?.status === 'scheduled' && now >= schedule.startsAt;
   const isSettling = activeForecast && now >= activeForecast.expiresAt;
   const entry = activeForecast || completedForecast || schedule;
@@ -29,20 +31,22 @@ export default function ForecastStatus({
         : previewRemaining > 900_000
           ? 'Waiting for 15-minute window'
           : 'Until selected end';
-  const remaining = completedForecast
-    ? 0
-    : activeForecast || isStarting
-      ? Math.min(
-          900_000,
-          Math.max(
-            0,
-            entry.expiresAt -
-              (activeForecast ? Math.max(currentTime, activeForecast.createdAt) : currentTime),
-          ),
-        )
-      : hasEndPreview && previewRemaining !== null
-        ? Math.min(900_000, Math.max(0, previewRemaining))
-        : 900_000;
+  const remaining = isWithheld
+    ? Math.max(0, completedForecast.expiresAt - currentTime)
+    : completedForecast
+      ? 0
+      : activeForecast || isStarting
+        ? Math.min(
+            900_000,
+            Math.max(
+              0,
+              entry.expiresAt -
+                (activeForecast ? Math.max(currentTime, activeForecast.createdAt) : currentTime),
+            ),
+          )
+        : hasEndPreview && previewRemaining !== null
+          ? Math.min(900_000, Math.max(0, previewRemaining))
+          : 900_000;
   const phase = isIdle
     ? 'idle'
     : completedForecast
@@ -63,9 +67,11 @@ export default function ForecastStatus({
         {isIdle
           ? '15-minute countdown'
           : completedForecast
-            ? completedForecast.status === 'resolved'
-              ? 'Result observed'
-              : 'Result unobserved'
+            ? isWithheld
+              ? 'No fixed call'
+              : completedForecast.status === 'resolved'
+                ? 'Result observed'
+                : 'Result unobserved'
             : activeForecast
               ? isSettling
                 ? 'Observing result'
@@ -88,7 +94,9 @@ export default function ForecastStatus({
               ? previewCaption
               : 'Ready to start'
             : completedForecast
-              ? 'Window complete'
+              ? isWithheld && remaining > 0
+                ? 'Until original end'
+                : 'Window complete'
               : isMissed
                 ? 'Start not captured'
                 : isSettling
@@ -135,12 +143,14 @@ export default function ForecastStatus({
       )}
       {completedForecast && (
         <p className="small mt-2 mb-0" role="status">
-          {completedForecast.status === 'resolved'
-            ? `Observed ${completedForecast.outcome === 'equal' ? 'at' : completedForecast.outcome} target: ${formatPrice(completedForecast.observedPrice)}`
-            : 'No eligible price was observed at the deadline.'}
+          {isWithheld
+            ? 'No prediction was issued for this window.'
+            : completedForecast.status === 'resolved'
+              ? `Observed ${completedForecast.outcome === 'equal' ? 'at' : completedForecast.outcome} target: ${formatPrice(completedForecast.observedPrice)}`
+              : 'No eligible price was observed at the deadline.'}
         </p>
       )}
-      {activeForecast && showRecordedDetails && (
+      {activeForecast && !isAnalyzing && showRecordedDetails && (
         <details className="forecast-details small mt-2">
           <summary>Recorded forecast details</summary>
           <dl className="window-summary mt-2 mb-0">
@@ -161,7 +171,9 @@ export default function ForecastStatus({
       {!isIdle && !completedForecast && (!activeForecast || showRecordedDetails) && (
         <p className="small text-secondary mt-2 mb-0">
           {activeForecast
-            ? 'Recorded target, probabilities, and end time are fixed.'
+            ? isAnalyzing
+              ? 'Observing fresh data before issuing a fixed prediction.'
+              : 'Recorded target, probabilities, and end time are fixed.'
             : isMissed
               ? 'No valid start was captured within 15 seconds. Select a new start time.'
               : 'Keep this tab open for the start.'}
