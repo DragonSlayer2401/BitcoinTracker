@@ -1,14 +1,33 @@
-import { useId, useState } from 'react';
-import { Button, ButtonGroup } from 'react-bootstrap';
-import { formatCountdown, formatPrice } from '../utils/format.utils';
+'use client';
 
-const WIDTH = 800;
-const HEIGHT = 292;
-const LEFT = 12;
-const RIGHT = 656;
-const TOP = 25;
-const BOTTOM = 250;
-const minute = 60_000;
+import { useId, useMemo, useRef, useState } from 'react';
+import { Button, ButtonGroup } from 'react-bootstrap';
+import ReactEChartsCore from 'echarts-for-react/lib/core';
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import {
+  GridComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  TooltipComponent,
+} from 'echarts/components';
+import { SVGRenderer } from 'echarts/renderers';
+import { formatCountdown, formatDateTime, formatPrice } from '../utils/format.utils';
+import { getChartPoints, getPriceChartOption } from '../utils/priceChart.utils';
+import './PriceChart.scss';
+
+echarts.use([
+  LineChart,
+  GridComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  TooltipComponent,
+  SVGRenderer,
+]);
+
+const MINUTE = 60_000;
+const CHART_OPTIONS = { renderer: 'svg' };
+const REPLACED_CHART_OPTIONS = ['series'];
 
 export default function PriceChart({
   candles = [],
@@ -19,80 +38,57 @@ export default function PriceChart({
   horizonMinutes = 15,
 }) {
   const [windowMinutes, setWindowMinutes] = useState(60);
-  const gradientId = useId().replaceAll(':', '');
+  const [inspectedTime, setInspectedTime] = useState(null);
+  const chartRef = useRef(null);
+  const chartId = useId();
   const endTime = now || Date.now();
-  const startTime = endTime - windowMinutes * minute;
+  const startTime = endTime - windowMinutes * MINUTE;
   const futureMinutes =
     Number.isFinite(horizonMinutes) && horizonMinutes > 0 ? Math.min(15, horizonMinutes) : 0;
-  const hasFutureWindow = futureMinutes > 0;
-  const hasModelInterval = forecast.available && ticker && hasFutureWindow;
-  const points = candles
-    .filter((candle) => candle.time + minute >= startTime && candle.time + minute <= endTime)
-    .map((candle) => ({ time: candle.time + minute, price: candle.close }));
-  if (
-    ticker &&
-    ticker.time >= startTime &&
-    ticker.time <= endTime &&
-    (!points.length || ticker.time >= points.at(-1).time)
-  ) {
-    // Preserve newer candle history when the ticker feed is delayed.
-    if (points.at(-1)?.time === ticker.time) points.pop();
-    points.push({ time: ticker.time, price: ticker.price });
-  }
-
-  const prices = points.map((point) => point.price);
-  if (hasModelInterval) prices.push(forecast.lowerBound, forecast.upperBound);
+  const points = useMemo(
+    () => getChartPoints(candles, ticker, startTime, endTime),
+    [candles, ticker, startTime, endTime],
+  );
+  const { option, hasModelInterval, hasVisibleTarget } = useMemo(
+    () =>
+      getPriceChartOption({ points, ticker, forecast, target, startTime, endTime, futureMinutes }),
+    [points, ticker, forecast, target, startTime, endTime, futureMinutes],
+  );
   const hasData = points.length > 1;
-  let low = hasData ? Math.min(...prices) : 0;
-  let high = hasData ? Math.max(...prices) : 1;
-  const padding = Math.max((high - low) * 0.2, high * 0.0003);
-  low -= padding;
-  high += padding;
-  const x = (time) =>
-    LEFT + ((time - startTime) / ((windowMinutes + futureMinutes) * minute)) * (RIGHT - LEFT);
-  const y = (price) => TOP + ((high - price) / (high - low)) * (BOTTOM - TOP);
-  const path = points
-    .map((point, index) => `${index ? 'L' : 'M'}${x(point.time)},${y(point.price)}`)
-    .join(' ');
   const lastPoint = points.at(-1);
   const isPriceRising = !lastPoint || lastPoint.price >= points[0].price;
-  const nowX = x(endTime);
-  const hasVisibleTarget = Number.isFinite(target) && target >= low && target <= high;
-  const timeLabel = (time) =>
-    new Date(time).toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
-  const cone = hasModelInterval
-    ? Array.from({ length: 16 }, (_, index) => {
-        const fraction = index / 15;
-        const spread = 1.2815515655 * forecast.volatility * Math.sqrt(fraction);
-        return {
-          x: x(endTime + fraction * futureMinutes * minute),
-          upper: y(ticker.price * Math.exp(spread)),
-          lower: y(ticker.price * Math.exp(-spread)),
-        };
-      })
-    : [];
-  const conePath = cone.length
-    ? `M${cone.map((point) => `${point.x},${point.upper}`).join(' L')} L${[...cone]
-        .reverse()
-        .map((point) => `${point.x},${point.lower}`)
-        .join(' L')} Z`
+  const matchedIndex =
+    inspectedTime === null ? -1 : points.findIndex((point) => point.time >= inspectedTime);
+  const inspectedIndex = matchedIndex < 0 ? points.length - 1 : matchedIndex;
+  const inspectedPoint = points[inspectedIndex];
+  const pointDescription = inspectedPoint
+    ? `${formatDateTime(inspectedPoint.time)} · ${formatPrice(inspectedPoint.price)} · ${inspectedPoint.source}`
     : '';
+  const description = `Latest displayed ${lastPoint?.source.toLowerCase() || 'price'} ${formatPrice(lastPoint?.price)}. Preview target ${formatPrice(target)}. ${
+    hasModelInterval
+      ? `The shaded future area is the live model's 80% range at the displayed endpoint (${formatCountdown(futureMinutes * MINUTE)} remaining), ${formatPrice(forecast.lowerBound)} to ${formatPrice(forecast.upperBound)}; it updates with market data and is not the recorded prediction or a predicted path.`
+      : 'The live model range is currently unavailable.'
+  }`;
+
+  function showHistoricalPoint(index) {
+    chartRef.current?.getEchartsInstance()?.dispatchAction({
+      type: 'showTip',
+      seriesIndex: 0,
+      dataIndex: index,
+    });
+  }
 
   return (
     <section
       className={`market-chart ${isPriceRising ? 'trend-up' : 'trend-down'}`}
-      aria-labelledby="chart-heading"
+      aria-labelledby={`${chartId}-heading`}
     >
       <div className="chart-header d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
         <div>
-          <h2 id="chart-heading" className="section-title mb-1">
+          <h2 id={`${chartId}-heading`} className="section-title mb-1">
             Price activity
           </h2>
-          <span className="small text-secondary">One-minute closes · USD</span>
+          <span className="small text-secondary">One-minute closes + latest trade · USD</span>
         </div>
         <ButtonGroup size="sm" aria-label="Chart history">
           {[30, 60, 120].map((minutes) => (
@@ -109,130 +105,64 @@ export default function PriceChart({
       </div>
       {hasData ? (
         <figure className="m-0">
-          <svg
-            viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-            className="price-chart"
+          <div
             role="img"
-            aria-labelledby={`${gradientId}-title ${gradientId}-description`}
+            aria-label={`Bitcoin price over the last ${windowMinutes} minutes. ${description}`}
+            className="price-chart-canvas"
           >
-            <title id={`${gradientId}-title`}>
-              Bitcoin price over the last {windowMinutes} minutes
-            </title>
-            <desc id={`${gradientId}-description`}>
-              Latest displayed trade {formatPrice(ticker?.price)}. Target {formatPrice(target)}.
-              {hasModelInterval
-                ? `The shaded future area is the model's 80% range at the displayed endpoint (${formatCountdown(futureMinutes * minute)} remaining), ${formatPrice(forecast.lowerBound)} to ${formatPrice(forecast.upperBound)}; it is not a predicted path.`
-                : 'The forecast is currently unavailable.'}
-            </desc>
-            <defs>
-              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--chart-line)" stopOpacity="0.3" />
-                <stop offset="100%" stopColor="var(--chart-line)" stopOpacity="0" />
-              </linearGradient>
-            </defs>
-            {[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
-              const price = high - fraction * (high - low);
-              return (
-                <g key={fraction}>
-                  <line
-                    x1={LEFT}
-                    x2={RIGHT}
-                    y1={y(price)}
-                    y2={y(price)}
-                    stroke="var(--chart-grid)"
-                    strokeDasharray="3 5"
-                  />
-                  <text x={RIGHT + 12} y={y(price) + 4} className="chart-label chart-price-label">
-                    {formatPrice(price)}
-                  </text>
-                </g>
-              );
-            })}
-            {hasFutureWindow && (
-              <rect
-                x={nowX}
-                y={TOP}
-                width={RIGHT - nowX}
-                height={BOTTOM - TOP}
-                fill="var(--chart-future-bg)"
-              />
-            )}
-            {conePath && (
-              <path d={conePath} fill="var(--chart-cone)" opacity="0.18">
-                <title>Model interval endpoint</title>
-              </path>
-            )}
-            <path
-              d={`${path} L${x(lastPoint.time)},${BOTTOM} L${x(points[0].time)},${BOTTOM} Z`}
-              fill={`url(#${gradientId})`}
+            <ReactEChartsCore
+              ref={chartRef}
+              echarts={echarts}
+              option={option}
+              opts={CHART_OPTIONS}
+              className="price-chart-renderer"
+              replaceMerge={REPLACED_CHART_OPTIONS}
             />
-            <path
-              d={path}
-              fill="none"
-              stroke="var(--chart-line)"
-              strokeWidth="2.5"
-              strokeLinejoin="round"
+          </div>
+          <div className="chart-inspection d-flex align-items-center gap-2">
+            <input
+              type="range"
+              min="0"
+              max={points.length - 1}
+              step="1"
+              value={inspectedIndex}
+              aria-label="Inspect historical price points"
+              aria-valuetext={pointDescription}
+              aria-describedby={`${chartId}-instructions`}
+              className="form-range mb-0"
+              onFocus={() => showHistoricalPoint(inspectedIndex)}
+              onChange={(event) => {
+                const index = Number(event.target.value);
+                setInspectedTime(points[index].time);
+                showHistoricalPoint(index);
+              }}
+              onBlur={() =>
+                chartRef.current?.getEchartsInstance()?.dispatchAction({ type: 'hideTip' })
+              }
             />
-            <line
-              x1={nowX}
-              x2={nowX}
-              y1={TOP}
-              y2={BOTTOM}
-              stroke="var(--chart-grid)"
-              strokeDasharray="3 4"
-            />
-            {hasVisibleTarget && (
-              <line
-                x1={LEFT}
-                x2={RIGHT}
-                y1={y(target)}
-                y2={y(target)}
-                stroke="var(--chart-target)"
-                strokeDasharray="5 5"
-              />
-            )}
-            <circle
-              cx={x(lastPoint.time)}
-              cy={y(lastPoint.price)}
-              r="4"
-              fill="var(--chart-line)"
-              stroke="var(--chart-dot-outline)"
-              strokeWidth="2"
-            />
-            <text x={LEFT} y={HEIGHT - 12} className="chart-label">
-              {timeLabel(startTime)}
-            </text>
-            <text
-              x={x(startTime + (windowMinutes / 2) * minute)}
-              y={HEIGHT - 12}
-              textAnchor="middle"
-              className="chart-label"
-            >
-              {timeLabel(startTime + (windowMinutes / 2) * minute)}
-            </text>
-            <text x={nowX} y={HEIGHT - 12} textAnchor="end" className="chart-label">
-              Now
-            </text>
-            {hasFutureWindow && (
-              <text x={RIGHT + 12} y={HEIGHT - 12} className="chart-label">
-                {futureMinutes < 15 ? 'End' : '+15m'}
-              </text>
-            )}
-          </svg>
+            <output className="chart-point-readout" aria-live="off">
+              {pointDescription}
+            </output>
+          </div>
           <figcaption className="chart-legend d-flex flex-wrap align-items-center gap-3 small text-secondary">
             <span>
               <i className="legend-line" /> BTC/USD
             </span>
             <span>
               <i className="legend-line target" />{' '}
-              {hasVisibleTarget ? 'Your target' : 'Target outside chart range'}
+              {hasVisibleTarget ? 'Preview target' : 'Target outside chart range'}
             </span>
             {hasModelInterval && (
               <span>
-                <i className="legend-area" /> Model 80% range
+                <i className="legend-area" /> Live model 80% range
               </span>
             )}
+            {futureMinutes > 0 && <span>{futureMinutes < 15 ? 'End' : '+15m'}</span>}
           </figcaption>
+          <span id={`${chartId}-instructions`} className="visually-hidden">
+            Hover or tap the chart for a price and timestamp. Use this slider's arrow keys to
+            inspect each observed price.
+          </span>
         </figure>
       ) : (
         <div className="chart-empty d-flex align-items-center justify-content-center text-secondary">

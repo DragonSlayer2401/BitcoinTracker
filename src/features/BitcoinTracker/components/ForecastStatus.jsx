@@ -3,16 +3,18 @@ import { formatCountdown, formatDateTime, formatPercent, formatPrice } from '../
 
 export default function ForecastStatus({
   activeForecast,
+  completedForecast,
   schedule,
   now,
   onCancelSchedule,
   previewEndsAt,
+  showRecordedDetails = true,
 }) {
-  const isIdle = !activeForecast && !schedule;
+  const isIdle = !activeForecast && !completedForecast && !schedule;
   const isMissed = schedule?.status === 'missed';
   const isStarting = schedule?.status === 'scheduled' && now >= schedule.startsAt;
   const isSettling = activeForecast && now >= activeForecast.expiresAt;
-  const entry = activeForecast || schedule;
+  const entry = activeForecast || completedForecast || schedule;
   const currentTime = Number.isFinite(now) ? now : (entry?.createdAt ?? 0);
   const hasEndPreview = isIdle && previewEndsAt !== undefined;
   const isPreviewEndValid = Number.isSafeInteger(previewEndsAt) && previewEndsAt >= 0;
@@ -27,8 +29,9 @@ export default function ForecastStatus({
         : previewRemaining > 900_000
           ? 'Waiting for 15-minute window'
           : 'Until selected end';
-  const remaining =
-    activeForecast || isStarting
+  const remaining = completedForecast
+    ? 0
+    : activeForecast || isStarting
       ? Math.min(
           900_000,
           Math.max(
@@ -42,30 +45,36 @@ export default function ForecastStatus({
         : 900_000;
   const phase = isIdle
     ? 'idle'
-    : isMissed
-      ? 'missed'
-      : isSettling
-        ? 'settling'
-        : activeForecast
-          ? 'running'
-          : isStarting
-            ? 'starting'
-            : 'scheduled';
+    : completedForecast
+      ? 'completed'
+      : isMissed
+        ? 'missed'
+        : isSettling
+          ? 'settling'
+          : activeForecast
+            ? 'running'
+            : isStarting
+              ? 'starting'
+              : 'scheduled';
 
   return (
     <section className={`forecast-status ${phase}`} aria-label="Forecast timing">
       <h3 className="h6 mb-2" aria-live="polite">
         {isIdle
           ? '15-minute countdown'
-          : activeForecast
-            ? isSettling
-              ? 'Observing result'
-              : 'Countdown running'
-            : isMissed
-              ? 'Scheduled start missed'
-              : isStarting
-                ? 'Waiting for start data'
-                : 'Scheduled forecast'}
+          : completedForecast
+            ? completedForecast.status === 'resolved'
+              ? 'Result observed'
+              : 'Result unobserved'
+            : activeForecast
+              ? isSettling
+                ? 'Observing result'
+                : 'Countdown running'
+              : isMissed
+                ? 'Scheduled start missed'
+                : isStarting
+                  ? 'Waiting for start data'
+                  : 'Scheduled forecast'}
       </h3>
       <div className="countdown-display">
         <strong className="countdown countdown-primary" role="timer" aria-label="Time remaining">
@@ -78,13 +87,15 @@ export default function ForecastStatus({
             ? hasEndPreview
               ? previewCaption
               : 'Ready to start'
-            : isMissed
-              ? 'Start not captured'
-              : isSettling
-                ? 'Awaiting result'
-                : activeForecast || isStarting
-                  ? 'Until end time'
-                  : 'Waiting for scheduled start'}
+            : completedForecast
+              ? 'Window complete'
+              : isMissed
+                ? 'Start not captured'
+                : isSettling
+                  ? 'Awaiting result'
+                  : activeForecast || isStarting
+                    ? 'Until end time'
+                    : 'Waiting for scheduled start'}
         </span>
       </div>
       {schedule?.status === 'scheduled' && !activeForecast && (
@@ -122,7 +133,14 @@ export default function ForecastStatus({
           </div>
         </dl>
       )}
-      {activeForecast && (
+      {completedForecast && (
+        <p className="small mt-2 mb-0" role="status">
+          {completedForecast.status === 'resolved'
+            ? `Observed ${completedForecast.outcome === 'equal' ? 'at' : completedForecast.outcome} target: ${formatPrice(completedForecast.observedPrice)}`
+            : 'No eligible price was observed at the deadline.'}
+        </p>
+      )}
+      {activeForecast && showRecordedDetails && (
         <details className="forecast-details small mt-2">
           <summary>Recorded forecast details</summary>
           <dl className="window-summary mt-2 mb-0">
@@ -140,7 +158,7 @@ export default function ForecastStatus({
           </dl>
         </details>
       )}
-      {!isIdle && (
+      {!isIdle && !completedForecast && (!activeForecast || showRecordedDetails) && (
         <p className="small text-secondary mt-2 mb-0">
           {activeForecast
             ? 'Recorded target, probabilities, and end time are fixed.'

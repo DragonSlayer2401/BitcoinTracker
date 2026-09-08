@@ -1,0 +1,43 @@
+.bitcoin-tracker .market-chart {
+  .price-chart-canvas {
+    width: 100%;
+    min-width: 0;
+    height: clamp(180px, 27vh, 250px);
+  }
+
+  .price-chart-renderer {
+    // The library's default inline height is 300px; the panel owns the available height.
+    height: 100% !important;
+    width: 100%;
+  }
+
+  .chart-inspection {
+    min-width: 0;
+    min-height: 24px;
+    color: var(--tracker-muted);
+    font-size: 10px;
+
+    .form-range {
+      flex: 0 0 56px;
+      width: 56px;
+      height: 24px;
+    }
+
+    .form-range:focus-visible {
+      outline: 2px solid var(--tracker-green);
+      outline-offset: 3px;
+      border-radius: 4px;
+    }
+  }
+
+  .chart-point-readout {
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+
+  @media (max-width: 767.98px) {
+    .price-chart-canvas {
+      height: 200px;
+    }
+  }
+}

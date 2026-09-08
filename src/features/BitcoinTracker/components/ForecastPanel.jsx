@@ -2,7 +2,8 @@ import { Button, Form, InputGroup } from 'react-bootstrap';
 import Icon from './Icon';
 import StartTimeControl from './StartTimeControl';
 import ForecastStatus from './ForecastStatus';
-import { formatPercent, formatPrice } from '../utils/format.utils';
+import ForecastPrediction from './ForecastPrediction';
+import { formatPrice, formatTime } from '../utils/format.utils';
 import {
   formatLocalDateTime,
   getNextQuarterHour,
@@ -20,9 +21,11 @@ export default function ForecastPanel({
   timingSelection,
   onTimingChange,
   activeForecast,
+  recordedForecast,
   scheduledForecast,
   now,
   onRecord,
+  onNewForecast,
   isJournalReady,
   onCancelSchedule,
   isLoading,
@@ -41,18 +44,31 @@ export default function ForecastPanel({
       : null;
   const hasActiveSchedule = scheduledForecast?.status === 'scheduled';
   const startsImmediately = scheduleMode === 'now' || (isEndTime && startsAt <= now);
-  const directionLabel =
-    forecast.direction === 'above'
-      ? 'Likely above'
-      : forecast.direction === 'below'
-        ? 'Likely below'
-        : 'Too close to call';
+  const isCompleted = recordedForecast && recordedForecast.status !== 'pending';
+  const hasWindowEnded = recordedForecast && now >= recordedForecast.expiresAt;
+  const liveDescription = forecast.available
+    ? recordedForecast
+      ? null
+      : 'Preview updates until you start the forecast.'
+    : forecastDeadline !== null && !Number.isFinite(forecastDeadline)
+      ? 'Choose a valid end time.'
+      : forecastDeadline !== null && forecastDeadline <= now
+        ? recordedForecast
+          ? null
+          : 'The selected end time has passed.'
+        : isLoading
+          ? 'Waiting for fresh market data.'
+          : forecast.reason || 'Waiting for fresh market data.';
   const target = Number(targetInput);
   const isTargetValid =
     targetInput.trim() !== '' && Number.isFinite(target) && target > 0 && target <= 1e9;
+  const savedTarget =
+    recordedForecast?.target ?? (hasActiveSchedule ? scheduledForecast.target : null);
+  const hasDifferentTarget = savedTarget !== null && (!isTargetValid || target !== savedTarget);
   const canRecord =
     isJournalReady &&
     !activeForecast &&
+    !recordedForecast &&
     !hasActiveSchedule &&
     isTargetValid &&
     !scheduleError &&
@@ -92,75 +108,52 @@ export default function ForecastPanel({
       >
         <section className="estimate-panel dashboard-panel" aria-labelledby="estimate-heading">
           <h2 id="estimate-heading" className="section-title mb-2">
-            Countdown & estimate
+            Countdown & predictions
           </h2>
           <ForecastStatus
             activeForecast={activeForecast}
+            completedForecast={isCompleted ? recordedForecast : null}
             schedule={scheduledForecast}
             now={now}
             onCancelSchedule={onCancelSchedule}
             previewEndsAt={isEndTime ? selectedAt : undefined}
+            showRecordedDetails={false}
           />
-          <div
-            className={`forecast-result ${forecast.available ? forecast.direction : 'unavailable'}`}
-          >
-            <span className="small text-secondary">
-              {forecastDeadline === null || forecastDeadline > now + 900_000
-                ? 'Live preview · 15 minutes from now'
-                : 'Live preview · until the end time'}
-            </span>
-            <h3 className="result-heading mt-2 mb-1">
-              {forecast.available && (
-                <Icon
-                  name={
-                    forecast.direction === 'below'
-                      ? 'down'
-                      : forecast.direction === 'above'
-                        ? 'up'
-                        : 'activity'
-                  }
-                  size={28}
-                />
-              )}
-              {forecast.available ? directionLabel : isLoading ? 'Connecting…' : 'Estimate paused'}
-            </h3>
-            <p className="small text-secondary mb-0">
-              {forecast.available
-                ? 'Model estimate · not yet validated'
-                : forecastDeadline !== null && !Number.isFinite(forecastDeadline)
-                  ? 'Choose a valid end time.'
-                  : forecastDeadline !== null && forecastDeadline <= now
-                    ? 'The selected end time has passed.'
-                    : isLoading
-                      ? 'Waiting for fresh market data.'
-                      : forecast.reason || 'Waiting for fresh market data.'}
-            </p>
-          </div>
-          <div className="probability-labels d-flex justify-content-between mt-2 mb-2">
-            <div>
-              <span className="small text-secondary">Above target</span>
-              <strong className="ms-2">{formatPercent(forecast.aboveProbability)}</strong>
-            </div>
-            <div className="text-end">
-              <span className="small text-secondary">Below target</span>
-              <strong className="ms-2">{formatPercent(forecast.belowProbability)}</strong>
-            </div>
-          </div>
-          <div
-            className={`probability-track ${forecast.available ? '' : 'unavailable'}`}
-            role="img"
-            aria-label={`Above target ${formatPercent(forecast.aboveProbability)}, below target ${formatPercent(forecast.belowProbability)}`}
-          >
-            <div
-              className="probability-above"
-              style={{ width: forecast.available ? `${forecast.aboveProbability * 100}%` : '0%' }}
+          {recordedForecast && (
+            <ForecastPrediction
+              forecast={{ ...recordedForecast, available: true }}
+              label="Fixed prediction"
+              caption={`Captured ${formatTime(recordedForecast.createdAt)}`}
+              description={
+                hasDifferentTarget
+                  ? `Recorded target ${formatPrice(recordedForecast.target)}`
+                  : null
+              }
             />
-          </div>
-          {forecast.available && (
-            <p className="small text-secondary mt-2 mb-0">
-              Model 80% range: {formatPrice(forecast.lowerBound)}–{formatPrice(forecast.upperBound)}
-            </p>
           )}
+          <ForecastPrediction
+            forecast={forecast}
+            label="Live estimate"
+            caption={
+              hasWindowEnded
+                ? null
+                : forecastDeadline === null || forecastDeadline > now + 900_000
+                  ? '15 minutes from now'
+                  : 'Until the end time'
+            }
+            description={
+              forecast.available && hasDifferentTarget
+                ? `Preview target ${formatPrice(target)}`
+                : hasActiveSchedule && forecast.available
+                  ? 'Fixed prediction will be captured at the scheduled start.'
+                  : liveDescription
+            }
+            unavailableLabel={
+              hasWindowEnded ? 'Window ended' : isLoading ? 'Connecting…' : 'Estimate paused'
+            }
+            compact={Boolean(recordedForecast)}
+          />
+          <p className="small text-secondary mt-2 mb-0">Model estimates · not yet validated</p>
         </section>
         <section className="forecast-setup dashboard-panel" aria-labelledby="forecast-heading">
           <div className="d-flex justify-content-between align-items-center mb-2">
@@ -210,7 +203,7 @@ export default function ForecastPanel({
               </Button>
             </div>
           </div>
-          {!activeForecast && !hasActiveSchedule && (
+          {!recordedForecast && !activeForecast && !hasActiveSchedule && (
             <StartTimeControl
               mode={scheduleMode}
               value={selectedTime}
@@ -224,27 +217,39 @@ export default function ForecastPanel({
           )}
           <div className="forecast-action mt-auto">
             <Button
-              type="submit"
+              type={isCompleted ? 'button' : 'submit'}
               className="w-100 track-button d-flex justify-content-center align-items-center gap-2"
-              disabled={!canRecord}
+              disabled={!isCompleted && !canRecord}
+              onClick={
+                isCompleted
+                  ? (event) => {
+                      event.preventDefault();
+                      onNewForecast();
+                    }
+                  : undefined
+              }
             >
-              {activeForecast
-                ? 'Forecast in progress'
-                : hasActiveSchedule
-                  ? 'Start scheduled'
-                  : startsImmediately
-                    ? 'Start forecast'
-                    : 'Schedule forecast'}{' '}
+              {isCompleted
+                ? 'New forecast'
+                : activeForecast
+                  ? 'Forecast in progress'
+                  : hasActiveSchedule
+                    ? 'Start scheduled'
+                    : startsImmediately
+                      ? 'Start forecast'
+                      : 'Schedule forecast'}{' '}
               <Icon name={activeForecast || hasActiveSchedule ? 'clock' : 'arrow'} />
             </Button>
             <p className="small text-secondary mt-2 mb-0">
-              {activeForecast
-                ? 'Editing the preview does not change the running forecast.'
-                : isEndTime && startsImmediately
-                  ? 'Records this estimate and counts down to the selected end.'
-                  : hasActiveSchedule || scheduleMode !== 'now'
-                    ? 'The target is saved now; the estimate is captured at the start.'
-                    : 'Records this estimate and starts the 15-minute countdown.'}
+              {isCompleted
+                ? 'Edit the target for your next forecast. The original result stays saved.'
+                : activeForecast
+                  ? 'Target edits update Live. Fixed keeps its recorded target and end.'
+                  : isEndTime && startsImmediately
+                    ? 'Records this estimate and counts down to the selected end.'
+                    : hasActiveSchedule || scheduleMode !== 'now'
+                      ? 'The target is saved now; the estimate is captured at the start.'
+                      : 'Locks the prediction now and starts the 15-minute countdown.'}
             </p>
           </div>
         </section>

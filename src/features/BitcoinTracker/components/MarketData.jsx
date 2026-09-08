@@ -34,7 +34,7 @@ export default function MarketData({ ticker, quoteAge, isQuoteFresh, historyAge,
           </dd>
         </div>
         <div>
-          <dt>Window volatility</dt>
+          <dt>Live window volatility</dt>
           <dd>{forecast.available ? formatPercent(forecast.volatility) : '—'}</dd>
         </div>
       </dl>

@@ -40,6 +40,7 @@ export default function BitcoinTracker() {
   const isJournalReady = useForecastJournal();
   const [targetInput, setTargetInput] = useState('');
   const [hasEditedTarget, setHasEditedTarget] = useState(false);
+  const [isPreparingForecast, setIsPreparingForecast] = useState(false);
   const [timingSelection, setTimingSelection] = useState({
     mode: 'now',
     value: '',
@@ -60,8 +61,13 @@ export default function BitcoinTracker() {
   const forecasts = useSelector(selectForecasts);
   const activeForecast = useSelector(selectActiveForecast);
   const scheduledForecast = useSelector(selectScheduledForecast);
+  const recordedForecast =
+    activeForecast ?? (!isPreparingForecast && !scheduledForecast ? (forecasts[0] ?? null) : null);
+  const savedTarget =
+    recordedForecast?.target ??
+    (scheduledForecast?.status === 'scheduled' ? scheduledForecast.target : undefined);
   const forecastDeadline =
-    activeForecast?.expiresAt ??
+    recordedForecast?.expiresAt ??
     (scheduledForecast?.status === 'scheduled'
       ? scheduledForecast.expiresAt
       : timingSelection.mode === 'scheduled-end'
@@ -104,11 +110,11 @@ export default function BitcoinTracker() {
   }, [candles, ticker, target, now, hasRequestError, horizonMinutes]);
 
   useEffect(() => {
-    if (ticker && !hasEditedTarget) {
-      setTargetInput(ticker.price.toFixed(2));
+    if (isJournalReady && !hasEditedTarget && (savedTarget !== undefined || ticker)) {
+      setTargetInput((savedTarget ?? ticker.price).toFixed(2));
       setHasEditedTarget(true);
     }
-  }, [ticker, hasEditedTarget]);
+  }, [ticker, hasEditedTarget, isJournalReady, savedTarget]);
 
   useEffect(() => {
     if (isJournalReady && now && activeForecast)
@@ -118,6 +124,11 @@ export default function BitcoinTracker() {
   const changeTarget = (value) => {
     setHasEditedTarget(true);
     setTargetInput(value);
+  };
+  const prepareForecast = () => {
+    setIsPreparingForecast(true);
+    setHasEditedTarget(true);
+    setTimingSelection({ mode: 'now', value: '', timestamp: null });
   };
   const recordForecast = ({ startMode, startsAt: requestedStart, expiresAt: requestedEnd }) => {
     // Recheck at the click time so a quote cannot age past the guard between renders.
@@ -149,6 +160,7 @@ export default function BitcoinTracker() {
           status: 'scheduled',
         }),
       );
+      setIsPreparingForecast(false);
       return;
     }
     const current = getForecast({
@@ -174,6 +186,7 @@ export default function BitcoinTracker() {
         status: 'pending',
       }),
     );
+    setIsPreparingForecast(false);
   };
 
   const completedCandles = candles.filter((candle) => now && candle.time + 60_000 <= now);
@@ -218,6 +231,7 @@ export default function BitcoinTracker() {
             >
               <span>
                 Market data is temporarily unavailable. Estimates are paused while we reconnect.
+                {recordedForecast && ' The fixed prediction is retained.'}
               </span>
               <Button
                 variant="outline-secondary"
@@ -285,9 +299,11 @@ export default function BitcoinTracker() {
               timingSelection={timingSelection}
               onTimingChange={setTimingSelection}
               activeForecast={activeForecast}
+              recordedForecast={recordedForecast}
               scheduledForecast={scheduledForecast}
               now={now}
               onRecord={recordForecast}
+              onNewForecast={prepareForecast}
               isJournalReady={isJournalReady}
               onCancelSchedule={() => dispatch(scheduleCancelled())}
               isLoading={isLoading}

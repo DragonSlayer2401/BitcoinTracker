@@ -105,6 +105,39 @@ describe('getForecast', () => {
     expect(forecast.sampleCount).toBe(60);
   });
 
+  test('centers sample volatility on historical returns without adding directional drift', () => {
+    const market = createMarket({ count: 61, minuteReturns: [0.001, 0.003] });
+    const forecast = getForecast({ ...market, horizonMinutes: 12 });
+    const expectedVolatility = Math.sqrt((60 * 0.001 ** 2) / 59) * Math.sqrt(12);
+
+    expect(forecast.volatility).toBeCloseTo(expectedVolatility, 12);
+    expect(forecast.aboveProbability).toBe(0.5);
+    expect(forecast.belowProbability).toBe(0.5);
+    expect(forecast.direction).toBe('neutral');
+  });
+
+  test.each([
+    [-2, 0.9772498680518208],
+    [-1, 0.8413447460685429],
+    [0, 0.5],
+    [1, 0.15865525393145707],
+    [2, 0.022750131948179195],
+  ])(
+    'matches the normal upper-tail probability at a target %s standard deviations away',
+    (standardDeviations, expectedProbability) => {
+      const market = createMarket({ count: 61, minuteReturns: [0.001, -0.001] });
+      const horizonMinutes = 12;
+      const expectedVolatility = Math.sqrt((60 * 0.001 ** 2) / 59) * Math.sqrt(horizonMinutes);
+      const target = market.ticker.price * Math.exp(standardDeviations * expectedVolatility);
+      const forecast = getForecast({ ...market, target, horizonMinutes });
+
+      expect(forecast.available).toBe(true);
+      expect(forecast.aboveProbability).toBeCloseTo(expectedProbability, 11);
+      expect(forecast.belowProbability).toBeCloseTo(1 - expectedProbability, 11);
+      expect(forecast.aboveProbability + forecast.belowProbability).toBe(1);
+    },
+  );
+
   test('uses the same fifteen-minute forecast when the horizon is omitted or explicit', () => {
     const market = createMarket();
 

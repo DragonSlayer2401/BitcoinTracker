@@ -20,6 +20,10 @@ describe('Model and data rules panel', () => {
     ).toBeInTheDocument();
     expect(dialog.getByRole('heading', { name: 'Journal metrics' })).toBeInTheDocument();
     expect(dialog.getByText(/deadline is exactly 15 minutes after that start/)).toBeInTheDocument();
+    expect(
+      dialog.getByText(/main prediction keeps its original probabilities/),
+    ).toBeInTheDocument();
+    expect(dialog.getByText(/probabilities wait for capture/)).toBeInTheDocument();
     expect(dialog.getByRole('link', { name: 'Coinbase Exchange ticker' })).toHaveAttribute(
       'href',
       'https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker',

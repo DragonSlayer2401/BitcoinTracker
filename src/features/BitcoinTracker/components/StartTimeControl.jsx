@@ -1,6 +1,27 @@
 import { Button, Form } from 'react-bootstrap';
+import Select from 'react-select';
 import { formatDateTime } from '../utils/format.utils';
 import { formatLocalDateTime, getNextQuarterHour } from '../utils/schedule.utils';
+import './StartTimeControl.scss';
+
+const scheduleOptions = [
+  { value: 'now', label: 'Start now' },
+  { value: 'scheduled-end', label: 'End time' },
+  { value: 'scheduled', label: 'Start time' },
+];
+
+const scheduleClassNames = {
+  control: ({ isFocused, isDisabled }) =>
+    `schedule-select-control${isFocused ? ' schedule-select-focused' : ''}${isDisabled ? ' schedule-select-disabled' : ''}`,
+  valueContainer: () => 'schedule-select-value',
+  singleValue: () => 'schedule-select-selection',
+  dropdownIndicator: () => 'schedule-select-arrow',
+  menuPortal: () => 'schedule-select-menu-portal',
+  menu: () => 'schedule-select-menu',
+  menuList: () => 'schedule-select-options',
+  option: ({ isFocused, isSelected }) =>
+    `schedule-select-option${isFocused ? ' schedule-option-focused' : ''}${isSelected ? ' schedule-option-selected' : ''}`,
+};
 
 export default function StartTimeControl({
   mode,
@@ -23,16 +44,26 @@ export default function StartTimeControl({
       <Form.Label htmlFor="start-mode" className="small fw-medium">
         Schedule by
       </Form.Label>
-      <Form.Select
-        id="start-mode"
-        size="sm"
-        value={mode}
-        onChange={(event) => onModeChange(event.target.value)}
-      >
-        <option value="now">Start now</option>
-        <option value="scheduled-end">End time</option>
-        <option value="scheduled">Start time</option>
-      </Form.Select>
+      <Select
+        inputId="start-mode"
+        instanceId="start-mode"
+        className="schedule-select"
+        classNames={scheduleClassNames}
+        unstyled
+        options={scheduleOptions}
+        value={scheduleOptions.find((option) => option.value === mode)}
+        onChange={(option) => onModeChange(option.value)}
+        isSearchable={false}
+        isClearable={false}
+        isDisabled={disabled}
+        blurInputOnSelect={false}
+        menuPlacement="auto"
+        menuPosition="fixed"
+        menuPortalTarget={typeof document === 'undefined' ? undefined : document.body}
+        menuShouldScrollIntoView={false}
+        minMenuHeight={110}
+        maxMenuHeight={180}
+      />
       {mode !== 'now' && (
         <div className="mt-2">
           <Form.Label

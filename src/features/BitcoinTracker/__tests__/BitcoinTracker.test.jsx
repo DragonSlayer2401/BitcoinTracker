@@ -14,6 +14,14 @@ jest.mock('@/services/coinbase/coinbase.api', () => ({
   useGetTickerQuery: jest.fn(),
 }));
 
+jest.mock('../components/PriceChart', () => () => null);
+
+async function chooseScheduleMode(user, mode) {
+  const labels = { now: 'Start now', scheduled: 'Start time', 'scheduled-end': 'End time' };
+  await user.click(screen.getByRole('combobox', { name: 'Schedule by' }));
+  await user.click(screen.getByRole('option', { name: labels[mode] }));
+}
+
 const NOW = Date.UTC(2026, 8, 7, 12, 0, 15);
 const MINUTE = 60_000;
 
@@ -73,6 +81,23 @@ function renderTracker() {
 
 function getForecastPanel() {
   return within(screen.getByRole('region', { name: 'Forecast controls' }));
+}
+
+function expectFixedPrediction(snapshot) {
+  const prediction = within(screen.getByRole('region', { name: 'Fixed prediction' }));
+  const directionLabel =
+    snapshot.direction === 'above'
+      ? 'Likely above'
+      : snapshot.direction === 'below'
+        ? 'Likely below'
+        : 'Too close to call';
+
+  expect(prediction.getByRole('heading', { name: directionLabel })).toBeInTheDocument();
+  expect(
+    prediction.getByRole('img', {
+      name: `Above target ${formatPercent(snapshot.aboveProbability)}, below target ${formatPercent(snapshot.belowProbability)}`,
+    }),
+  ).toBeInTheDocument();
 }
 
 describe('BitcoinTracker interactions', () => {
@@ -243,7 +268,7 @@ describe('BitcoinTracker interactions', () => {
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     const selectedStart = screen.getByLabelText('Scheduled start (local time)').value;
     expect(screen.getByRole('heading', { name: 'Likely above' })).toBeInTheDocument();
@@ -266,7 +291,9 @@ describe('BitcoinTracker interactions', () => {
 
     expect(rulesButton).toHaveFocus();
     expect(screen.getByRole('spinbutton', { name: 'Target price' })).toHaveValue(49_750);
-    expect(screen.getByRole('combobox', { name: 'Schedule by' })).toHaveValue('scheduled');
+    expect(
+      screen.getByText('Start time', { selector: '.schedule-select-selection' }),
+    ).toBeVisible();
     expect(screen.getByLabelText('Scheduled start (local time)')).toHaveValue(selectedStart);
     expect(screen.getByRole('heading', { name: 'Likely below' })).toBeInTheDocument();
     expect(store.getState().tracker.forecasts).toEqual([]);
@@ -281,7 +308,7 @@ describe('BitcoinTracker interactions', () => {
     });
   });
 
-  test('locks the forecast for fifteen minutes while later edits cannot alter or duplicate it', async () => {
+  test('allows target edits for the live estimate while preserving the recorded prediction and deadline', async () => {
     const { store } = renderTracker();
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
@@ -301,10 +328,26 @@ describe('BitcoinTracker interactions', () => {
     expect(snapshot.aboveProbability).toBeGreaterThan(0.55);
     expect(snapshot.aboveProbability + snapshot.belowProbability).toBe(1);
     expect(screen.getByRole('button', { name: 'Forecast in progress' })).toBeDisabled();
+    expect(targetInput).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Use current' })).toBeEnabled();
+    expectFixedPrediction(snapshot);
 
     await user.clear(targetInput);
     await user.type(targetInput, '50250');
-    expect(screen.getByRole('heading', { name: 'Likely below' })).toBeInTheDocument();
+    expect(targetInput).toHaveValue(50_250);
+    expectFixedPrediction(snapshot);
+    expect(screen.getByRole('region', { name: 'Fixed prediction' })).toHaveTextContent(
+      'Recorded target $49,750.00',
+    );
+    const livePanel = within(screen.getByRole('region', { name: 'Live estimate' }));
+    expect(livePanel.getByRole('heading', { name: 'Likely below' })).toBeInTheDocument();
+    expect(livePanel.getByText('Preview target $50,250.00')).toBeInTheDocument();
+    await user.clear(targetInput);
+    expect(livePanel.getByRole('heading', { name: 'Estimate paused' })).toBeInTheDocument();
+    expectFixedPrediction(snapshot);
+    await user.click(screen.getByRole('button', { name: 'Use current' }));
+    expect(targetInput).toHaveValue(50_000);
+    expect(livePanel.getByRole('heading', { name: 'Too close to call' })).toBeInTheDocument();
     const journal = within(screen.getByRole('region', { name: 'Forecast history' }));
     expect(journal.getByRole('rowheader')).toHaveTextContent('$49,750.00');
     expect(journal.getByText('Likely above')).toBeInTheDocument();
@@ -324,14 +367,190 @@ describe('BitcoinTracker interactions', () => {
     const recordedForecasts = firstView.store.getState().tracker.forecasts;
     firstView.unmount();
 
+    jest.setSystemTime(NOW + MINUTE);
+    market = createMarket(Date.now(), 49_000);
+    quoteQuery = createQuery(market.ticker);
+    candleQuery = createQuery(market.candles);
     const restoredView = renderTracker();
 
     expect(restoredView.store.getState().tracker.forecasts).toEqual(recordedForecasts);
+    expectFixedPrediction(recordedForecasts[0]);
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toHaveValue(49_750);
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Forecast in progress' })).toBeDisabled();
     expect(screen.getByText('Countdown running')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('region', { name: 'Live estimate' })).getByRole('heading', {
+        name: 'Likely below',
+      }),
+    ).toBeInTheDocument();
     const journal = within(screen.getByRole('region', { name: 'Forecast history' }));
     expect(journal.getByRole('rowheader')).toHaveTextContent('$49,750.00');
-    expect(journal.getByText('15:00')).toBeInTheDocument();
+    expect(journal.getByText('14:00')).toBeInTheDocument();
+  });
+
+  test('keeps the original call while separately updating the live estimate for the same target and end', async () => {
+    const { store, rerenderTracker } = renderTracker();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
+      target: { value: '49750' },
+    });
+    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    const [snapshot] = store.getState().tracker.forecasts;
+    expectFixedPrediction(snapshot);
+
+    act(() => jest.advanceTimersByTime(MINUTE));
+    market = createMarket(Date.now(), 49_000);
+    quoteQuery = createQuery(market.ticker);
+    candleQuery = createQuery(market.candles);
+    rerenderTracker();
+
+    const liveEstimate = getForecast({
+      ...market,
+      target: snapshot.target,
+      now: Date.now(),
+      horizonMinutes: 14,
+    });
+    expect(liveEstimate.direction).toBe('below');
+    expect(liveEstimate.aboveProbability).not.toBe(snapshot.aboveProbability);
+    expectFixedPrediction(snapshot);
+    const livePanel = within(screen.getByRole('region', { name: 'Live estimate' }));
+    expect(livePanel.getByRole('heading', { name: 'Likely below' })).toBeInTheDocument();
+    expect(
+      livePanel.getByRole('img', {
+        name: `Above target ${formatPercent(liveEstimate.aboveProbability)}, below target ${formatPercent(liveEstimate.belowProbability)}`,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:00$/);
+    expect(store.getState().tracker.forecasts).toEqual([snapshot]);
+  });
+
+  test.each(['quote', 'candles'])(
+    'retains the fixed prediction while a failed %s request pauses only the live estimate',
+    async (failedQuery) => {
+      const { store, rerenderTracker } = renderTracker();
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
+        target: { value: '49750' },
+      });
+      await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+      const [snapshot] = store.getState().tracker.forecasts;
+
+      if (failedQuery === 'quote') quoteQuery = { ...quoteQuery, isError: true };
+      else candleQuery = { ...candleQuery, isError: true };
+      rerenderTracker();
+
+      expectFixedPrediction(snapshot);
+      const livePanel = within(screen.getByRole('region', { name: 'Live estimate' }));
+      expect(livePanel.getByRole('heading', { name: 'Estimate paused' })).toBeInTheDocument();
+      expect(
+        livePanel.getByRole('img', { name: 'Above target —, below target —' }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Forecast in progress' })).toBeDisabled();
+      expect(store.getState().tracker.forecasts).toEqual([snapshot]);
+    },
+  );
+
+  test('preserves the original prediction through stale data, its deadline, and an unobserved result', async () => {
+    const { store, rerenderTracker } = renderTracker();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
+      target: { value: '49750' },
+    });
+    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    const [snapshot] = store.getState().tracker.forecasts;
+
+    act(() => jest.advanceTimersByTime(21_000));
+
+    expectFixedPrediction(snapshot);
+    expect(
+      within(screen.getByRole('region', { name: 'Live estimate' })).getByRole('heading', {
+        name: 'Estimate paused',
+      }),
+    ).toBeInTheDocument();
+
+    act(() => jest.advanceTimersByTime(15 * MINUTE - 21_000));
+
+    expectFixedPrediction(snapshot);
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^00:00$/);
+    expect(
+      within(screen.getByRole('region', { name: 'Live estimate' })).getByText('Window ended'),
+    ).toBeInTheDocument();
+    expect(store.getState().tracker.forecasts).toEqual([snapshot]);
+
+    act(() => jest.advanceTimersByTime(36_000));
+
+    expect(store.getState().tracker.forecasts[0]).toMatchObject({
+      ...snapshot,
+      status: 'unobserved',
+    });
+    expectFixedPrediction(snapshot);
+    expect(
+      within(screen.getByRole('region', { name: 'Forecast timing' })).getByRole('status'),
+    ).toHaveTextContent('No eligible price was observed at the deadline.');
+    expect(screen.getByRole('button', { name: 'New forecast' })).toBeEnabled();
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'New forecast' }));
+
+    expect(screen.queryByRole('region', { name: 'Fixed prediction' })).not.toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Start forecast' })).toBeDisabled();
+    market = createMarket(Date.now());
+    quoteQuery = createQuery(market.ticker);
+    candleQuery = createQuery(market.candles);
+    rerenderTracker();
+    expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
+    expect(store.getState().tracker.forecasts[0].status).toBe('unobserved');
+  });
+
+  test('keeps the original prediction after an opposite result and starts a separate new draft on request', async () => {
+    const { store, rerenderTracker } = renderTracker();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
+      target: { value: '49750' },
+    });
+    await chooseScheduleMode(user, 'scheduled-end');
+    fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
+      target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
+    });
+    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    const [snapshot] = store.getState().tracker.forecasts;
+    act(() => jest.advanceTimersByTime(12 * MINUTE));
+    market = createMarket(Date.now(), 49_000);
+    quoteQuery = createQuery({ ...market.ticker, time: Date.now() });
+    candleQuery = createQuery(market.candles);
+    rerenderTracker();
+
+    expect(store.getState().tracker.forecasts[0]).toMatchObject({
+      ...snapshot,
+      status: 'resolved',
+      observedPrice: 49_000,
+      outcome: 'below',
+      correct: false,
+    });
+    const resolvedForecast = store.getState().tracker.forecasts[0];
+    expectFixedPrediction(snapshot);
+    expect(
+      within(screen.getByRole('region', { name: 'Forecast timing' })).getByRole('status'),
+    ).toHaveTextContent('Observed below target: $49,000.00');
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^00:00$/);
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Use current' })).toBeEnabled();
+    expect(
+      within(screen.getByRole('region', { name: 'Live estimate' })).getByText('Window ended'),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
+      target: { value: '50250' },
+    });
+    await user.click(screen.getByRole('button', { name: 'New forecast' }));
+
+    expect(screen.queryByRole('region', { name: 'Fixed prediction' })).not.toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toHaveValue(50_250);
+    expect(screen.getByRole('spinbutton', { name: 'Target price' })).toBeEnabled();
+    expect(screen.getByText('Start now', { selector: '.schedule-select-selection' })).toBeVisible();
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^15:00$/);
+    expect(screen.getByRole('button', { name: 'Use current' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Use current' }));
+    expect(screen.getByRole('heading', { name: 'Too close to call' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
+    expect(store.getState().tracker.forecasts).toEqual([resolvedForecast]);
   });
 
   test('schedules a fixed target and window while counting down to the start without recording early', async () => {
@@ -339,7 +558,7 @@ describe('BitcoinTracker interactions', () => {
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     await user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
 
@@ -354,11 +573,15 @@ describe('BitcoinTracker interactions', () => {
     expect(screen.queryByRole('combobox', { name: 'Schedule by' })).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'No recorded forecasts' })).toBeInTheDocument();
     expect(store.getState().tracker.forecasts).toEqual([]);
+    expect(targetInput).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Use current' })).toBeEnabled();
+    expect(screen.queryByRole('region', { name: 'Fixed prediction' })).not.toBeInTheDocument();
 
     await user.clear(targetInput);
     await user.type(targetInput, '50250');
     act(() => jest.advanceTimersByTime(30_000));
 
+    expect(targetInput).toHaveValue(50_250);
     expect(timing.getByText('$49,750.00')).toBeInTheDocument();
     expect(timing.getByRole('timer', { name: 'Time until start' })).toHaveTextContent('00:30');
     expect(timing.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^15:00$/);
@@ -375,10 +598,7 @@ describe('BitcoinTracker interactions', () => {
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 16 * MINUTE) },
     });
@@ -416,10 +636,7 @@ describe('BitcoinTracker interactions', () => {
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
       target: { value: '49750' },
     });
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
     });
@@ -453,10 +670,7 @@ describe('BitcoinTracker interactions', () => {
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Target price' }), {
       target: { value: '49750' },
     });
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
     });
@@ -505,10 +719,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('restores a joined end-time forecast without adding time to its deadline', async () => {
     const firstView = renderTracker();
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
     });
@@ -536,10 +747,7 @@ describe('BitcoinTracker interactions', () => {
   test('blocks joining an end-time window during an outage but allows a future window to be saved', async () => {
     quoteQuery = { ...quoteQuery, isError: true };
     const { store } = renderTracker();
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     const endInput = screen.getByLabelText('Scheduled end (local time)');
     fireEvent.change(endInput, { target: { value: formatLocalDateTime(NOW + 12 * MINUTE) } });
 
@@ -560,19 +768,18 @@ describe('BitcoinTracker interactions', () => {
 
   test('preserves a near end while switching modes without moving the original window', async () => {
     const { store } = renderTracker();
-    const scheduleBy = screen.getByRole('combobox', { name: 'Schedule by' });
-    await user.selectOptions(scheduleBy, 'scheduled-end');
+    await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 12 * MINUTE) },
     });
-    await user.selectOptions(scheduleBy, 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     const startInput = screen.getByLabelText('Scheduled start (local time)');
     expect(parseScheduledStart(startInput.value)).toBe(NOW - 3 * MINUTE);
     expect(startInput).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('button', { name: 'Schedule forecast' })).toBeDisabled();
 
-    await user.selectOptions(scheduleBy, 'now');
-    await user.selectOptions(scheduleBy, 'scheduled-end');
+    await chooseScheduleMode(user, 'now');
+    await chooseScheduleMode(user, 'scheduled-end');
     expect(parseScheduledStart(screen.getByLabelText('Scheduled end (local time)').value)).toBe(
       NOW + 12 * MINUTE,
     );
@@ -598,10 +805,7 @@ describe('BitcoinTracker interactions', () => {
     'rejects an end time that is %s without creating a schedule',
     async (_label, value, message) => {
       const { store } = renderTracker();
-      await user.selectOptions(
-        screen.getByRole('combobox', { name: 'Schedule by' }),
-        'scheduled-end',
-      );
+      await chooseScheduleMode(user, 'scheduled-end');
       const endInput = screen.getByLabelText('Scheduled end (local time)');
       fireEvent.change(endInput, { target: { value } });
 
@@ -616,24 +820,23 @@ describe('BitcoinTracker interactions', () => {
 
   test('preserves the selected window when converting between start and end scheduling', async () => {
     const { store } = renderTracker();
-    const scheduleBy = screen.getByRole('combobox', { name: 'Schedule by' });
-    await user.selectOptions(scheduleBy, 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     fireEvent.change(screen.getByLabelText('Scheduled start (local time)'), {
       target: { value: formatLocalDateTime(NOW + 3 * MINUTE) },
     });
 
-    await user.selectOptions(scheduleBy, 'scheduled-end');
+    await chooseScheduleMode(user, 'scheduled-end');
     const endInput = screen.getByLabelText('Scheduled end (local time)');
     expect(parseScheduledStart(endInput.value)).toBe(NOW + 18 * MINUTE);
     fireEvent.change(endInput, { target: { value: formatLocalDateTime(NOW + 20 * MINUTE) } });
 
-    await user.selectOptions(scheduleBy, 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     expect(parseScheduledStart(screen.getByLabelText('Scheduled start (local time)').value)).toBe(
       NOW + 5 * MINUTE,
     );
-    await user.selectOptions(scheduleBy, 'now');
+    await chooseScheduleMode(user, 'now');
     expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
-    await user.selectOptions(scheduleBy, 'scheduled-end');
+    await chooseScheduleMode(user, 'scheduled-end');
     expect(parseScheduledStart(screen.getByLabelText('Scheduled end (local time)').value)).toBe(
       NOW + 20 * MINUTE,
     );
@@ -648,10 +851,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('rejects an expired end time at submission before the next clock render', async () => {
     const { store } = renderTracker();
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     const endInput = screen.getByLabelText('Scheduled end (local time)');
     fireEvent.change(endInput, { target: { value: formatLocalDateTime(NOW + 10_000) } });
     expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
@@ -665,10 +865,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('restores a schedule chosen by end time without shifting either boundary', async () => {
     const firstView = renderTracker();
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Schedule by' }),
-      'scheduled-end',
-    );
+    await chooseScheduleMode(user, 'scheduled-end');
     fireEvent.change(screen.getByLabelText('Scheduled end (local time)'), {
       target: { value: formatLocalDateTime(NOW + 16 * MINUTE) },
     });
@@ -697,7 +894,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('cancels a scheduled start and allows a different local start time', async () => {
     const { store } = renderTracker();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     await user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
     await user.click(screen.getByRole('button', { name: 'Cancel scheduled start' }));
@@ -725,7 +922,7 @@ describe('BitcoinTracker interactions', () => {
     ],
   ])('rejects %s without creating a schedule', async (_label, value, message) => {
     const { store } = renderTracker();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     const startInput = screen.getByLabelText('Scheduled start (local time)');
     fireEvent.change(startInput, { target: { value } });
 
@@ -739,7 +936,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('disables a selected future date once its start passes without being scheduled', async () => {
     const { store } = renderTracker();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     expect(screen.getByRole('button', { name: 'Schedule forecast' })).toBeEnabled();
 
@@ -752,7 +949,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('rechecks the chosen start when submitting before the next clock render', async () => {
     const { store } = renderTracker();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     const startInput = screen.getByLabelText('Scheduled start (local time)');
 
@@ -767,13 +964,15 @@ describe('BitcoinTracker interactions', () => {
     quoteQuery = { ...quoteQuery, isError: true };
     const { store } = renderTracker();
     expect(screen.getByRole('button', { name: 'Start forecast' })).toBeDisabled();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     expect(screen.getByRole('button', { name: 'Schedule forecast' })).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
 
     expect(screen.getByText('Scheduled forecast')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Estimate paused' })).toBeInTheDocument();
+    expect(
+      getForecastPanel().getByRole('img', { name: 'Above target —, below target —' }),
+    ).toBeInTheDocument();
     expect(store.getState().tracker.scheduledForecast).toMatchObject({ status: 'scheduled' });
     expect(store.getState().tracker.forecasts).toEqual([]);
   });
@@ -784,9 +983,10 @@ describe('BitcoinTracker interactions', () => {
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
     expect(screen.getByRole('heading', { name: 'Likely above' })).toBeInTheDocument();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     await user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
+    expect(targetInput).toBeEnabled();
     await user.clear(targetInput);
     await user.type(targetInput, '50250');
 
@@ -820,6 +1020,7 @@ describe('BitcoinTracker interactions', () => {
     expect(snapshot.aboveProbability).toBeLessThan(0.5);
     expect(store.getState().tracker.scheduledForecast).toBeNull();
     expect(targetInput).toHaveValue(50_250);
+    expectFixedPrediction(snapshot);
     const timing = within(screen.getByRole('region', { name: 'Forecast timing' }));
     expect(timing.getByText('Countdown running')).toBeInTheDocument();
     expect(timing.getByText('$49,750.00')).toBeInTheDocument();
@@ -835,7 +1036,7 @@ describe('BitcoinTracker interactions', () => {
     const targetInput = screen.getByRole('spinbutton', { name: 'Target price' });
     await user.clear(targetInput);
     await user.type(targetInput, '49750');
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     await user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
     const savedSchedule = firstView.store.getState().tracker.scheduledForecast;
@@ -859,7 +1060,7 @@ describe('BitcoinTracker interactions', () => {
 
   test('shows a missed start after reopening too late and lets the user dismiss it', async () => {
     const firstView = renderTracker();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Schedule by' }), 'scheduled');
+    await chooseScheduleMode(user, 'scheduled');
     await user.click(screen.getByRole('button', { name: 'In 1 minute' }));
     await user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
     firstView.unmount();

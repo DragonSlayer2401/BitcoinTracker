@@ -43,8 +43,12 @@ export default function Methodology() {
               </p>
               <p className="mb-0">
                 Probabilities are bounded to 1–99%. Below 55% for either direction, the result is
-                “Too close to call.” The chart shows a central 80% model interval. Predictive
-                accuracy and interval coverage have not been independently validated.
+                “Too close to call.” Once captured, the main prediction keeps its original
+                probabilities through the countdown, result, and reload. A separate live estimate
+                uses the editable preview target and the saved deadline. Editing the target never
+                changes the recorded prediction. The live estimate, chart's live 80% model range,
+                and live window volatility stop at the deadline. Predictive accuracy and interval
+                coverage have not been independently validated.
               </p>
             </div>
             <div className="col-md-6">
@@ -71,11 +75,14 @@ export default function Methodology() {
               </p>
               <p className="mb-0">
                 Future starts can be up to 24 hours ahead. Before the start, 15:00 stays visible
-                with a separate Starts in countdown. Scheduled capture has up to 15 seconds of grace
-                and never moves the deadline; a missed start is not automatically recovered.
-                Outcomes use the first fresh quote this tab observes with an exchange time within 15
-                seconds after the deadline. A missed outcome stays unobserved. Keep this tab open
-                for scheduled starts and sampled outcomes.
+                with a separate Starts in countdown; original probabilities wait for capture while
+                the live preview covers 15 minutes from now. A scheduled or recorded target stays
+                saved while target edits update only the preview. Choose New forecast after
+                completion to start another window with your edited target. Scheduled capture has up
+                to 15 seconds of grace and never moves the deadline; a missed start is not
+                automatically recovered. Outcomes use the first fresh quote this tab observes with
+                an exchange time within 15 seconds after the deadline. A missed outcome stays
+                unobserved. Keep this tab open for scheduled starts and sampled outcomes.
               </p>
             </div>
             <div className="col-md-6">

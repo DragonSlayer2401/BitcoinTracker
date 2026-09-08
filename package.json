@@ -19,11 +19,15 @@
   "dependencies": {
     "@reduxjs/toolkit": "2.12.0",
     "bootstrap": "5.3.8",
+    "echarts": "6.1.0",
+    "echarts-for-react": "3.0.6",
+    "jstat": "1.9.6",
     "next": "16.3.4",
     "react": "19.2.8",
     "react-bootstrap": "2.10.10",
     "react-dom": "19.2.8",
-    "react-redux": "9.3.0"
+    "react-redux": "9.3.0",
+    "react-select": "5.10.2"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",

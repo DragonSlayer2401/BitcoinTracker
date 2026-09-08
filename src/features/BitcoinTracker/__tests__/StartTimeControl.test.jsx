@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import StartTimeControl from '../components/StartTimeControl';
 import { formatDateTime } from '../utils/format.utils';
 import { formatLocalDateTime } from '../utils/schedule.utils';
@@ -8,6 +9,7 @@ const NEXT_QUARTER_HOUR = Date.UTC(2026, 10, 1, 7, 0);
 
 function renderControl(overrides = {}) {
   const onChange = jest.fn();
+  const onModeChange = jest.fn();
   render(
     <StartTimeControl
       mode="scheduled"
@@ -15,17 +17,76 @@ function renderControl(overrides = {}) {
       startsAt={NEXT_QUARTER_HOUR}
       endsAt={NEXT_QUARTER_HOUR + 15 * 60_000}
       now={FALLBACK_NOW}
-      onModeChange={jest.fn()}
+      onModeChange={onModeChange}
       onChange={onChange}
       error={null}
       disabled={false}
       {...overrides}
     />,
   );
-  return { onChange };
+  return { onChange, onModeChange };
 }
 
 afterEach(cleanup);
+
+describe('schedule selection', () => {
+  test.each([
+    ['Start now', 'now'],
+    ['End time', 'scheduled-end'],
+    ['Start time', 'scheduled'],
+  ])('selects %s from the labeled dropdown', async (label, mode) => {
+    const user = userEvent.setup();
+    const { onModeChange, onChange } = renderControl();
+
+    await user.click(screen.getByRole('combobox', { name: 'Schedule by' }));
+    await user.click(screen.getByRole('option', { name: label }));
+
+    expect(onModeChange).toHaveBeenCalledWith(mode);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+
+  test('supports selecting an end time with the keyboard', async () => {
+    const user = userEvent.setup();
+    const { onModeChange } = renderControl({ mode: 'now' });
+
+    await user.tab();
+    expect(screen.getByRole('combobox', { name: 'Schedule by' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}{ArrowDown}');
+    expect(onModeChange).not.toHaveBeenCalled();
+    await user.keyboard('{Enter}');
+
+    expect(onModeChange).toHaveBeenCalledWith('scheduled-end');
+    expect(screen.getByRole('combobox', { name: 'Schedule by' })).toHaveFocus();
+  });
+
+  test('Escape dismisses options without changing the chosen mode', async () => {
+    const user = userEvent.setup();
+    const { onModeChange } = renderControl({ mode: 'now' });
+
+    await user.click(screen.getByRole('combobox', { name: 'Schedule by' }));
+    await user.keyboard('{ArrowDown}{Escape}');
+
+    expect(onModeChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Schedule by' })).toHaveFocus();
+  });
+
+  test('keeps scheduling inputs and shortcuts disabled while unavailable', async () => {
+    const user = userEvent.setup();
+    const { onModeChange, onChange } = renderControl({ disabled: true });
+
+    expect(screen.getByRole('combobox', { name: 'Schedule by' })).toBeDisabled();
+    expect(screen.getByLabelText('Scheduled start (local time)')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'In 1 minute' })).toBeDisabled();
+    await user.tab();
+    await user.keyboard('{ArrowDown}{Enter}');
+
+    expect(onModeChange).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+});
 
 describe('start time shortcuts', () => {
   test('preserves the next quarter-hour instant across the repeated Chicago fallback hour', () => {

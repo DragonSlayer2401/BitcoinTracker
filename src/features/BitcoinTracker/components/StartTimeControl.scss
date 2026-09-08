@@ -1,0 +1,93 @@
+.schedule-select {
+  .schedule-select-control {
+    min-height: 32px;
+    border: 1px solid #60796b;
+    border-radius: 6px;
+    background: #101814;
+    color: #e7f0e9;
+    font-size: 12px;
+    cursor: pointer;
+
+    &.schedule-select-focused {
+      border-color: #4de6a2;
+      outline: 3px solid #72efb7;
+      outline-offset: 3px;
+    }
+
+    &.schedule-select-disabled {
+      background: #17201d;
+      color: #a2b4a8;
+      cursor: default;
+    }
+  }
+
+  .schedule-select-value {
+    padding: 4px 8px;
+  }
+
+  .schedule-select-selection {
+    color: inherit;
+  }
+
+  .schedule-select-arrow {
+    padding: 4px 8px;
+    color: #a2b4a8;
+  }
+}
+
+body > .schedule-select-menu-portal {
+  z-index: 1050;
+}
+
+.schedule-select-menu-portal {
+  .schedule-select-menu {
+    margin: 6px 0;
+    border: 1px solid #60796b;
+    border-radius: 6px;
+    background: #121b17;
+    color: #e7f0e9;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+    font-size: 12px;
+    overflow: hidden;
+  }
+
+  .schedule-select-options {
+    padding: 4px;
+  }
+
+  .schedule-select-option {
+    padding: 7px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+
+    &.schedule-option-selected {
+      background: #153526;
+      color: #72efb7;
+      font-weight: 600;
+    }
+
+    &.schedule-option-focused {
+      background: #234832;
+      color: #e7f0e9;
+      outline: 2px solid #72efb7;
+      outline-offset: -2px;
+    }
+  }
+}
+
+@media (max-width: 767.98px) {
+  .schedule-select .schedule-select-control {
+    min-height: 38px;
+    font-size: 14px;
+  }
+
+  .schedule-select-menu-portal {
+    .schedule-select-menu {
+      font-size: 14px;
+    }
+
+    .schedule-select-option {
+      padding: 10px 8px;
+    }
+  }
+}

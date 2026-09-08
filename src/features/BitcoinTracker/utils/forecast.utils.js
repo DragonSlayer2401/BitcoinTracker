@@ -1,3 +1,5 @@
+import jStat from 'jstat';
+
 const MINUTE_IN_MILLISECONDS = 60_000;
 const HORIZON_MINUTES = 15;
 const MAXIMUM_CANDLES = 120;
@@ -49,26 +51,6 @@ function hasFreshTimestamp(time, now) {
     now - time <= MAXIMUM_QUOTE_AGE &&
     time - now <= MAXIMUM_FUTURE_QUOTE_OFFSET
   );
-}
-
-// Standard normal CDF approximation; absolute error is below 7.5e-8.
-function getNormalCumulativeProbability(value) {
-  if (value === 0) {
-    return 0.5;
-  }
-
-  const magnitude = Math.abs(value);
-  const fraction = 1 / (1 + 0.2316419 * magnitude);
-  const density = Math.exp((-magnitude * magnitude) / 2) / Math.sqrt(2 * Math.PI);
-  const tail =
-    density *
-    fraction *
-    (0.31938153 +
-      fraction *
-        (-0.356563782 +
-          fraction * (1.781477937 + fraction * (-1.821255978 + fraction * 1.330274429))));
-
-  return value > 0 ? 1 - tail : tail;
 }
 
 /**
@@ -199,9 +181,8 @@ export function getForecast({ candles, ticker, target, now, horizonMinutes = HOR
     );
   }
 
-  const averageReturn = returns.reduce((sum, value) => sum + value, 0) / sampleCount;
-  const variance =
-    returns.reduce((sum, value) => sum + (value - averageReturn) ** 2, 0) / (sampleCount - 1);
+  // The sample flag retains the n - 1 denominator for observed returns.
+  const variance = jStat.variance(returns, true);
   const minuteVolatility = Math.sqrt(variance);
 
   if (
@@ -218,7 +199,7 @@ export function getForecast({ candles, ticker, target, now, horizonMinutes = HOR
 
   const volatility = minuteVolatility * Math.sqrt(horizonMinutes);
   const targetDistance = (Math.log(target) - Math.log(ticker.price)) / volatility;
-  const rawAboveProbability = 1 - getNormalCumulativeProbability(targetDistance);
+  const rawAboveProbability = 1 - jStat.normal.cdf(targetDistance, 0, 1);
   // Limit model certainty. These bounds do not imply measured reliability.
   const aboveProbability = Math.max(0.01, Math.min(0.99, rawAboveProbability));
   const belowProbability = 1 - aboveProbability;
