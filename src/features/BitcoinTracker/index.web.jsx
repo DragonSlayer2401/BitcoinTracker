@@ -14,8 +14,12 @@ import useClock from './hooks/useClock';
 import useForecastJournal from './hooks/useForecastJournal';
 import useScheduledForecast from './hooks/useScheduledForecast';
 import useFixedPrediction from './hooks/useFixedPrediction';
-import { getForecast } from './utils/forecast.utils';
-import { getFixedForecastAnalysis } from './utils/fixedPrediction.utils';
+import useCoinbaseStream from './hooks/useCoinbaseStream';
+import useForecastEvidence from './hooks/useForecastEvidence';
+import { getPressureForecast } from './utils/pressureForecast.utils';
+import { getFixedForecastAnalysis, PRESSURE_POLICY_VERSION } from './utils/fixedPrediction.utils';
+import { DEADLINE_OUTCOME_DEFINITION } from './utils/outcome.utils';
+import { getMarketConditions } from './utils/marketConditions.utils';
 import { formatPercent, formatPrice, formatTime } from './utils/format.utils';
 import {
   forecastRecorded,
@@ -29,6 +33,7 @@ import {
   selectActiveForecast,
   selectForecasts,
   selectJournalSummary,
+  selectJournalOutcomeGroups,
   selectTrackerState,
   selectScheduledForecast,
 } from './state/selectors/trackerSelectors';
@@ -48,6 +53,7 @@ export default function BitcoinTracker() {
     value: '',
     timestamp: null,
   });
+  const stream = useCoinbaseStream();
   const quoteQuery = useGetTickerQuery(undefined, {
     pollingInterval: 5000,
     refetchOnFocus: true,
@@ -58,7 +64,9 @@ export default function BitcoinTracker() {
     refetchOnFocus: true,
     refetchOnReconnect: true,
   });
-  const ticker = quoteQuery.data;
+  // REST keeps estimates available while the execution stream reconnects or gathers history.
+  const hasStreamTicker = stream.ticker && now - stream.ticker.receivedAt <= 5000;
+  const ticker = hasStreamTicker ? stream.ticker : quoteQuery.data;
   const candles = candleQuery.data || EMPTY_CANDLES;
   const forecasts = useSelector(selectForecasts);
   const activeForecast = useSelector(selectActiveForecast);
@@ -78,6 +86,7 @@ export default function BitcoinTracker() {
   const horizonMinutes =
     forecastDeadline === null ? 15 : Math.min(15, (forecastDeadline - now) / 60_000);
   const summary = useSelector(selectJournalSummary);
+  const outcomeGroups = useSelector(selectJournalOutcomeGroups);
   const { storageWarning } = useSelector(selectTrackerState);
   const target = targetInput.trim() === '' ? NaN : Number(targetInput);
   const quoteAge = ticker && now ? now - ticker.time : null;
@@ -87,11 +96,13 @@ export default function BitcoinTracker() {
     quoteAge >= -5000 &&
     now - ticker.receivedAt <= 20_000 &&
     now - ticker.receivedAt >= -5000;
-  const hasRequestError = quoteQuery.isError || candleQuery.isError;
-  const isLoading = quoteQuery.isLoading || candleQuery.isLoading;
+  const hasQuoteError = !hasStreamTicker && quoteQuery.isError;
+  const hasRequestError = hasQuoteError || candleQuery.isError;
+  const isLoading = (!hasStreamTicker && quoteQuery.isLoading) || candleQuery.isLoading;
   useScheduledForecast({
     ticker,
     candles,
+    stream,
     now,
     isReady: isJournalReady,
     hasRequestError,
@@ -99,7 +110,16 @@ export default function BitcoinTracker() {
     refetchCandles: candleQuery.refetch,
   });
   const forecast = useMemo(() => {
-    const estimate = getForecast({ candles, ticker, target, now, horizonMinutes });
+    const evaluatedAt = now ? Date.now() : now;
+    const estimate = getPressureForecast({
+      candles,
+      ticker,
+      target,
+      now: evaluatedAt,
+      stream,
+      horizonMinutes:
+        forecastDeadline === null ? 15 : Math.min(15, (forecastDeadline - evaluatedAt) / 60_000),
+    });
     if (!hasRequestError) return estimate;
     return {
       ...estimate,
@@ -109,13 +129,35 @@ export default function BitcoinTracker() {
       direction: null,
       reason: 'The market feed could not be refreshed. Retrying automatically.',
     };
-  }, [candles, ticker, target, now, hasRequestError, horizonMinutes]);
+  }, [candles, ticker, target, now, hasRequestError, forecastDeadline, stream]);
   const fixedProgress = useFixedPrediction({
     forecast: isJournalReady ? activeForecast : null,
     candles,
     ticker,
     now,
     hasRequestError,
+    stream,
+  });
+  const marketConditions = useMemo(
+    () =>
+      getMarketConditions({
+        candles,
+        ticker,
+        target,
+        now: now ? Date.now() : now,
+        horizonMinutes,
+        forecast,
+      }),
+    [candles, ticker, target, now, horizonMinutes, forecast],
+  );
+  const evidenceWarning = useForecastEvidence({
+    forecasts,
+    candles,
+    ticker,
+    stream,
+    now,
+    progress: fixedProgress,
+    isReady: isJournalReady,
   });
 
   useEffect(() => {
@@ -127,8 +169,25 @@ export default function BitcoinTracker() {
 
   useEffect(() => {
     if (isJournalReady && now && activeForecast)
-      dispatch(forecastsObserved({ ticker: quoteQuery.isError ? null : ticker, now }));
-  }, [activeForecast, dispatch, isJournalReady, now, ticker, quoteQuery.isError]);
+      dispatch(
+        forecastsObserved({
+          ticker: hasQuoteError ? null : ticker,
+          now,
+          deadlineOutcome:
+            activeForecast.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION
+              ? stream.getDeadlineOutcome(activeForecast.expiresAt, now)
+              : null,
+        }),
+      );
+  }, [
+    activeForecast,
+    dispatch,
+    isJournalReady,
+    now,
+    ticker,
+    hasQuoteError,
+    stream.getDeadlineOutcome,
+  ]);
 
   const changeTarget = (value) => {
     setHasEditedTarget(true);
@@ -167,17 +226,20 @@ export default function BitcoinTracker() {
           expiresAt,
           target,
           status: 'scheduled',
+          outcomeDefinition: DEADLINE_OUTCOME_DEFINITION,
+          policyVersion: PRESSURE_POLICY_VERSION,
         }),
       );
       setIsPreparingForecast(false);
       return;
     }
-    const current = getForecast({
+    const current = getPressureForecast({
       candles,
       ticker,
       target,
       now: createdAt,
       horizonMinutes: (expiresAt - createdAt) / 60_000,
+      stream,
     });
     if (!current.available || hasRequestError) return;
     dispatch(
@@ -194,7 +256,13 @@ export default function BitcoinTracker() {
         direction: 'neutral',
         modelVersion: current.modelVersion,
         status: 'analyzing',
-        analysis: getFixedForecastAnalysis({ startedAt: createdAt, expiresAt }),
+        calculationMode: null,
+        analysis: getFixedForecastAnalysis({
+          startedAt: createdAt,
+          expiresAt,
+          policyVersion: PRESSURE_POLICY_VERSION,
+        }),
+        outcomeDefinition: DEADLINE_OUTCOME_DEFINITION,
       }),
     );
     setIsPreparingForecast(false);
@@ -204,7 +272,7 @@ export default function BitcoinTracker() {
   const lastCandleTime = completedCandles.at(-1)?.time;
   const historyAge = Number.isFinite(lastCandleTime) ? now - (lastCandleTime + 60_000) : null;
   const isHistoryFresh = historyAge !== null && historyAge <= 120_000 && !candleQuery.isError;
-  const isFeedFresh = isQuoteFresh && !quoteQuery.isError && isHistoryFresh;
+  const isFeedFresh = isQuoteFresh && !hasQuoteError && isHistoryFresh;
   const priorPrice = completedCandles.at(-16)?.close;
   const priceChange = priorPrice && ticker ? ticker.price / priorPrice - 1 : null;
   const isPositive = priceChange !== null && priceChange >= 0;
@@ -231,7 +299,9 @@ export default function BitcoinTracker() {
                       ? 'Price live · history delayed'
                       : 'Market data delayed'}
               </div>
-              <span className="small text-secondary">Coinbase · 5s refresh</span>
+              <span className="small text-secondary">
+                Coinbase · {hasStreamTicker ? 'Streaming' : 'REST fallback'}
+              </span>
               <span className="local-clock small text-secondary">{formatTime(now)} local</span>
             </div>
           </div>
@@ -307,7 +377,7 @@ export default function BitcoinTracker() {
             <ForecastPanel
               targetInput={targetInput}
               onTargetChange={changeTarget}
-              ticker={isQuoteFresh && !quoteQuery.isError ? ticker : null}
+              ticker={isQuoteFresh && !hasQuoteError ? ticker : null}
               forecast={forecast}
               fixedProgress={fixedProgress}
               forecastDeadline={forecastDeadline}
@@ -329,14 +399,17 @@ export default function BitcoinTracker() {
               isQuoteFresh={isQuoteFresh}
               historyAge={historyAge}
               forecast={forecast}
+              stream={stream}
+              conditions={marketConditions}
             />
             <ForecastJournal
               forecasts={forecasts}
               summary={summary}
+              outcomeGroups={outcomeGroups}
               now={now}
               onClear={() => dispatch(historyCleared())}
             />
-            <Methodology />
+            <Methodology evidenceWarning={evidenceWarning} />
           </div>
         </Container>
       </main>

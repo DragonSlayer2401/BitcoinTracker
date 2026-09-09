@@ -2,6 +2,13 @@ import { useState } from 'react';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ForecastJournal from '../components/ForecastJournal';
+import { selectJournalOutcomeGroups } from '../state/selectors/trackerSelectors';
+import {
+  PRESSURE_POLICY_VERSION,
+  MARKET_AWARE_POLICY_VERSION,
+} from '../utils/fixedPrediction.utils';
+import { DEADLINE_OUTCOME_DEFINITION } from '../utils/outcome.utils';
+import { PRESSURE_MODEL_VERSION } from '../utils/pressureForecast.utils';
 
 const NOW = Date.UTC(2026, 8, 8, 12, 0);
 const forecasts = [
@@ -155,5 +162,110 @@ describe('ForecastJournal panel', () => {
     await user.click(screen.getByRole('button', { name: 'View history' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Forecast history' }));
     expect(dialog.getByRole('heading', { name: 'No recorded forecasts' })).toBeInTheDocument();
+  });
+
+  test('shows only current pressure metrics in the panel and keeps older policy results separate in history', async () => {
+    const user = userEvent.setup();
+    const entries = [
+      {
+        ...forecasts[1],
+        id: 'pressure',
+        modelVersion: PRESSURE_MODEL_VERSION,
+        analysis: { policyVersion: PRESSURE_POLICY_VERSION },
+        outcomeDefinition: DEADLINE_OUTCOME_DEFINITION,
+        aboveProbability: 0.51,
+        belowProbability: 0.49,
+        observedAt: forecasts[1].expiresAt - 1,
+        observedTradeId: 1,
+      },
+      {
+        ...forecasts[1],
+        id: 'filtered',
+        analysis: { policyVersion: MARKET_AWARE_POLICY_VERSION },
+        outcomeDefinition: DEADLINE_OUTCOME_DEFINITION,
+        outcome: 'below',
+        correct: false,
+        observedAt: forecasts[1].expiresAt - 1,
+        observedTradeId: 2,
+      },
+      forecasts[1],
+    ];
+    const outcomeGroups = selectJournalOutcomeGroups({ tracker: { forecasts: entries } });
+    render(
+      <ForecastJournal
+        forecasts={entries}
+        summary={summary}
+        outcomeGroups={outcomeGroups}
+        now={NOW}
+        onClear={jest.fn()}
+      />,
+    );
+    const panel = within(screen.getByRole('region', { name: 'Forecast history' }));
+    expect(panel.getByText(/Current policy accuracy:/)).toHaveTextContent('100.0%');
+    expect(panel.getByText('Slight lean above')).toBeVisible();
+    await user.click(panel.getByRole('button', { name: 'View history' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Forecast history' }));
+    const pressure = within(
+      dialog.getByRole('region', { name: 'Pressure estimates · current policy' }),
+    );
+    const filtered = within(
+      dialog.getByRole('region', { name: 'Earlier filtered estimates · verified deadline' }),
+    );
+    const legacy = within(
+      dialog.getByRole('region', { name: 'Legacy sampled outcomes · earlier policies' }),
+    );
+    expect(pressure.getByText(/Observed accuracy:/)).toHaveTextContent('100.0%');
+    expect(pressure.getByText(/Brier:/)).toHaveTextContent('0.240');
+    expect(filtered.getByText(/Observed accuracy:/)).toHaveTextContent('0.0%');
+    expect(filtered.getByText(/Brier:/)).toHaveTextContent('0.490');
+    expect(legacy.getByText(/Observed accuracy:/)).toHaveTextContent('100.0%');
+    expect(legacy.getByText(/Brier:/)).toHaveTextContent('0.090');
+    expect(dialog.getByText('Slight lean above')).toBeVisible();
+  });
+
+  test.each([
+    [0.51, 'above', 'Slight lean above'],
+    [0.49, 'below', 'Slight lean below'],
+    [0.5, 'neutral', 'No directional edge'],
+  ])(
+    'labels a %s pressure estimate honestly without overstating its direction',
+    (aboveProbability, direction, label) => {
+      const entry = {
+        ...forecasts[0],
+        modelVersion: PRESSURE_MODEL_VERSION,
+        aboveProbability,
+        belowProbability: 1 - aboveProbability,
+        direction,
+        analysis: { policyVersion: PRESSURE_POLICY_VERSION },
+      };
+      render(
+        <ForecastJournal forecasts={[entry]} summary={summary} now={NOW} onClear={jest.fn()} />,
+      );
+      expect(screen.getByText(label)).toBeVisible();
+      expect(screen.queryByText(`Likely ${direction}`)).not.toBeInTheDocument();
+    },
+  );
+
+  test('does not present earlier successful forecasts as measured accuracy for the new policy', () => {
+    const entries = [
+      {
+        ...forecasts[1],
+        analysis: { policyVersion: MARKET_AWARE_POLICY_VERSION },
+        outcomeDefinition: DEADLINE_OUTCOME_DEFINITION,
+      },
+    ];
+    const outcomeGroups = selectJournalOutcomeGroups({ tracker: { forecasts: entries } });
+    render(
+      <ForecastJournal
+        forecasts={entries}
+        summary={summary}
+        outcomeGroups={outcomeGroups}
+        now={NOW}
+        onClear={jest.fn()}
+      />,
+    );
+    expect(screen.getByText(/Current policy accuracy:/)).toHaveTextContent('—');
+    expect(screen.getByText(/Scored:/)).toHaveTextContent('0');
+    expect(screen.getByText(/Call coverage:/)).toHaveTextContent('—');
   });
 });

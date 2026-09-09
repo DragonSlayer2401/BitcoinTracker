@@ -1,5 +1,5 @@
 import Icon from './Icon';
-import { formatPercent } from '../utils/format.utils';
+import { formatPercent, getPredictionLabel } from '../utils/format.utils';
 
 export default function ForecastPrediction({
   forecast,
@@ -9,12 +9,30 @@ export default function ForecastPrediction({
   unavailableLabel = 'Estimate paused',
   compact = false,
 }) {
-  const directionLabel =
-    forecast.direction === 'above'
-      ? 'Likely above'
-      : forecast.direction === 'below'
-        ? 'Likely below'
-        : 'Too close to call';
+  const directionLabel = getPredictionLabel(forecast);
+  const inputCaption =
+    forecast.calculationMode === 'baseline-fallback'
+      ? 'Captured without a usable pressure fit'
+      : forecast.calculationMode === 'pressure-adjusted'
+        ? 'Captured with trade pressure'
+        : forecast.pressure
+          ? forecast.pressure.applied
+            ? `Trade pressure ${forecast.pressure.direction === 'buy' ? 'toward Above' : forecast.pressure.direction === 'sell' ? 'toward Below' : 'balanced'}`
+            : 'Baseline estimate · pressure still gathering or unavailable'
+          : null;
+  const inputLabel = forecast.calculationMode
+    ? forecast.calculationMode === 'pressure-adjusted'
+      ? 'Trade pressure'
+      : 'Price only'
+    : forecast.pressure?.applied
+      ? forecast.pressure.direction === 'buy'
+        ? 'Buying pressure'
+        : forecast.pressure.direction === 'sell'
+          ? 'Selling pressure'
+          : 'Balanced pressure'
+      : forecast.pressure
+        ? 'Price only'
+        : null;
 
   return (
     <section aria-label={label} className={compact ? 'live-estimate mt-2' : undefined}>
@@ -22,8 +40,13 @@ export default function ForecastPrediction({
         className={`forecast-result ${forecast.available ? forecast.direction : 'unavailable'} ${compact ? 'd-flex flex-wrap justify-content-between align-items-center gap-2' : ''}`}
       >
         <div className="d-flex justify-content-between flex-wrap gap-1 small text-secondary">
-          <span>{label}</span>
-          <span>{caption}</span>
+          <span>
+            {label}
+            {!compact && forecast.available && inputLabel ? ` · ${inputLabel}` : ''}
+          </span>
+          <span title={forecast.available ? (inputCaption ?? undefined) : undefined}>
+            {compact && forecast.available && inputLabel ? inputLabel : caption}
+          </span>
         </div>
         <h3 className={`result-heading ${compact ? 'my-0' : 'mt-1 mb-0'}`}>
           {forecast.available && (

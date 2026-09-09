@@ -1,7 +1,15 @@
 import { useRef, useState } from 'react';
 import { Button, Modal, Table } from 'react-bootstrap';
 import Icon from './Icon';
-import { formatCountdown, formatPercent, formatPrice, formatTime } from '../utils/format.utils';
+import {
+  formatCountdown,
+  formatPercent,
+  formatPrice,
+  formatTime,
+  getPredictionLabel,
+} from '../utils/format.utils';
+import { DEADLINE_OUTCOME_DEFINITION } from '../utils/outcome.utils';
+import { PRESSURE_POLICY_VERSION } from '../utils/fixedPrediction.utils';
 
 function ForecastTable({ forecasts, now, compact = false }) {
   return (
@@ -35,6 +43,15 @@ function ForecastTable({ forecasts, now, compact = false }) {
                 })}{' '}
                 · {formatTime(entry.startsAt ?? entry.createdAt)}–{formatTime(entry.expiresAt)}
               </span>
+              {!compact && (
+                <span className="d-block small text-secondary fw-normal">
+                  {entry.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION
+                    ? entry.analysis?.policyVersion === PRESSURE_POLICY_VERSION
+                      ? 'Pressure estimate · verified deadline'
+                      : 'Earlier filtered estimate · verified deadline'
+                    : 'Legacy sample after deadline'}
+                </span>
+              )}
             </th>
             <td>
               <span className={`direction-label ${entry.direction}`}>
@@ -42,9 +59,7 @@ function ForecastTable({ forecasts, now, compact = false }) {
                   ? 'Observing'
                   : entry.status === 'withheld'
                     ? 'No clear signal'
-                    : entry.direction === 'neutral'
-                      ? 'Too close to call'
-                      : `Likely ${entry.direction}`}
+                    : getPredictionLabel(entry)}
               </span>
             </td>
             {!compact && (
@@ -58,7 +73,9 @@ function ForecastTable({ forecasts, now, compact = false }) {
                   {formatPrice(entry.observedPrice)}
                   {entry.observedAt && (
                     <span className="d-block text-secondary small">
-                      +{((entry.observedAt - entry.expiresAt) / 1000).toFixed(1)}s after deadline
+                      {entry.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION
+                        ? `${((entry.expiresAt - entry.observedAt) / 1000).toFixed(1)}s before deadline · trade ${entry.observedTradeId}`
+                        : `+${((entry.observedAt - entry.expiresAt) / 1000).toFixed(1)}s after deadline`}
                     </span>
                   )}
                 </td>
@@ -97,14 +114,15 @@ function ForecastTable({ forecasts, now, compact = false }) {
   );
 }
 
-function JournalSummary({ summary, compact = false }) {
+function JournalSummary({ summary, compact = false, current = false }) {
   return (
     <div className="journal-summary d-flex gap-3 flex-wrap small text-secondary">
       <span>
         Scored: <strong className="text-body">{summary.scoredCount}</strong>
       </span>
       <span>
-        Observed accuracy: <strong className="text-body">{formatPercent(summary.accuracy)}</strong>
+        {current ? 'Current policy accuracy' : 'Observed accuracy'}:{' '}
+        <strong className="text-body">{formatPercent(summary.accuracy)}</strong>
       </span>
       {!compact && (
         <span>
@@ -146,7 +164,7 @@ function EmptyJournal() {
   );
 }
 
-export default function ForecastJournal({ forecasts, summary, now, onClear }) {
+export default function ForecastJournal({ forecasts, summary, outcomeGroups, now, onClear }) {
   const [showHistory, setShowHistory] = useState(false);
   const [showClear, setShowClear] = useState(false);
   const historyButton = useRef(null);
@@ -172,7 +190,11 @@ export default function ForecastJournal({ forecasts, summary, now, onClear }) {
           View history
         </Button>
       </div>
-      <JournalSummary summary={summary} compact />
+      <JournalSummary
+        summary={outcomeGroups?.pressure ?? summary}
+        compact
+        current={Boolean(outcomeGroups)}
+      />
       {forecasts.length ? (
         <ForecastTable forecasts={forecasts.slice(0, 1)} now={now} compact />
       ) : (
@@ -199,18 +221,44 @@ export default function ForecastJournal({ forecasts, summary, now, onClear }) {
         </Modal.Header>
         <Modal.Body>
           <p className="small text-secondary">
-            Recorded forecasts and sampled outcomes · Stored in this browser
+            Recorded forecasts and observed outcomes · Stored in this browser
           </p>
           {forecasts.length ? <ForecastTable forecasts={forecasts} now={now} /> : <EmptyJournal />}
           <div className="mt-3">
-            <JournalSummary summary={summary} />
+            <section aria-labelledby={outcomeGroups ? 'pressure-summary-heading' : undefined}>
+              {outcomeGroups && (
+                <h3 id="pressure-summary-heading" className="h6">
+                  Pressure estimates · current policy
+                </h3>
+              )}
+              <JournalSummary summary={outcomeGroups?.pressure ?? summary} />
+            </section>
+            {outcomeGroups?.hasMarketAware && (
+              <section aria-labelledby="market-aware-summary-heading">
+                <h3 id="market-aware-summary-heading" className="h6 mt-2">
+                  Earlier filtered estimates · verified deadline
+                </h3>
+                <JournalSummary summary={outcomeGroups.marketAware} />
+              </section>
+            )}
+            {outcomeGroups?.hasLegacy && (
+              <section aria-labelledby="legacy-summary-heading">
+                <h3 id="legacy-summary-heading" className="h6 mt-2">
+                  Legacy sampled outcomes · earlier policies
+                </h3>
+                <JournalSummary summary={outcomeGroups.legacy} />
+              </section>
+            )}
           </div>
           <p className="small text-secondary mt-2 mb-0">
             Brier score is probability error; lower is better. Personal, overlapping observations
             are not an independent validation set. Ties, neutral calls, and no-call windows are
             excluded from directional accuracy. No-call windows have no probability error score.
             Call coverage is the fraction of completed observation decisions that issued a fixed
-            prediction; ongoing observation and older immediate forecasts are excluded.
+            prediction; ongoing observation and older immediate forecasts are excluded. The
+            dashboard summary covers only the current pressure policy, including estimates made
+            while trade-flow adjustments were unavailable. Earlier filtered forecasts and legacy
+            samples are reported separately.
           </p>
         </Modal.Body>
         <Modal.Footer>

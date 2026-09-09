@@ -16,14 +16,25 @@ const makeObservation = (overrides = {}) => ({
   direction: 'neutral',
   aboveProbability: null,
   belowProbability: null,
+  modelVersion: 'trade-pressure-log-return-v1',
+  calculationMode: null,
   analysis: {
     startedAt: NOW,
     earliestAt: NOW + 3 * MINUTE,
     deadline: NOW + 5 * MINUTE,
-    policyVersion: 'observed-consensus-v1',
+    policyVersion: 'pressure-snapshot-v3',
   },
   ...overrides,
 });
+const makeLegacyObservation = (overrides = {}) => {
+  const entry = makeObservation(overrides);
+  delete entry.calculationMode;
+  return {
+    ...entry,
+    modelVersion: 'zero-drift-log-return-v1',
+    analysis: { ...entry.analysis, policyVersion: 'observed-consensus-v1' },
+  };
+};
 const liveForecast = {
   available: true,
   direction: 'above',
@@ -58,7 +69,10 @@ describe('fixed observation display', () => {
     const fixed = within(screen.getByRole('region', { name: 'Fixed prediction' }));
     expect(fixed.getByRole('heading', { name: 'Observing market' })).toBeVisible();
     expect(fixed.getByRole('timer')).toHaveTextContent('02:00');
-    expect(fixed.getByText('Qualifying quotes: 2')).toBeVisible();
+    expect(fixed.queryByText(/Qualifying quotes/)).not.toBeInTheDocument();
+    expect(fixed.getByText(/recorded after three minutes of observation/)).toHaveTextContent(
+      'even when the edge is small',
+    );
     expect(fixed.queryByRole('img')).not.toBeInTheDocument();
     expect(fixed.queryByText('72.0%')).not.toBeInTheDocument();
     expect(
@@ -88,8 +102,8 @@ describe('fixed observation display', () => {
     ).toBeVisible();
   });
 
-  test('shows the remaining confirmation time after the minimum observation period', () => {
-    const entry = makeObservation();
+  test('keeps the remaining consensus time visible for an earlier saved policy', () => {
+    const entry = makeLegacyObservation();
     render(
       <ForecastPanel
         {...defaultProps}
@@ -108,8 +122,69 @@ describe('fixed observation display', () => {
     expect(fixed.getByRole('heading', { name: 'Waiting for a clear signal' })).toBeVisible();
     expect(fixed.getByText(/Signal confirmation/)).toBeVisible();
     expect(fixed.getByRole('timer')).toHaveTextContent('00:30');
+    expect(fixed.getByText('Qualifying quotes: 4')).toBeVisible();
+    expect(fixed.getByText(/Earlier policy:/)).toHaveTextContent('≥65%');
     expect(fixed.queryByRole('img')).not.toBeInTheDocument();
   });
+
+  test('after three minutes the new policy waits for fresh data without asking for signal agreement', () => {
+    const entry = makeObservation();
+    render(
+      <ForecastPanel
+        {...defaultProps}
+        now={NOW + 3 * MINUTE}
+        activeForecast={entry}
+        recordedForecast={entry}
+        fixedProgress={{
+          phase: 'confirming',
+          reason: 'Waiting for a valid estimate from fresh market data.',
+          observationRemainingMs: 0,
+          confirmationRemainingMs: 0,
+          sampleCount: 0,
+        }}
+      />,
+    );
+    const fixed = within(screen.getByRole('region', { name: 'Fixed prediction' }));
+    expect(fixed.getByRole('heading', { name: 'Waiting for fresh data' })).toBeVisible();
+    expect(fixed.getByText(/Decision window/)).toHaveTextContent('02:00');
+    expect(fixed.queryByText(/Signal confirmation|Qualifying quotes|65%/)).not.toBeInTheDocument();
+    expect(fixed.queryByRole('img')).not.toBeInTheDocument();
+  });
+
+  test.each([
+    ['above', 0.51, 'Slight lean above'],
+    ['below', 0.49, 'Slight lean below'],
+    ['neutral', 0.5, 'No directional edge'],
+  ])(
+    'shows an issued %s estimate with its original weak or balanced probabilities',
+    (direction, aboveProbability, heading) => {
+      const entry = makeObservation({
+        status: 'pending',
+        createdAt: NOW + 3 * MINUTE,
+        direction,
+        aboveProbability,
+        belowProbability: 1 - aboveProbability,
+        calculationMode: 'baseline-fallback',
+      });
+      render(
+        <ForecastPanel
+          {...defaultProps}
+          now={NOW + 4 * MINUTE}
+          activeForecast={entry}
+          recordedForecast={entry}
+        />,
+      );
+      const fixed = within(screen.getByRole('region', { name: 'Fixed prediction' }));
+      expect(fixed.getByRole('heading', { name: heading })).toBeVisible();
+      expect(
+        fixed.getByRole('img', {
+          name: `Above target ${(aboveProbability * 100).toFixed(1)}%, below target ${((1 - aboveProbability) * 100).toFixed(1)}%`,
+        }),
+      ).toBeVisible();
+      expect(fixed.getByText('Fixed prediction · Price only')).toBeVisible();
+      expect(fixed.queryByText('No clear signal')).not.toBeInTheDocument();
+    },
+  );
 
   test('reports an interrupted data feed instead of implying a trustworthy fixed prediction', () => {
     const entry = makeObservation();
@@ -139,7 +214,9 @@ describe('fixed observation display', () => {
     'displays a no-call reason for %s with no fixed percentages',
     async (withholdingReason, message) => {
       const user = userEvent.setup();
-      const entry = makeObservation({ status: 'withheld', withholdingReason });
+      const makeEntry =
+        withholdingReason === 'no-consensus' ? makeLegacyObservation : makeObservation;
+      const entry = makeEntry({ status: 'withheld', withholdingReason });
       const onNewForecast = jest.fn();
       render(
         <ForecastPanel {...defaultProps} recordedForecast={entry} onNewForecast={onNewForecast} />,
@@ -161,6 +238,8 @@ describe('fixed observation display', () => {
     const entry = makeObservation({
       status: 'pending',
       analysis: undefined,
+      modelVersion: 'zero-drift-log-return-v1',
+      calculationMode: undefined,
       direction: 'above',
       aboveProbability: 0.7,
       belowProbability: 0.3,
@@ -188,7 +267,9 @@ describe('observation history and rules', () => {
     const user = userEvent.setup();
     render(
       <ForecastJournal
-        forecasts={[makeObservation({ status: 'withheld', withholdingReason: 'no-consensus' })]}
+        forecasts={[
+          makeLegacyObservation({ status: 'withheld', withholdingReason: 'no-consensus' }),
+        ]}
         summary={summary}
         now={NOW}
       />,
@@ -215,15 +296,22 @@ describe('observation history and rules', () => {
     expect(screen.queryByText('Incorrect')).not.toBeInTheDocument();
   });
 
-  test('explains the observation window and distinguishes the threshold from measured accuracy', async () => {
+  test('explains the new capture rule without claiming the pressure adjustment improves accuracy', async () => {
     const user = userEvent.setup();
     render(<Methodology />);
     await user.click(screen.getByRole('button', { name: 'View model rules' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Model and data rules' }));
-    expect(dialog.getByText(/not a measured 65% accuracy rate/)).toBeVisible();
+    expect(dialog.getByText(/New windows observe for three minutes/)).toHaveTextContent(
+      'There is no 65% minimum and no full minute of matching directional signals',
+    );
     expect(
       dialog.getByText(/closes after 5 minutes or one minute before the original end/),
     ).toBeVisible();
-    expect(dialog.getByText(/baseline stays in use until historical evaluation/)).toBeVisible();
+    expect(dialog.getByText(/not a proven ability to predict future returns/)).toBeVisible();
+    expect(
+      dialog.getByText(
+        /Predictive accuracy and interval coverage have not been independently validated/,
+      ),
+    ).toBeVisible();
   });
 });

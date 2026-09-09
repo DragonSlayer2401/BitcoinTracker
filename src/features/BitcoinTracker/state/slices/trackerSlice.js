@@ -4,6 +4,8 @@ import {
   getValidatedJournalState,
   getValidatedScheduledForecast,
 } from '../../utils/journal.utils';
+import { DEADLINE_OUTCOME_DEFINITION, isVerifiedDeadlineOutcome } from '../../utils/outcome.utils';
+import { MARKET_AWARE_POLICY_VERSION } from '../../utils/fixedPrediction.utils';
 
 const maximumForecasts = 100;
 const observationWindow = 15 * 1000;
@@ -96,6 +98,10 @@ const trackerSlice = createSlice({
         forecast.target !== schedule.target ||
         forecast.startsAt !== schedule.startsAt ||
         forecast.expiresAt !== schedule.expiresAt ||
+        forecast.outcomeDefinition !== schedule.outcomeDefinition ||
+        ((schedule.policyVersion || schedule.outcomeDefinition) &&
+          forecast.analysis?.policyVersion !==
+            (schedule.policyVersion ?? MARKET_AWARE_POLICY_VERSION)) ||
         forecast.createdAt !== now ||
         now < schedule.startsAt ||
         now > schedule.startsAt + scheduleStartGrace ||
@@ -122,9 +128,15 @@ const trackerSlice = createSlice({
         forecast === null ||
         forecast.status !== 'pending' ||
         forecast.createdAt !== now ||
-        !['id', 'target', 'startsAt', 'expiresAt', 'timingMode', 'modelVersion'].every(
-          (field) => forecast[field] === existing[field],
-        ) ||
+        ![
+          'id',
+          'target',
+          'startsAt',
+          'expiresAt',
+          'timingMode',
+          'modelVersion',
+          'outcomeDefinition',
+        ].every((field) => forecast[field] === existing[field]) ||
         !['startedAt', 'earliestAt', 'deadline', 'policyVersion'].every(
           (field) => forecast.analysis?.[field] === existing.analysis[field],
         )
@@ -154,27 +166,36 @@ const trackerSlice = createSlice({
       state.forecasts[state.forecasts.findIndex((entry) => entry.id === id)] = withheld;
     },
     forecastsObserved(state, action) {
-      const { ticker, now } = action.payload ?? {};
+      const { ticker, now, deadlineOutcome } = action.payload ?? {};
       if (!isTimestamp(now)) return;
 
       state.forecasts.forEach((forecast) => {
         if (forecast.status !== 'pending') return;
 
-        if (canObserveForecast(forecast, ticker, now)) {
+        const usesDeadline = forecast.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION;
+        const hasOutcome = usesDeadline
+          ? isVerifiedDeadlineOutcome(deadlineOutcome, forecast.expiresAt, now)
+          : canObserveForecast(forecast, ticker, now);
+        if (hasOutcome) {
+          const price = usesDeadline ? deadlineOutcome.observedPrice : ticker.price;
           forecast.status = 'resolved';
-          forecast.observedPrice = ticker.price;
-          forecast.observedAt = ticker.time;
+          forecast.observedPrice = price;
+          forecast.observedAt = usesDeadline ? deadlineOutcome.observedAt : ticker.time;
+          if (usesDeadline) {
+            forecast.observedTradeId = deadlineOutcome.observedTradeId;
+            forecast.confirmedThrough = deadlineOutcome.confirmedThrough;
+            forecast.completeSince = deadlineOutcome.completeSince;
+          }
           forecast.outcome =
-            ticker.price > forecast.target
-              ? 'above'
-              : ticker.price < forecast.target
-                ? 'below'
-                : 'equal';
+            price > forecast.target ? 'above' : price < forecast.target ? 'below' : 'equal';
           forecast.correct =
             forecast.direction === 'neutral' || forecast.outcome === 'equal'
               ? null
               : forecast.direction === forecast.outcome;
-        } else if (now > forecast.expiresAt + observationWindow + maximumQuoteAge) {
+        } else if (
+          (usesDeadline && now >= forecast.expiresAt && deadlineOutcome?.status === 'unobserved') ||
+          now > forecast.expiresAt + observationWindow + maximumQuoteAge
+        ) {
           forecast.status = 'unobserved';
         }
       });

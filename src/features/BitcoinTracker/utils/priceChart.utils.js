@@ -1,4 +1,5 @@
 import { formatDateTime, formatPrice } from './format.utils';
+import { getPressureLocation, getPressureVolatility } from './pressureForecast.utils';
 
 const MINUTE = 60_000;
 const RANGE_MULTIPLIER = 1.2815515655;
@@ -86,11 +87,12 @@ export function getPriceChartOption({
   const modelPoints = hasModelInterval
     ? Array.from({ length: 16 }, (_, index) => {
         const fraction = index / 15;
-        const spread = RANGE_MULTIPLIER * forecast.volatility * Math.sqrt(fraction);
+        const spread = RANGE_MULTIPLIER * getPressureVolatility(forecast, fraction);
+        const location = getPressureLocation(forecast, fraction);
         return {
           time: endTime + fraction * futureMinutes * MINUTE,
-          lower: ticker.price * Math.exp(-spread),
-          upper: ticker.price * Math.exp(spread),
+          lower: ticker.price * Math.exp(location - spread),
+          upper: ticker.price * Math.exp(location + spread),
         };
       })
     : [];

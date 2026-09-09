@@ -45,6 +45,26 @@ const defaults = { candles, ticker, forecast, target: 50_000, now: NOW, horizonM
 const getSeries = (id) => mockChartProps.option.series.find((series) => series.id === id);
 
 describe('PriceChart', () => {
+  test.each([0.002, -0.002])(
+    'shows a shifted forecast range at the deadline (%s)',
+    (locationLogReturn) => {
+      const shifted = {
+        ...forecast,
+        locationLogReturn,
+        pressure: { applied: false },
+        lowerBound: ticker.price * Math.exp(locationLogReturn - 1.2815515655 * forecast.volatility),
+        upperBound: ticker.price * Math.exp(locationLogReturn + 1.2815515655 * forecast.volatility),
+      };
+      render(<PriceChart {...defaults} forecast={shifted} />);
+      const range = getSeries('model-range').data;
+      expect(range[0].lower).toBe(ticker.price);
+      expect(range[0].upper).toBe(ticker.price);
+      expect(range.at(-1).lower).toBeCloseTo(shifted.lowerBound, 6);
+      expect(range.at(-1).upper).toBeCloseTo(shifted.upperBound, 6);
+      expect(range.at(-1).value[0]).toBe(NOW + 15 * MINUTE);
+    },
+  );
+
   test('ends the live model interval at the selected deadline while observed data ends at now', () => {
     const { rerender } = render(<PriceChart {...defaults} />);
     expect(mockChartProps.option.xAxis.max).toBe(NOW + 15 * MINUTE);

@@ -357,7 +357,7 @@ describe('analysis persistence and scoring', () => {
   });
 
   test.each(['analyzing', 'pending', 'resolved', 'unobserved', 'withheld'])(
-    'round-trips %s through version 3 without changing its deadline or policy',
+    'round-trips %s through version 5 without changing its deadline or policy',
     (status) => {
       const forecast =
         status === 'analyzing' || status === 'withheld' ? makeAnalysisForecast() : makePublished();
@@ -372,7 +372,7 @@ describe('analysis persistence and scoring', () => {
         });
       const storage = makeStorage();
       expect(saveJournal([forecast], storage)).toBeNull();
-      expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(3);
+      expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(5);
       const restored = loadJournal(storage);
       expect(restored).toEqual({ forecasts: [forecast], scheduledForecast: null, warning: null });
       expect(reducer(undefined, historyRestored(restored.forecasts)).forecasts).toEqual([forecast]);

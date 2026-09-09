@@ -3,11 +3,18 @@ import { useDispatch, useSelector } from 'react-redux';
 import { selectScheduledForecast } from '../state/selectors/trackerSelectors';
 import { scheduledForecastStarted, scheduleStartMissed } from '../state/slices/trackerSlice';
 import { getForecast } from '../utils/forecast.utils';
-import { getFixedForecastAnalysis } from '../utils/fixedPrediction.utils';
+import { getPressureForecast } from '../utils/pressureForecast.utils';
+import {
+  getFixedForecastAnalysis,
+  MARKET_AWARE_POLICY_VERSION,
+  FIXED_PREDICTION_POLICY_VERSION,
+  PRESSURE_POLICY_VERSION,
+} from '../utils/fixedPrediction.utils';
 
 export default function useScheduledForecast({
   ticker,
   candles,
+  stream,
   now,
   isReady,
   hasRequestError,
@@ -42,12 +49,18 @@ export default function useScheduledForecast({
       ticker.receivedAt < schedule.startsAt
     )
       return;
-    const estimate = getForecast({
+    const policyVersion =
+      schedule.policyVersion ??
+      (schedule.outcomeDefinition ? MARKET_AWARE_POLICY_VERSION : FIXED_PREDICTION_POLICY_VERSION);
+    const estimate = (
+      policyVersion === PRESSURE_POLICY_VERSION ? getPressureForecast : getForecast
+    )({
       candles,
       ticker,
       target: schedule.target,
       now: capturedAt,
       horizonMinutes: (schedule.expiresAt - capturedAt) / 60_000,
+      stream,
     });
     if (!estimate.available) return;
 
@@ -67,10 +80,13 @@ export default function useScheduledForecast({
           direction: 'neutral',
           modelVersion: estimate.modelVersion,
           status: 'analyzing',
+          ...(policyVersion === PRESSURE_POLICY_VERSION ? { calculationMode: null } : {}),
           analysis: getFixedForecastAnalysis({
             startedAt: capturedAt,
             expiresAt: schedule.expiresAt,
+            policyVersion,
           }),
+          ...(schedule.outcomeDefinition ? { outcomeDefinition: schedule.outcomeDefinition } : {}),
         },
       }),
     );
@@ -84,5 +100,6 @@ export default function useScheduledForecast({
     refetchTicker,
     schedule,
     ticker,
+    stream,
   ]);
 }

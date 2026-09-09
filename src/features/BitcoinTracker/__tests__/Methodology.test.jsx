@@ -8,7 +8,9 @@ describe('Model and data rules panel', () => {
     render(<Methodology />);
     const panel = within(screen.getByRole('region', { name: 'Model and data rules' }));
 
-    expect(panel.getByText(/Signals and probabilities are unvalidated/)).toBeInTheDocument();
+    expect(panel.getByText(/fixed estimate after three minutes/)).toHaveTextContent(
+      'accuracy remains unvalidated',
+    );
     expect(screen.queryByRole('heading', { name: 'Probability model' })).not.toBeInTheDocument();
     await user.click(panel.getByRole('button', { name: 'View model rules' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Model and data rules' }));
@@ -24,7 +26,12 @@ describe('Model and data rules panel', () => {
       dialog.getByText(/fixed prediction keeps its original probabilities/),
     ).toBeInTheDocument();
     expect(dialog.getByRole('heading', { name: 'Fixed prediction observation' })).toBeVisible();
-    expect(dialog.getByText(/not a measured 65% accuracy rate/)).toBeVisible();
+    expect(dialog.getByText(/There is no 65% minimum/)).toHaveTextContent(
+      'no full minute of matching directional signals',
+    );
+    expect(dialog.getByText(/not a proven ability to predict future returns/)).toHaveTextContent(
+      'Older saved windows retain their original publication policy and percentages',
+    );
     expect(dialog.getByText(/probabilities wait for capture/)).toBeInTheDocument();
     expect(dialog.getByRole('link', { name: 'Coinbase Exchange ticker' })).toHaveAttribute(
       'href',

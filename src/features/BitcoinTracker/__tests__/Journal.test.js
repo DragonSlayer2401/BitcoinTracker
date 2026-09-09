@@ -516,7 +516,7 @@ describe('forecasts joining a selected end-time window', () => {
     const storage = makeStorage();
     expect(saveJournal(state.forecasts, storage)).toBeNull();
     const saved = JSON.parse(storage.setItem.mock.calls[0][1]);
-    expect(saved).toEqual({ version: 3, forecasts: [forecast], scheduledForecast: null });
+    expect(saved).toEqual({ version: 5, forecasts: [forecast], scheduledForecast: null });
 
     storage.getItem.mockReturnValue(storage.setItem.mock.calls[0][1]);
     const loaded = loadJournal(storage);
@@ -714,7 +714,7 @@ describe('forecast journal persistence', () => {
     expect(saveJournal([makeResolved()], storage, scheduledForecast)).toBeNull();
     const saved = storage.setItem.mock.calls[0][1];
     expect(JSON.parse(saved)).toEqual({
-      version: 3,
+      version: 5,
       forecasts: [makeResolved()],
       scheduledForecast,
     });
@@ -742,7 +742,7 @@ describe('forecast journal persistence', () => {
     });
     expect(saveJournal(restored.forecasts, storage, restored.scheduledForecast)).toBeNull();
     expect(JSON.parse(storage.setItem.mock.calls[0][1])).toEqual({
-      version: 3,
+      version: 5,
       forecasts: [makeResolved()],
       scheduledForecast: null,
     });

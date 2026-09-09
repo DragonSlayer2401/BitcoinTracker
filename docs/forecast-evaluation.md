@@ -1,4 +1,98 @@
-# Forecast evaluation: waiting before fixing a prediction
+# Forecast evaluation and market-awareness experiments
+
+The expanded 30-day retrospective evaluation does **not** show a useful directional advantage from the tested candle features over simply checking which side of the target the price occupies at the same capture time. The full logistic model performed slightly worse than the current normal baseline on Brier score and log loss. No candidate is approved for production from this study.
+
+All dates in the new test period overlap the earlier 14-day study below. The chronological partitions prevent future rows from entering a fitted model, but they do not make previously inspected dates unseen again. These results are consumed retrospective evidence; a later prospective test is required for any accuracy claim.
+
+## New trade-pressure model: not evaluated by these candle studies
+
+The application now introduces experimental model `trade-pressure-log-return-v1` and publication policy `pressure-snapshot-v3`. It fits contemporaneous price response to net aggressive BTC flow in completed 15-second trade buckets, shrinks and bounds that response, and uses available recent flow with decay to adjust the expected log return. Responsive movement and spread affect uncertainty even when pressure is unavailable. Missing or unusable pressure inputs retain a price-only estimate with this responsive uncertainty rather than suppressing a prediction solely because flow or order-book data is unavailable. The fallback may therefore differ from the older zero-drift model's percentages.
+
+After three minutes of observation, the new policy captures the first valid estimate, including a slight lean or balanced 50/50 result. It does not require a 65% threshold or a further minute of directional agreement. Original targets, endpoints, essential data validity, and publication cutoff remain fixed; earlier saved policies retain their original rules. Higher coverage is an intended behavior change, not evidence of higher predictive accuracy.
+
+Neither the 14-day nor 30-day candle evaluation below contains the needed executed-trade history. They did **not** test this pressure adjustment, its fitted contemporaneous coefficient, or its new publication policy. A contemporaneous flow/return association is not an out-of-sample forecast result, and no fitted accuracy or calibration claim is made for the new model. The negative candle-feature findings remain unchanged and must not be cited as validation of the new model.
+
+Prospective evaluation must freeze model/policy versions, preserve actual completed bucket inputs and capture times, and compare the pressure estimate with the zero-drift baseline and current-side benchmark at identical capture timestamps, targets, and deadlines. Report Brier/log loss, calibration bins, interval coverage, direction accuracy, coverage, missing outcomes, and results by regime with whole-window chronological partitions. Ablate the pressure mean adjustment separately from responsive uncertainty and the relaxed publication policy. The existing JSONL evidence format provides original input, model, decision, and strict-outcome timestamps; no candle proxy should be silently substituted for missing trade evidence.
+
+## Expanded 30-day run
+
+```sh
+node scripts/evaluate-market-awareness.mjs --end=2026-09-08T00:00:00Z
+node scripts/evaluate-market-awareness.mjs --end=2026-09-08T00:00:00Z --offline
+```
+
+The downloader reuses the existing candle cache and requests only missing history. Output is `test-artifacts/forecast-evaluation/market-awareness-2026-09-08-30d.json`. It contains exact split boundaries, data and source hashes, fitted coefficients and normalization, calibration parameters, all candidate policies, probability bins, and metrics by horizon, wait, regime, and horizon/regime combination. The old 14-day report is preserved separately.
+
+Data: 43,320 completed Coinbase BTC-USD one-minute candles, including two warm-up hours, with no missing windows. The 30-day study spans August 9–September 8, 2026 UTC. The normalized candle SHA-256 is:
+
+```text
+c80ea90d6f0c5c6ad2c2d6824446613b096f5e126e22c8396e3b4a273f01e6f7
+```
+
+| Partition        | UTC start    | UTC end      | Distinct 15-minute anchors | Forecast examples |
+| ---------------- | ------------ | ------------ | -------------------------: | ----------------: |
+| Training, 60%    | Aug 9 00:00  | Aug 27 00:00 |                      1,728 |           112,275 |
+| Calibration, 20% | Aug 27 00:15 | Sep 2 00:00  |                        575 |            37,369 |
+| Test, 20%        | Sep 2 00:15  | Sep 8 00:00  |                        575 |            37,361 |
+
+Each boundary has a 15-minute embargo. There are 65 excluded equal-to-target capture/target cases across the full dataset, not 65 necessarily distinct windows. Endpoints at 3, 5, 10, and 15 minutes share an anchor; waits of 0, 1, 3, and 5 minutes are allowed only when at least one minute remains. Targets are fixed at the initial anchor price and ±0.10%/±0.25%. The last completed close available at capture supplies spot. Later candles enter only the outcome calculation. Outcomes from the same anchor, target variants, and different waits are correlated, so example counts are not independent sample counts.
+
+Training normalization and logistic coefficients use only training examples. Logistic regression is fitted with deterministic penalized Newton updates using jStat's least-squares solver; the fixed penalty is 0.001. Calibration fits a separate sigmoid of each model's logit on calibration data only. The calibration partition is also used to choose wait/threshold policies, so its reported fit and selection scores are optimistic development measurements. No test scores determine coefficients, calibration, or policy choices. [Time-series split guidance](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html), [probability calibration guidance](https://scikit-learn.org/stable/modules/calibration.html)
+
+## Candle-feature ablation and benchmarks
+
+The raw variance candidates use the normal return distribution with four alternative spread estimates: existing sample variance, root-mean-square returns, Parkinson high/low range variance, and exponentially weighted variance with a 30-minute half-life. These are evaluated separately.
+
+Logistic ablations progressively add inputs to a distance/horizon model: one-, three-, five-, and fifteen-minute standardized returns; three-minute acceleration; recent/prior volume ratio; then five-minute range and the latest candle's close position. Distance and three-minute-return interactions with remaining time are explicit features. All indicators are derived from completed candles at capture; no order-book or trade-flow history is fabricated.
+
+The following test scores pool the specified horizon/wait/target grid; this grid is not a measured production workload. Brier and log loss are probability-error measures, while ECE is the weighted absolute gap between predicted and observed Above rates in ten fixed-width probability bins. Lower is better, but a lower Brier score alone does not establish better calibration. The report retains each bin's count rather than hiding small bins.
+
+| Model                           |    Brier | Log loss |      ECE |
+| ------------------------------- | -------: | -------: | -------: |
+| Constant 50%                    | 0.250000 | 0.693147 | 0.002583 |
+| Current side, deterministic 0/1 | 0.126743 | 1.577151 | 0.111145 |
+| Existing normal baseline        | 0.095246 | 0.302770 | 0.013171 |
+| RMS returns                     | 0.095223 | 0.302658 | 0.013020 |
+| High/low range variance         | 0.094940 | 0.302646 | 0.008151 |
+| EWMA variance                   | 0.094975 | 0.301237 | 0.012102 |
+| Logistic: distance/horizon only | 0.095504 | 0.304412 | 0.015978 |
+| + Returns                       | 0.095493 | 0.304380 | 0.016153 |
+| + Acceleration                  | 0.095452 | 0.304258 | 0.016445 |
+| + Volume                        | 0.095474 | 0.304325 | 0.016082 |
+| + Range and close position      | 0.095589 | 0.304643 | 0.016145 |
+| Calibrated normal               | 0.095257 | 0.302783 | 0.013690 |
+| Calibrated full logistic        | 0.095447 | 0.303809 | 0.012638 |
+
+The deterministic current-side benchmark uses the very same capture price and target as the model, not the earlier starting price. At exact equality it supplies 50%. Its log loss clips 0/1 to one part per million solely to remain finite; it is not a calibrated probabilistic competitor. Accuracy on exactly the model's issued-call subset is therefore also reported. The normal model's 89.9005% pooled call accuracy equals this current-side benchmark exactly. Full logistic call accuracy is 89.6097% versus 89.5741% for current side on the same cases, a tiny retrospective difference accompanied by worse probability scores. High aggregate accuracy is driven heavily by distant targets and later observation.
+
+## Waiting, thresholds, and interval checks
+
+For each model and horizon, waits 0/1/3/5 and thresholds 55%/65%/75% are evaluated only on calibration data. Selection maximizes correct-minus-incorrect calls per eligible example, with earlier waits and lower thresholds breaking ties. This objective explicitly includes coverage; it is not trading profit, and it has no transaction-cost or payout assumptions. Model selection uses the same calibration objective. All candidates, not just winners, remain in the JSON report.
+
+| Horizon | Calibration-selected candidate | Wait | Threshold | Test call accuracy | Test coverage | Current side on same calls |
+| ------- | ------------------------------ | ---: | --------: | -----------------: | ------------: | -------------------------: |
+| 3m      | Logistic + volume              |   1m |       55% |             93.08% |        94.64% |                     93.08% |
+| 5m      | Calibrated EWMA                |   3m |       55% |             93.80% |        96.55% |                     93.80% |
+| 10m     | Logistic distance/horizon      |   5m |       55% |             90.78% |        95.06% |                     90.78% |
+| 15m     | Logistic + returns             |   5m |       55% |             86.92% |        94.40% |                     86.88% |
+
+At the original-spot target, the selected 15-minute candidate achieves **73.61% call accuracy at 84.35% coverage**, exactly matching current side on its selected calls. Waiting five minutes leaves ten minutes to the endpoint and includes five minutes of additional price information. This does not demonstrate improved direction prediction from the original start, and the experiment does not authorize changing production wait/threshold rules.
+
+For comparison, the existing normal model on the same 15-minute endpoints has Brier scores of 0.131519 immediately, 0.123300 after one minute, 0.112079 after three minutes, and 0.102463 after five minutes. At each capture time, its call accuracy again equals current side on those calls. Changes in conditional accuracy between waits must be read alongside coverage.
+
+Central 80% price-interval coverage is counted once per capture/endpoint, not five times for the target variants. The normal baseline covers 83.69%, RMS 83.68%, range 78.06%, and EWMA 83.02% of outcomes in the pooled test grid. Normal interval coverage by nominal horizon is 82.09% (3m), 82.32% (5m), 83.78% (10m), and 85.43% (15m), pooling that horizon's allowed waits. Logistic models and calibrated binary probabilities do not define a full ending-price distribution, so no price intervals are invented for them.
+
+Regimes are fixed using training-only volatility terciles plus a predeclared standardized fifteen-minute trend cutoff of ±1. These research labels are separate from the application's market-status labels. Normal-model interval coverage ranges from 73.40% in medium-volatility/downtrend cases to 89.83% in low-volatility/downtrend cases. Its high-volatility/uptrend ECE is 0.1082 versus 0.0132 pooled. These subgroup differences show why the pooled number cannot stand in for reliability across conditions; individual bins and regimes have smaller, dependent samples.
+
+## Prospective evidence and outcome definition
+
+Historical outcomes here are `coinbase-minute-close-proxy-at-deadline-v1`: the last trade represented by the candle ending at the deadline. A candle cannot prove that the last trade was within five seconds, that every stream match arrived, or that a heartbeat confirmed continuity past the deadline. This proxy is distinct from the application's `coinbase-last-trade-at-deadline-v1` stream rule, even though both refer to a last trade at or before the end. Trade-level correctness and latency need prospective stream evidence.
+
+The agreed export format is JSON Lines with `schemaVersion: 1` and separate `observation`, `decision`, and `outcome` events. Observation rows retain forecast/window IDs, capture and receipt times, target, source, spot, quote time, contemporaneous features, trade flow, liquidity, model/policy/calibration versions, and probability. Decisions retain the issued/withheld result and reason. Outcomes retain the settlement definition, observed price/time/trade ID, stream completeness start, and confirmed-through time. Existing sampled journal entries keep their original settlement semantics. Missing historical depth, spread, aggressor flow, or news inputs are unavailable; they are not reconstructed from candle direction.
+
+Prospective evaluation must keep whole windows together, preserve original capture features, include withheld/failed/missing outcomes in coverage reports, and estimate uncertainty using blocks of time. IndexedDB and exported JSONL are local audit records, not an immutable central journal. Freeze any chosen model, calibration, and policy before opening a genuinely later evaluation period. The fitted artifacts in this retrospective report are research outputs and are not imported by the production application.
+
+## Earlier 14-day exploratory run: consumed data
 
 The first historical check supports testing a delayed, selective fixed prediction. It does **not** establish a reliable win rate for the live application. The alternatives to the current probability model improved probability error only slightly in this sample; retain the normal baseline while collecting prospective results.
 

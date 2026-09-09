@@ -756,7 +756,7 @@
     .dashboard-panel,
     .journal-section,
     .methodology-section {
-      padding: 12px;
+      padding: 10px;
     }
     .market-data-grid {
       row-gap: 8px;
@@ -777,7 +777,7 @@
     .estimate-panel {
       .forecast-status {
         margin-bottom: 8px;
-        padding: 8px;
+        padding: 6px 8px;
 
         h3 {
           margin-bottom: 4px !important;
@@ -787,7 +787,7 @@
         }
       }
       .forecast-result {
-        padding: 8px;
+        padding: 6px 8px;
       }
       .probability-labels {
         line-height: 1.15;
@@ -796,7 +796,7 @@
         padding-top: 4px;
 
         .forecast-result {
-          padding: 6px 8px;
+          padding: 4px 8px;
           row-gap: 4px !important;
         }
       }

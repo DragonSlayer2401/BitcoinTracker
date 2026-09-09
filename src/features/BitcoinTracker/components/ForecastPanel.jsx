@@ -3,6 +3,7 @@ import Icon from './Icon';
 import StartTimeControl from './StartTimeControl';
 import ForecastStatus from './ForecastStatus';
 import ForecastPrediction from './ForecastPrediction';
+import { PRESSURE_POLICY_VERSION } from '../utils/fixedPrediction.utils';
 import { formatCountdown, formatPrice, formatTime } from '../utils/format.utils';
 import {
   formatLocalDateTime,
@@ -17,10 +18,12 @@ const WITHHELD_REASONS = {
   'no-consensus': 'No direction met the signal rule before the decision window closed.',
   'market-data-unavailable': 'Fresh, uninterrupted market data was unavailable during observation.',
   'model-unavailable': 'The saved model version is unavailable; no replacement call was issued.',
+  'market-conditions': 'Market stress or conflicting trade flow prevented a fixed call.',
 };
 
 function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
   const isWithheld = entry.status === 'withheld';
+  const usesPressure = entry.analysis?.policyVersion === PRESSURE_POLICY_VERSION;
   const observationRemaining =
     progress?.observationRemainingMs ?? Math.max(0, (entry.analysis?.earliestAt ?? now) - now);
   const isObserving = !isWithheld && observationRemaining > 0;
@@ -42,13 +45,17 @@ function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
               ? 'Recording fixed call…'
               : isObserving
                 ? 'Observing market'
-                : 'Waiting for a clear signal'}
+                : usesPressure
+                  ? 'Waiting for fresh data'
+                  : 'Waiting for a clear signal'}
         </h3>
         <p className="small text-secondary mb-0">
           {isWithheld
             ? WITHHELD_REASONS[entry.withholdingReason] || 'No fixed prediction was issued.'
             : progress?.reason ||
-              'Observe for 3–5 minutes; a direction must stay at ≥65% model probability for 60 seconds.'}
+              (usesPressure
+                ? 'The fixed estimate is recorded after three minutes of observation, even when the edge is small.'
+                : 'Earlier policy: a direction must stay at ≥65% model probability for 60 seconds.')}
         </p>
         {!isWithheld && (
           <div className="fixed-progress d-flex justify-content-between align-items-center flex-wrap gap-1 mt-1 small">
@@ -66,7 +73,11 @@ function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
                 {Number.isFinite(progressRemaining) ? formatCountdown(progressRemaining) : '—'}
               </strong>
             </span>
-            <span className="text-secondary">Qualifying quotes: {progress?.sampleCount ?? 0}</span>
+            {!usesPressure && (
+              <span className="text-secondary">
+                Qualifying quotes: {progress?.sampleCount ?? 0}
+              </span>
+            )}
           </div>
         )}
         {hasDifferentTarget && (
@@ -326,10 +337,10 @@ export default function ForecastPanel({
                     ? 'Observing the saved target. Edits update Live; the end time stays fixed.'
                     : 'Target edits update Live. Fixed keeps its recorded target and end.'
                   : isEndTime && startsImmediately
-                    ? 'Observes first, then saves a clear call before the selected end.'
+                    ? 'Records an estimate after three minutes, before the selected end.'
                     : hasActiveSchedule || scheduleMode !== 'now'
                       ? 'Saves the target now; observation begins at the scheduled start.'
-                      : 'Starts the countdown and observes for 3–5 minutes before a fixed call.'}
+                      : 'Starts the countdown; records the fixed estimate after three minutes with fresh data.'}
             </p>
           </div>
         </section>

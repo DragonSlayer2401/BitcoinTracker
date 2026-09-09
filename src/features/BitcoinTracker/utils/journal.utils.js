@@ -1,7 +1,15 @@
-import { getFixedForecastAnalysis, getQualifyingDirection } from './fixedPrediction.utils';
+import {
+  FIXED_PREDICTION_POLICY_VERSION,
+  MARKET_AWARE_POLICY_VERSION,
+  PRESSURE_POLICY_VERSION,
+  getFixedForecastAnalysis,
+  getQualifyingDirection,
+} from './fixedPrediction.utils';
+import { DEADLINE_OUTCOME_DEFINITION, isVerifiedDeadlineOutcome } from './outcome.utils';
+import { PRESSURE_MODEL_VERSION } from './pressureForecast.utils';
 
 const journalKey = 'bitcoin-tracker:journal:v1';
-const journalVersion = 3;
+const journalVersion = 5;
 const forecastDuration = 15 * 60 * 1000;
 const observationWindow = 15 * 1000;
 const scheduleStartGrace = 15 * 1000;
@@ -28,6 +36,7 @@ const withholdingReasons = [
   'no-consensus',
   'market-data-unavailable',
   'model-unavailable',
+  'market-conditions',
 ];
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -45,23 +54,39 @@ export function getValidatedForecast(value) {
   const hasStartsAt = Object.prototype.hasOwnProperty.call(value, 'startsAt');
   const hasTimingMode = Object.prototype.hasOwnProperty.call(value, 'timingMode');
   const hasAnalysis = Object.prototype.hasOwnProperty.call(value, 'analysis');
+  const hasDeadlineDefinition = Object.prototype.hasOwnProperty.call(value, 'outcomeDefinition');
+  const usesPressurePolicy = value.analysis?.policyVersion === PRESSURE_POLICY_VERSION;
   const isEndTimeCapture = hasTimingMode && value.timingMode === 'end';
   const hasNoFixedPrediction = ['analyzing', 'withheld'].includes(value.status);
   const fields = [...snapshotFields];
   if (hasStartsAt) fields.push('startsAt');
   if (hasTimingMode) fields.push('timingMode');
   if (hasAnalysis) fields.push('analysis');
+  if (usesPressurePolicy) fields.push('calculationMode');
+  if (hasDeadlineDefinition) fields.push('outcomeDefinition');
   if (value.status === 'withheld') fields.push('withholdingReason');
   if (value.status === 'resolved') fields.push(...resultFields);
+  if (hasDeadlineDefinition && value.status === 'resolved')
+    fields.push('observedTradeId', 'confirmedThrough', 'completeSince');
   const startsAt = hasStartsAt ? value.startsAt : value.createdAt;
   if (
     Object.keys(value).length !== fields.length ||
     !fields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) ||
     !isIdentifier(value.id) ||
     !isIdentifier(value.modelVersion) ||
+    usesPressurePolicy !== (value.modelVersion === PRESSURE_MODEL_VERSION) ||
+    (usesPressurePolicy &&
+      (hasNoFixedPrediction
+        ? value.calculationMode !== null
+        : !['pressure-adjusted', 'baseline-fallback'].includes(value.calculationMode))) ||
     !isTimestamp(value.createdAt) ||
     !isTimestamp(startsAt) ||
     !isTimestamp(value.expiresAt) ||
+    (hasDeadlineDefinition &&
+      (value.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION ||
+        ![MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION].includes(
+          value.analysis?.policyVersion,
+        ))) ||
     (hasTimingMode && (!isEndTimeCapture || !hasStartsAt)) ||
     value.createdAt < startsAt ||
     (isEndTimeCapture
@@ -102,14 +127,23 @@ export function getValidatedForecast(value) {
     const expectedAnalysis = getFixedForecastAnalysis({
       startedAt: analysis.startedAt,
       expiresAt: value.expiresAt,
+      policyVersion: analysis.policyVersion,
     });
     if (
+      ![
+        FIXED_PREDICTION_POLICY_VERSION,
+        MARKET_AWARE_POLICY_VERSION,
+        PRESSURE_POLICY_VERSION,
+      ].includes(analysis.policyVersion) ||
+      ([MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION].includes(analysis.policyVersion) &&
+        !hasDeadlineDefinition) ||
       !analysisFields.every((field) => analysis[field] === expectedAnalysis[field]) ||
       (hasNoFixedPrediction
         ? value.createdAt !== analysis.startedAt
         : value.createdAt < analysis.earliestAt ||
           value.createdAt > analysis.deadline ||
-          value.direction !== getQualifyingDirection({ ...value, available: true }))
+          value.direction !==
+            getQualifyingDirection({ ...value, available: true }, analysis.policyVersion))
     ) {
       return null;
     }
@@ -118,6 +152,8 @@ export function getValidatedForecast(value) {
   if (
     value.status === 'withheld' &&
     (!withholdingReasons.includes(value.withholdingReason) ||
+      (usesPressurePolicy &&
+        ['no-consensus', 'market-conditions'].includes(value.withholdingReason)) ||
       (value.withholdingReason === 'insufficient-time') !==
         value.analysis.earliestAt > value.analysis.deadline)
   ) {
@@ -128,8 +164,14 @@ export function getValidatedForecast(value) {
     if (
       !isPositiveNumber(value.observedPrice) ||
       !isTimestamp(value.observedAt) ||
-      value.observedAt < value.expiresAt ||
-      value.observedAt > value.expiresAt + observationWindow
+      (hasDeadlineDefinition
+        ? !isVerifiedDeadlineOutcome(
+            { ...value, status: 'observed' },
+            value.expiresAt,
+            value.confirmedThrough,
+          )
+        : value.observedAt < value.expiresAt ||
+          value.observedAt > value.expiresAt + observationWindow)
     ) {
       return null;
     }
@@ -172,10 +214,18 @@ export function getValidatedJournal(value) {
 }
 
 export function getValidatedScheduledForecast(value) {
+  const hasDefinition =
+    isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'outcomeDefinition');
+  const hasPolicy = isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'policyVersion');
+  const fields = [...scheduleFields];
+  if (hasDefinition) fields.push('outcomeDefinition');
+  if (hasPolicy) fields.push('policyVersion');
   if (
     !isRecord(value) ||
-    Object.keys(value).length !== scheduleFields.length ||
-    !scheduleFields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) ||
+    Object.keys(value).length !== fields.length ||
+    !fields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) ||
+    (hasDefinition && value.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION) ||
+    (hasPolicy && (!hasDefinition || value.policyVersion !== PRESSURE_POLICY_VERSION)) ||
     !isIdentifier(value.id) ||
     !isTimestamp(value.createdAt) ||
     !isTimestamp(value.startsAt) ||
@@ -190,7 +240,7 @@ export function getValidatedScheduledForecast(value) {
     return null;
   }
 
-  return Object.fromEntries(scheduleFields.map((field) => [field, value[field]]));
+  return Object.fromEntries(fields.map((field) => [field, value[field]]));
 }
 
 export function getValidatedJournalState(value) {
@@ -240,7 +290,7 @@ export function loadJournal(storage) {
     const parsedJournal = JSON.parse(savedJournal);
     if (
       !isRecord(parsedJournal) ||
-      ![1, 2, journalVersion].includes(parsedJournal.version) ||
+      ![1, 2, 3, 4, journalVersion].includes(parsedJournal.version) ||
       Object.keys(parsedJournal).length !== (parsedJournal.version === 1 ? 2 : 3)
     ) {
       throw new Error('Invalid journal version.');
@@ -251,13 +301,27 @@ export function loadJournal(storage) {
     });
     if (journal === null) throw new Error('Invalid forecast history.');
     if (
-      parsedJournal.version < journalVersion &&
+      parsedJournal.version < 3 &&
       journal.forecasts.some((forecast) =>
         Object.prototype.hasOwnProperty.call(forecast, 'analysis'),
       )
     ) {
       throw new Error('Analysis requires the current journal version.');
     }
+    if (
+      parsedJournal.version < 4 &&
+      (journal.scheduledForecast?.outcomeDefinition ||
+        journal.forecasts.some((forecast) => forecast.outcomeDefinition))
+    )
+      throw new Error('Deadline outcomes require journal version 4.');
+    if (
+      parsedJournal.version < 5 &&
+      (journal.scheduledForecast?.policyVersion ||
+        journal.forecasts.some(
+          (forecast) => forecast.analysis?.policyVersion === PRESSURE_POLICY_VERSION,
+        ))
+    )
+      throw new Error('Pressure forecasts require journal version 5.');
     return { ...journal, warning: null };
   } catch {
     return {

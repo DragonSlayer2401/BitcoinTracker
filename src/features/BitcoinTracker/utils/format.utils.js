@@ -8,8 +8,18 @@ const currencyFormatter = new Intl.NumberFormat('en-US', {
 export const formatPrice = (value) =>
   Number.isFinite(value) ? currencyFormatter.format(value) : '—';
 
-export const formatPercent = (value) =>
-  Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '—';
+export const formatPercent = (value, fractionDigits = 1) =>
+  Number.isFinite(value) ? `${(value * 100).toFixed(fractionDigits)}%` : '—';
+
+export function getPredictionLabel(forecast) {
+  const usesPressure = forecast.modelVersion === PRESSURE_MODEL_VERSION;
+  if (forecast.direction !== 'above' && forecast.direction !== 'below') {
+    return usesPressure ? 'No directional edge' : 'Too close to call';
+  }
+  const hasSmallEdge =
+    usesPressure && Math.max(forecast.aboveProbability, forecast.belowProbability) < 0.55;
+  return `${hasSmallEdge ? 'Slight lean' : 'Likely'} ${forecast.direction}`;
+}
 
 export const formatTime = (value) =>
   Number.isFinite(value)
@@ -36,3 +46,4 @@ export const formatDateTime = (value) =>
         timeZoneName: 'short',
       })
     : '—';
+import { PRESSURE_MODEL_VERSION } from './pressureForecast.utils';

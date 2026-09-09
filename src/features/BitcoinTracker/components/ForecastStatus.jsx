@@ -1,5 +1,6 @@
 import { Button } from 'react-bootstrap';
 import { formatCountdown, formatDateTime, formatPercent, formatPrice } from '../utils/format.utils';
+import { DEADLINE_OUTCOME_DEFINITION } from '../utils/outcome.utils';
 
 export default function ForecastStatus({
   activeForecast,
@@ -140,6 +141,9 @@ export default function ForecastStatus({
             <dd>{formatDateTime(entry.expiresAt)}</dd>
           </div>
         </dl>
+      )}
+      {entry?.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION && (
+        <span className="small text-secondary">Result: Coinbase last trade at deadline</span>
       )}
       {completedForecast && (
         <p className="small mt-2 mb-0" role="status">

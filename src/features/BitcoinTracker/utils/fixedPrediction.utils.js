@@ -1,4 +1,6 @@
 export const FIXED_PREDICTION_POLICY_VERSION = 'observed-consensus-v1';
+export const MARKET_AWARE_POLICY_VERSION = 'market-aware-consensus-v2';
+export const PRESSURE_POLICY_VERSION = 'pressure-snapshot-v3';
 export const MINIMUM_OBSERVATION_MS = 3 * 60_000;
 export const MAXIMUM_OBSERVATION_MS = 5 * 60_000;
 export const MINIMUM_LEAD_MS = 60_000;
@@ -7,7 +9,11 @@ export const MAXIMUM_SAMPLE_GAP_MS = 15_000;
 export const MINIMUM_CONFIRMATION_SAMPLES = 7;
 export const MINIMUM_CALL_PROBABILITY = 0.65;
 
-export function getFixedForecastAnalysis({ startedAt, expiresAt }) {
+export function getFixedForecastAnalysis({
+  startedAt,
+  expiresAt,
+  policyVersion = FIXED_PREDICTION_POLICY_VERSION,
+}) {
   return {
     startedAt,
     earliestAt: startedAt + MINIMUM_OBSERVATION_MS,
@@ -15,12 +21,29 @@ export function getFixedForecastAnalysis({ startedAt, expiresAt }) {
       startedAt,
       Math.min(startedAt + MAXIMUM_OBSERVATION_MS, expiresAt - MINIMUM_LEAD_MS),
     ),
-    policyVersion: FIXED_PREDICTION_POLICY_VERSION,
+    policyVersion,
   };
 }
 
-export function getQualifyingDirection(estimate) {
+export function getQualifyingDirection(estimate, policyVersion = FIXED_PREDICTION_POLICY_VERSION) {
   if (!estimate?.available) return null;
+  if (policyVersion === PRESSURE_POLICY_VERSION) {
+    if (
+      !Number.isFinite(estimate.aboveProbability) ||
+      !Number.isFinite(estimate.belowProbability) ||
+      estimate.aboveProbability < 0 ||
+      estimate.aboveProbability > 1 ||
+      estimate.belowProbability < 0 ||
+      estimate.belowProbability > 1 ||
+      Math.abs(estimate.aboveProbability + estimate.belowProbability - 1) > 0.000001
+    )
+      return null;
+    return estimate.aboveProbability > 0.5
+      ? 'above'
+      : estimate.aboveProbability < 0.5
+        ? 'below'
+        : 'neutral';
+  }
   if (estimate.aboveProbability >= MINIMUM_CALL_PROBABILITY) return 'above';
   if (estimate.belowProbability >= MINIMUM_CALL_PROBABILITY) return 'below';
   return null;
@@ -46,7 +69,36 @@ export function updateConfirmationSamples(samples, sample) {
 }
 
 export function getFixedPredictionProgress({ analysis, samples, estimate, now }) {
-  const direction = getQualifyingDirection(estimate);
+  const direction = getQualifyingDirection(estimate, analysis.policyVersion);
+  if (analysis.policyVersion === PRESSURE_POLICY_VERSION) {
+    const observationRemainingMs = Math.max(0, analysis.earliestAt - now);
+    const insufficientTime = analysis.earliestAt > analysis.deadline;
+    const canPublish =
+      !insufficientTime &&
+      now >= analysis.earliestAt &&
+      now <= analysis.deadline &&
+      direction !== null;
+    const mustWithhold = insufficientTime || (now >= analysis.deadline && !canPublish);
+    return {
+      phase: mustWithhold
+        ? 'withheld'
+        : canPublish
+          ? 'ready'
+          : observationRemainingMs > 0
+            ? 'observing'
+            : 'confirming',
+      reason:
+        direction === null
+          ? 'Waiting for a valid estimate from fresh market data.'
+          : observationRemainingMs > 0
+            ? 'Observing the market before capturing the fixed estimate.'
+            : 'The current estimate is ready to be fixed, including a weak or balanced signal.',
+      withholdingReason: insufficientTime ? 'insufficient-time' : 'market-data-unavailable',
+      observationRemainingMs,
+      confirmationRemainingMs: 0,
+      sampleCount: 0,
+    };
+  }
   const lastSample = samples.at(-1);
   const hasFreshRun =
     lastSample &&
