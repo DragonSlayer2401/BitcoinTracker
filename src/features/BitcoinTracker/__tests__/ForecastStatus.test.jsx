@@ -201,7 +201,7 @@ describe('forecast countdown display', () => {
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:55$/);
   });
 
-  test('shows the remaining fixed window and the shorter data-capture grace separately', () => {
+  test('shows time remaining to close and the last eligible automatic start separately', () => {
     const schedule = makeSchedule();
     const { rerender } = render(
       <ForecastStatus schedule={schedule} now={schedule.startsAt + 5000} />,
@@ -210,12 +210,12 @@ describe('forecast countdown display', () => {
     expect(screen.getByRole('heading', { name: 'Waiting for start data' })).toBeVisible();
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:55$/);
     expect(screen.getByRole('timer', { name: 'Start window remaining' })).toHaveTextContent(
-      /^00:10$/,
+      /^14:35$/,
     );
     expect(screen.queryByRole('timer', { name: 'Time until start' })).not.toBeInTheDocument();
 
-    rerender(<ForecastStatus schedule={schedule} now={schedule.startsAt + 15_000} />);
-    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:45$/);
+    rerender(<ForecastStatus schedule={schedule} now={schedule.expiresAt - 20_000} />);
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^00:20$/);
     expect(screen.getByRole('timer', { name: 'Start window remaining' })).toHaveTextContent(
       /^00:00$/,
     );

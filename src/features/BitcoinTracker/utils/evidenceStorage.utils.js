@@ -1,22 +1,29 @@
+import { getKalshiReferenceQuote } from './kalshi/marketConditions.utils';
+
 const DATABASE_NAME = 'bitcoin-tracker-evidence';
 const STORE_NAME = 'events';
 export const MAXIMUM_EVIDENCE_ROWS = 25_000;
 
-function openEvidenceDatabase() {
+export function openEvidenceDatabase() {
   return new Promise((resolve, reject) => {
     if (!globalThis.indexedDB) {
       reject(new Error('Research recording is unavailable in this browser.'));
       return;
     }
-    const request = indexedDB.open(DATABASE_NAME, 1);
+    const request = indexedDB.open(DATABASE_NAME, 2);
     let settled = false;
     request.onupgradeneeded = () => {
       if (settled) {
         request.transaction.abort();
         return;
       }
-      const store = request.result.createObjectStore(STORE_NAME, { keyPath: 'eventId' });
-      store.createIndex('recordedAt', 'recordedAt');
+      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
+        const store = request.result.createObjectStore(STORE_NAME, { keyPath: 'eventId' });
+        store.createIndex('recordedAt', 'recordedAt');
+      }
+      if (!request.result.objectStoreNames.contains('forecast-outbox')) {
+        request.result.createObjectStore('forecast-outbox', { keyPath: 'key' });
+      }
     };
     request.onsuccess = () => {
       if (settled) return request.result.close();
@@ -127,6 +134,10 @@ export function getEvidenceRow({
   inputObservedAt,
   sessionOrigin = 'new',
   outcomeStatus,
+  cohort = 'manual',
+  recordingSessionId,
+  learningFeatures,
+  shadowPrediction,
 }) {
   const timestamp = event === 'observation' ? Math.floor(now / 5000) * 5000 : now;
   const canHaveInputs =
@@ -138,14 +149,16 @@ export function getEvidenceRow({
   const inputEstimate = canHaveInputs ? estimate : null;
   const inputConditions = canHaveInputs ? conditions : null;
   const inputStream = canHaveInputs ? stream : null;
+  const reference = getKalshiReferenceQuote(inputEstimate, inputTicker);
   const hasIssuedCall = entry.aboveProbability !== null && Number.isFinite(entry.aboveProbability);
   const row = {
     schemaVersion: 1,
-    eventId: `${entry.id}:${event}:${event === 'observation' ? timestamp : entry.status}`,
+    eventId: `${entry.id}:${event}:${event === 'observation' ? `${timestamp}${recordingSessionId ? `:${recordingSessionId}` : ''}` : event === 'restored' ? `${entry.status}:${now}` : entry.status}`,
     event,
     forecastId: entry.id,
     recordedAt: now,
     sessionOrigin,
+    cohort,
     inputObservedAt: canHaveInputs ? inputObservedAt : null,
     featureCutoffAt: canHaveInputs ? inputObservedAt : null,
     inputStatus: canHaveInputs
@@ -160,20 +173,41 @@ export function getEvidenceRow({
     decisionAt: event === 'decision' && canHaveInputs ? inputObservedAt : null,
     expiresAt: entry.expiresAt,
     target: entry.target,
-    source: 'Coinbase BTC-USD',
+    source: entry.kalshiMarket ? 'Kalshi KXBTC15M / CF Benchmarks BRTI' : 'Coinbase BTC-USD',
+    ...(entry.kalshiMarket
+      ? {
+          kalshiMarket: entry.kalshiMarket,
+          kalshi: inputEstimate?.kalshi ?? entry.kalshi ?? null,
+          kalshiOutcome: entry.kalshiOutcome ?? null,
+          checkpointMinutes: entry.checkpointMinutes ?? null,
+          kalshiQuote: inputEstimate?.kalshiQuote ?? null,
+        }
+      : {}),
     outcomeDefinition: entry.outcomeDefinition ?? 'legacy-first-post-deadline-sample',
-    modelVersion: entry.modelVersion,
+    modelVersion:
+      event === 'observation'
+        ? (inputEstimate?.modelVersion ?? entry.modelVersion)
+        : entry.modelVersion,
     policyVersion: entry.analysis?.policyVersion ?? 'immediate-legacy',
-    calibrationVersion: null,
+    calibrationVersion:
+      inputEstimate?.learning?.calibrationVersion ?? entry.learning?.calibrationVersion ?? null,
+    learningFeatures: canHaveInputs
+      ? (learningFeatures ?? inputEstimate?.learningFeatures ?? null)
+      : null,
+    shadowPrediction: canHaveInputs
+      ? (shadowPrediction ?? inputEstimate?.shadowPrediction ?? null)
+      : null,
+    learning: inputEstimate?.learning ?? entry.learning ?? null,
     calculationMode: entry.calculationMode ?? null,
-    quoteTime: inputTicker?.time ?? null,
-    receivedAt: inputTicker?.receivedAt ?? null,
-    spot: inputTicker?.price ?? null,
-    currentSide: !inputTicker
+    quoteTime: reference?.time ?? null,
+    receivedAt: reference?.receivedAt ?? null,
+    spot: reference?.price ?? null,
+    referenceSource: inputEstimate?.kalshi?.referenceSource ?? null,
+    currentSide: !reference
       ? null
-      : inputTicker.price > entry.target
+      : reference.price > entry.target
         ? 'above'
-        : inputTicker.price < entry.target
+        : reference.price < entry.target
           ? 'below'
           : 'equal',
     aboveProbability:

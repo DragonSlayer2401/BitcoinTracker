@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { appendEvidenceRows, getEvidenceRow } from '../utils/evidenceStorage.utils';
-import { getForecast } from '../utils/forecast.utils';
-import { getPressureForecast } from '../utils/pressureForecast.utils';
-import { PRESSURE_POLICY_VERSION } from '../utils/fixedPrediction.utils';
-import { getMarketConditions } from '../utils/marketConditions.utils';
-import { DEADLINE_OUTCOME_DEFINITION, isVerifiedDeadlineOutcome } from '../utils/outcome.utils';
+import { getKalshiMarketConditions } from '../utils/kalshi/marketConditions.utils';
+import { getResearchForecast } from '../utils/researchForecast.utils';
+import { KALSHI_OUTCOME_DEFINITION, isVerifiedKalshiOutcome } from '../utils/kalshi/contract.utils';
 
 export default function useForecastEvidence({
   forecasts,
@@ -14,6 +12,9 @@ export default function useForecastEvidence({
   now: clockTick,
   progress,
   isReady,
+  models,
+  benchmark,
+  kalshiOutcomes = [],
 }) {
   const tracked = useRef(new Map());
   const recordedIds = useRef(new Set());
@@ -23,6 +24,8 @@ export default function useForecastEvidence({
   const hasStoppedRecording = useRef(false);
   const isMounted = useRef(true);
   const [warning, setWarning] = useState(null);
+  const recordingSessionId = useRef(null);
+  const retryAt = useRef(0);
 
   useEffect(() => {
     isMounted.current = true;
@@ -32,11 +35,13 @@ export default function useForecastEvidence({
   }, []);
 
   useEffect(() => {
-    if (!isReady || !clockTick || hasStoppedRecording.current) return;
+    if (!isReady || !clockTick || clockTick < retryAt.current) return;
+    hasStoppedRecording.current = false;
+    recordingSessionId.current ??= crypto.randomUUID();
     const now = Date.now();
     const rows = [];
     for (const entry of forecasts ?? []) {
-      if (entry.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION) continue;
+      if (entry.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION) continue;
       const previous = tracked.current.get(entry.id);
       if (!previous) {
         const isRestored = !hasStarted.current || entry.status !== 'analyzing';
@@ -83,52 +88,49 @@ export default function useForecastEvidence({
       const { entry, sessionOrigin } = record;
       // A no-call remains in this map through its endpoint even if the visible journal is cleared.
       if (entry.status === 'withheld' && !record.hasOutcome && now >= entry.expiresAt) {
-        const outcome = stream?.getDeadlineOutcome?.(entry.expiresAt, now);
-        const status = isVerifiedDeadlineOutcome(outcome, entry.expiresAt, now)
-          ? 'observed'
-          : outcome?.status === 'unobserved' || now > entry.expiresAt + 15_000
-            ? 'unobserved'
-            : 'waiting';
-        if (status !== 'waiting') {
-          const observed =
-            status === 'observed'
-              ? {
-                  observedAt: outcome.observedAt,
-                  observedPrice: outcome.observedPrice,
-                  observedTradeId: outcome.observedTradeId,
-                  confirmedThrough: outcome.confirmedThrough,
-                  completeSince: outcome.completeSince,
-                  outcome:
-                    outcome.observedPrice > entry.target
-                      ? 'above'
-                      : outcome.observedPrice < entry.target
-                        ? 'below'
-                        : 'equal',
-                }
-              : {};
-          rows.push(
-            getEvidenceRow({
-              entry: { ...entry, ...observed },
-              event: 'outcome',
-              now,
-              sessionOrigin,
-              outcomeStatus: status,
-              reason:
-                outcome?.reason ??
-                (status === 'unobserved' ? 'The deadline trade could not be verified.' : null),
-            }),
+        if (entry.kalshiMarket) {
+          const outcome = kalshiOutcomes.find((result) =>
+            isVerifiedKalshiOutcome(result, entry.kalshiMarket, now),
           );
-          record.hasOutcome = true;
+          if (outcome) {
+            rows.push(
+              getEvidenceRow({
+                entry: {
+                  ...entry,
+                  observedPrice: outcome.observedPrice,
+                  observedAt: outcome.observedAt,
+                  outcome: outcome.outcome,
+                  kalshiOutcome: outcome,
+                },
+                event: 'outcome',
+                now,
+                sessionOrigin,
+                outcomeStatus: 'observed',
+              }),
+            );
+            record.hasOutcome = true;
+          }
+          continue;
         }
       }
       if (entry.status !== 'analyzing' || now >= entry.expiresAt) continue;
       const horizonMinutes = (entry.expiresAt - now) / 60_000;
-      const estimate = (
-        entry.analysis?.policyVersion === PRESSURE_POLICY_VERSION
-          ? getPressureForecast
-          : getForecast
-      )({ candles, ticker, target: entry.target, now, horizonMinutes, stream });
-      const conditions = getMarketConditions({
+      const estimate = getResearchForecast(
+        {
+          candles,
+          ticker,
+          target: entry.target,
+          now,
+          horizonMinutes,
+          stream,
+          expiresAt: entry.expiresAt,
+          kalshiMarket: entry.kalshiMarket,
+          benchmark,
+        },
+        models,
+        entry.startsAt,
+      );
+      const conditions = getKalshiMarketConditions({
         candles,
         ticker,
         target: entry.target,
@@ -146,6 +148,7 @@ export default function useForecastEvidence({
           estimate,
           conditions,
           stream,
+          recordingSessionId: recordingSessionId.current,
           reason:
             progress?.decisionEvidence?.forecastId === entry.id
               ? progress.reason
@@ -166,6 +169,7 @@ export default function useForecastEvidence({
         while (isMounted.current && !hasStoppedRecording.current && pendingRows.current.size) {
           const batch = [...pendingRows.current.values()].slice(0, 100);
           await appendEvidenceRows(batch);
+          if (isMounted.current) setWarning(null);
           for (const row of batch) {
             recordedIds.current.add(row.eventId);
             pendingRows.current.delete(row.eventId);
@@ -173,14 +177,25 @@ export default function useForecastEvidence({
         }
       } catch (error) {
         hasStoppedRecording.current = true;
-        pendingRows.current.clear();
+        retryAt.current = Date.now() + 30_000;
         if (isMounted.current) setWarning(error.message);
       } finally {
         isWriting.current = false;
       }
     }
     writePendingRows();
-  }, [forecasts, candles, ticker, stream, clockTick, progress, isReady]);
+  }, [
+    forecasts,
+    candles,
+    ticker,
+    stream,
+    clockTick,
+    progress,
+    isReady,
+    models,
+    benchmark,
+    kalshiOutcomes,
+  ]);
 
   return warning;
 }

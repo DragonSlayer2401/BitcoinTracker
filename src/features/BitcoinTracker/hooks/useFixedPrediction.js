@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { fixedForecastPublished, fixedForecastWithheld } from '../state/slices/trackerSlice';
-import { getForecast } from '../utils/forecast.utils';
-import { getPressureForecast } from '../utils/pressureForecast.utils';
 import {
   getFixedPredictionProgress,
   getQualifyingDirection,
   updateConfirmationSamples,
-  MARKET_AWARE_POLICY_VERSION,
-  PRESSURE_POLICY_VERSION,
+  KALSHI_POLICY_VERSION,
 } from '../utils/fixedPrediction.utils';
-import { getMarketConditions } from '../utils/marketConditions.utils';
-import { getPublicationRisk } from '../utils/publicationRisk.utils';
+import {
+  getKalshiMarketConditions,
+  getKalshiReferenceQuote,
+  hasIndependentKalshiBenchmark,
+} from '../utils/kalshi/marketConditions.utils';
+import { getResearchForecast } from '../utils/researchForecast.utils';
+import { OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION } from '../utils/learning/model.utils';
 
 export default function useFixedPrediction({
   forecast,
@@ -20,13 +22,19 @@ export default function useFixedPrediction({
   now,
   hasRequestError,
   stream,
+  models,
+  benchmark,
 }) {
   const dispatch = useDispatch();
   const observations = useRef({ id: null, samples: [] });
   const [progress, setProgress] = useState(null);
 
   useEffect(() => {
-    if (forecast?.status !== 'analyzing' || !now) {
+    if (
+      forecast?.status !== 'analyzing' ||
+      forecast.analysis?.policyVersion !== KALSHI_POLICY_VERSION ||
+      !now
+    ) {
       observations.current = { id: null, samples: [] };
       setProgress(null);
       return;
@@ -36,51 +44,48 @@ export default function useFixedPrediction({
     }
 
     const capturedAt = Date.now();
-    const usesPressure = forecast.analysis.policyVersion === PRESSURE_POLICY_VERSION;
-    const estimate = (usesPressure ? getPressureForecast : getForecast)({
+    const estimate = getResearchForecast(
+      {
+        candles,
+        ticker,
+        target: forecast.target,
+        now: capturedAt,
+        horizonMinutes: (forecast.expiresAt - capturedAt) / 60_000,
+        stream,
+        kalshiMarket: forecast.kalshiMarket,
+        benchmark,
+        expiresAt: forecast.expiresAt,
+      },
+      models,
+      forecast.startsAt,
+    );
+    const conditions = getKalshiMarketConditions({
       candles,
       ticker,
       target: forecast.target,
       now: capturedAt,
       horizonMinutes: (forecast.expiresAt - capturedAt) / 60_000,
-      stream,
+      forecast: estimate,
     });
-    const usesMarketConditions = forecast.analysis.policyVersion === MARKET_AWARE_POLICY_VERSION;
-    const conditions =
-      usesMarketConditions || usesPressure
-        ? getMarketConditions({
-            candles,
-            ticker,
-            target: forecast.target,
-            now: capturedAt,
-            horizonMinutes: (forecast.expiresAt - capturedAt) / 60_000,
-            forecast: estimate,
-          })
-        : null;
-    const marketRisk = usesMarketConditions
-      ? getPublicationRisk({
-          conditions,
-          stream,
-          direction: getQualifyingDirection(estimate),
-          target: forecast.target,
-        })
-      : null;
-    // Reloading never reconstructs a consensus from unseen quotes. Fresh observations
-    // must establish it again; the saved observation deadline is never moved.
+    const reference = getKalshiReferenceQuote(estimate, ticker);
+    // A restored observation needs fresh inputs from its reference; its deadline never moves.
     if (
-      hasRequestError ||
-      !ticker ||
-      ticker.time < forecast.analysis.startedAt ||
-      ticker.receivedAt < forecast.analysis.startedAt ||
-      ticker.time < (observations.current.samples.at(-1)?.quoteTime ?? 0) ||
-      estimate.modelVersion !== forecast.modelVersion ||
-      (marketRisk && !marketRisk.canPublish)
+      (hasRequestError && !hasIndependentKalshiBenchmark(estimate)) ||
+      !reference ||
+      reference.time < forecast.analysis.startedAt ||
+      reference.receivedAt < forecast.analysis.startedAt ||
+      reference.time < (observations.current.samples.at(-1)?.quoteTime ?? 0) ||
+      (estimate.modelVersion !== forecast.modelVersion &&
+        !(
+          [OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION].includes(estimate.modelVersion) &&
+          estimate.learning?.applied
+        ))
     ) {
       estimate.available = false;
     }
     observations.current.samples = updateConfirmationSamples(observations.current.samples, {
       time: capturedAt,
-      quoteTime: ticker?.time,
+      quoteTime: reference?.time,
       direction: getQualifyingDirection(estimate, forecast.analysis.policyVersion),
     });
     const nextProgress = getFixedPredictionProgress({
@@ -89,21 +94,14 @@ export default function useFixedPrediction({
       estimate,
       now: capturedAt,
     });
-    if (marketRisk && !marketRisk.canPublish) {
-      nextProgress.reason = marketRisk.reason;
-      if (nextProgress.withholdingReason !== 'insufficient-time')
-        nextProgress.withholdingReason = marketRisk.code;
-    }
-    if (estimate.modelVersion !== forecast.modelVersion) {
+
+    if (estimate.modelVersion !== forecast.modelVersion && !estimate.learning?.applied) {
       nextProgress.reason =
         'The saved model version is unavailable. This fixed call cannot be issued.';
       if (nextProgress.withholdingReason !== 'insufficient-time')
         nextProgress.withholdingReason = 'model-unavailable';
     }
-    if (
-      (usesMarketConditions || usesPressure) &&
-      ['ready', 'withheld'].includes(nextProgress.phase)
-    ) {
+    if (['ready', 'withheld'].includes(nextProgress.phase)) {
       // Retain the exact decision inputs for prospective evaluation before React advances state.
       nextProgress.decisionEvidence = {
         forecastId: forecast.id,
@@ -124,18 +122,21 @@ export default function useFixedPrediction({
           forecast: {
             ...forecast,
             createdAt: capturedAt,
-            price: ticker.price,
+            price: reference.price,
             aboveProbability: estimate.aboveProbability,
             belowProbability: estimate.belowProbability,
             direction: estimate.direction,
             status: 'pending',
-            ...(usesPressure
-              ? {
-                  calculationMode: estimate.pressure?.applied
-                    ? 'pressure-adjusted'
-                    : 'baseline-fallback',
-                }
+            ...(forecast.kalshiMarket ? { kalshi: estimate.kalshi } : {}),
+            ...(estimate.learning?.applied
+              ? { modelVersion: estimate.modelVersion, learning: estimate.learning }
               : {}),
+
+            calculationMode: estimate.learning?.applied
+              ? 'outcome-trained'
+              : estimate.pressure?.applied
+                ? 'pressure-adjusted'
+                : 'baseline-fallback',
           },
         }),
       );
@@ -148,7 +149,7 @@ export default function useFixedPrediction({
         }),
       );
     }
-  }, [forecast, candles, ticker, now, hasRequestError, stream, dispatch]);
+  }, [forecast, candles, ticker, now, hasRequestError, stream, models, dispatch, benchmark]);
 
   return progress;
 }

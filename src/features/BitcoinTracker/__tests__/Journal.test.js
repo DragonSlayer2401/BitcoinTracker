@@ -516,7 +516,7 @@ describe('forecasts joining a selected end-time window', () => {
     const storage = makeStorage();
     expect(saveJournal(state.forecasts, storage)).toBeNull();
     const saved = JSON.parse(storage.setItem.mock.calls[0][1]);
-    expect(saved).toEqual({ version: 5, forecasts: [forecast], scheduledForecast: null });
+    expect(saved).toEqual({ version: 7, forecasts: [forecast], scheduledForecast: null });
 
     storage.getItem.mockReturnValue(storage.setItem.mock.calls[0][1]);
     const loaded = loadJournal(storage);
@@ -573,24 +573,6 @@ describe('forecast journal scoring', () => {
       accuracy: null,
       brierScore: null,
     });
-  });
-
-  test('excludes neutral directions and equal prices from accuracy, and equal prices from Brier', () => {
-    const forecasts = [
-      makeResolved(),
-      makeResolved({ id: 'incorrect', observedPrice: 70_000, outcome: 'below', correct: false }),
-      makeResolved({ id: 'neutral', direction: 'neutral', correct: null }),
-      makeResolved({ id: 'equal', observedPrice: 71_000, outcome: 'equal', correct: null }),
-      makeForecast({ id: 'missing', status: 'unobserved' }),
-    ];
-    const summary = selectJournalSummary({ tracker: { forecasts } });
-    expect(summary).toMatchObject({
-      resolvedCount: 4,
-      scoredCount: 2,
-      correctCount: 1,
-      accuracy: 0.5,
-    });
-    expect(summary.brierScore).toBeCloseTo((0.09 + 0.49 + 0.09) / 3);
   });
 
   test.each([
@@ -714,7 +696,7 @@ describe('forecast journal persistence', () => {
     expect(saveJournal([makeResolved()], storage, scheduledForecast)).toBeNull();
     const saved = storage.setItem.mock.calls[0][1];
     expect(JSON.parse(saved)).toEqual({
-      version: 5,
+      version: 7,
       forecasts: [makeResolved()],
       scheduledForecast,
     });
@@ -742,7 +724,7 @@ describe('forecast journal persistence', () => {
     });
     expect(saveJournal(restored.forecasts, storage, restored.scheduledForecast)).toBeNull();
     expect(JSON.parse(storage.setItem.mock.calls[0][1])).toEqual({
-      version: 5,
+      version: 7,
       forecasts: [makeResolved()],
       scheduledForecast: null,
     });

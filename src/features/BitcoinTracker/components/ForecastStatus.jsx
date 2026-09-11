@@ -1,6 +1,6 @@
 import { Button } from 'react-bootstrap';
 import { formatCountdown, formatDateTime, formatPercent, formatPrice } from '../utils/format.utils';
-import { DEADLINE_OUTCOME_DEFINITION } from '../utils/outcome.utils';
+import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 
 export default function ForecastStatus({
   activeForecast,
@@ -72,7 +72,9 @@ export default function ForecastStatus({
               ? 'No fixed call'
               : completedForecast.status === 'resolved'
                 ? 'Result observed'
-                : 'Result unobserved'
+                : completedForecast.status === 'awaiting-settlement'
+                  ? 'Awaiting Kalshi settlement'
+                  : 'Result unobserved'
             : activeForecast
               ? isSettling
                 ? 'Observing result'
@@ -110,14 +112,16 @@ export default function ForecastStatus({
       {schedule?.status === 'scheduled' && !activeForecast && (
         <div className="countdown-secondary-row d-flex align-items-center justify-content-between flex-wrap gap-2 mt-2 small">
           <span className="d-inline-flex align-items-center gap-2">
-            <span className="text-secondary">{isStarting ? 'Start data grace' : 'Starts in'}</span>
+            <span className="text-secondary">
+              {isStarting ? 'Start available for' : 'Starts in'}
+            </span>
             <strong
               className="countdown-secondary"
               role="timer"
               aria-label={isStarting ? 'Start window remaining' : 'Time until start'}
             >
               {formatCountdown(
-                (isStarting ? schedule.startsAt + 15_000 : schedule.startsAt) - currentTime,
+                (isStarting ? schedule.expiresAt - 20_000 : schedule.startsAt) - currentTime,
               )}
             </strong>
           </span>
@@ -142,16 +146,22 @@ export default function ForecastStatus({
           </div>
         </dl>
       )}
-      {entry?.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION && (
-        <span className="small text-secondary">Result: Coinbase last trade at deadline</span>
+      {entry?.outcomeDefinition === KALSHI_OUTCOME_DEFINITION && (
+        <span className="small text-secondary">
+          Kalshi · final-minute BRTI average · ties are Yes
+        </span>
       )}
       {completedForecast && (
         <p className="small mt-2 mb-0" role="status">
           {isWithheld
             ? 'No prediction was issued for this window.'
             : completedForecast.status === 'resolved'
-              ? `Observed ${completedForecast.outcome === 'equal' ? 'at' : completedForecast.outcome} target: ${formatPrice(completedForecast.observedPrice)}`
-              : 'No eligible price was observed at the deadline.'}
+              ? completedForecast.kalshiMarket
+                ? `Kalshi settled ${completedForecast.kalshiOutcome.result === 'yes' ? 'Yes' : 'No'} · ${formatPrice(completedForecast.observedPrice)}`
+                : `Observed ${completedForecast.outcome === 'equal' ? 'at' : completedForecast.outcome} target: ${formatPrice(completedForecast.observedPrice)}`
+              : completedForecast.status === 'awaiting-settlement'
+                ? 'The event has closed. Its official result will be retrieved automatically.'
+                : 'No eligible price was observed at the deadline.'}
         </p>
       )}
       {activeForecast && !isAnalyzing && showRecordedDetails && (
@@ -163,7 +173,7 @@ export default function ForecastStatus({
               <dd>{formatDateTime(activeForecast.createdAt)}</dd>
             </div>
             <div>
-              <dt>Above / below</dt>
+              <dt>Yes / No</dt>
               <dd>
                 {formatPercent(activeForecast.aboveProbability)} /{' '}
                 {formatPercent(activeForecast.belowProbability)}
@@ -179,7 +189,7 @@ export default function ForecastStatus({
               ? 'Observing fresh data before issuing a fixed prediction.'
               : 'Recorded target, probabilities, and end time are fixed.'
             : isMissed
-              ? 'No valid start was captured within 15 seconds. Select a new start time.'
+              ? 'Fresh data was unavailable before the final 20 seconds. Choose another Kalshi event.'
               : 'Keep this tab open for the start.'}
         </p>
       )}

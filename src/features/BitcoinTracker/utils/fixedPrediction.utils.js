@@ -1,6 +1,9 @@
 export const FIXED_PREDICTION_POLICY_VERSION = 'observed-consensus-v1';
 export const MARKET_AWARE_POLICY_VERSION = 'market-aware-consensus-v2';
 export const PRESSURE_POLICY_VERSION = 'pressure-snapshot-v3';
+export const KALSHI_POLICY_VERSION = 'kalshi-snapshot-v4';
+export const usesSnapshotPolicy = (version) =>
+  [PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION].includes(version);
 export const MINIMUM_OBSERVATION_MS = 3 * 60_000;
 export const MAXIMUM_OBSERVATION_MS = 5 * 60_000;
 export const MINIMUM_LEAD_MS = 60_000;
@@ -14,6 +17,19 @@ export function getFixedForecastAnalysis({
   expiresAt,
   policyVersion = FIXED_PREDICTION_POLICY_VERSION,
 }) {
+  if (policyVersion === KALSHI_POLICY_VERSION) {
+    const remaining = expiresAt - startedAt;
+    const observation = Math.min(
+      MINIMUM_OBSERVATION_MS,
+      Math.max(15_000, Math.floor(remaining / 4000) * 1000),
+    );
+    return {
+      startedAt,
+      earliestAt: startedAt + observation,
+      deadline: Math.max(startedAt, Math.min(startedAt + MAXIMUM_OBSERVATION_MS, expiresAt - 5000)),
+      policyVersion,
+    };
+  }
   return {
     startedAt,
     earliestAt: startedAt + MINIMUM_OBSERVATION_MS,
@@ -27,7 +43,7 @@ export function getFixedForecastAnalysis({
 
 export function getQualifyingDirection(estimate, policyVersion = FIXED_PREDICTION_POLICY_VERSION) {
   if (!estimate?.available) return null;
-  if (policyVersion === PRESSURE_POLICY_VERSION) {
+  if (usesSnapshotPolicy(policyVersion)) {
     if (
       !Number.isFinite(estimate.aboveProbability) ||
       !Number.isFinite(estimate.belowProbability) ||
@@ -70,7 +86,7 @@ export function updateConfirmationSamples(samples, sample) {
 
 export function getFixedPredictionProgress({ analysis, samples, estimate, now }) {
   const direction = getQualifyingDirection(estimate, analysis.policyVersion);
-  if (analysis.policyVersion === PRESSURE_POLICY_VERSION) {
+  if (usesSnapshotPolicy(analysis.policyVersion)) {
     const observationRemainingMs = Math.max(0, analysis.earliestAt - now);
     const insufficientTime = analysis.earliestAt > analysis.deadline;
     const canPublish =

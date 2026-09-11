@@ -1,9 +1,5 @@
 import { createSelector } from '@reduxjs/toolkit';
-import { DEADLINE_OUTCOME_DEFINITION } from '../../utils/outcome.utils';
-import {
-  MARKET_AWARE_POLICY_VERSION,
-  PRESSURE_POLICY_VERSION,
-} from '../../utils/fixedPrediction.utils';
+import { KALSHI_OUTCOME_DEFINITION } from '../../utils/kalshi/contract.utils';
 
 export const selectTrackerState = (state) => state.tracker;
 export const selectForecasts = (state) => selectTrackerState(state).forecasts;
@@ -27,7 +23,8 @@ function getJournalSummary(forecasts) {
   const withheldCount = forecasts.filter((forecast) => forecast.status === 'withheld').length;
   const callCount = forecasts.filter(
     (forecast) =>
-      forecast.analysis && ['pending', 'resolved', 'unobserved'].includes(forecast.status),
+      forecast.analysis &&
+      ['pending', 'resolved', 'unobserved', 'awaiting-settlement'].includes(forecast.status),
   ).length;
   const probabilityResults = resolved.filter(
     (forecast) =>
@@ -60,36 +57,13 @@ function getJournalSummary(forecasts) {
   };
 }
 
-export const selectJournalSummary = createSelector([selectForecasts], getJournalSummary);
+export const selectJournalSummary = createSelector([selectForecasts], (forecasts) =>
+  getJournalSummary(
+    forecasts.filter((forecast) => forecast.outcomeDefinition === KALSHI_OUTCOME_DEFINITION),
+  ),
+);
 export const selectJournalOutcomeGroups = createSelector([selectForecasts], (forecasts) => ({
-  pressure: getJournalSummary(
-    forecasts.filter(
-      (forecast) =>
-        forecast.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION &&
-        forecast.analysis?.policyVersion === PRESSURE_POLICY_VERSION,
-    ),
-  ),
-  marketAware: getJournalSummary(
-    forecasts.filter(
-      (forecast) =>
-        forecast.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION &&
-        forecast.analysis?.policyVersion === MARKET_AWARE_POLICY_VERSION,
-    ),
-  ),
-  hasMarketAware: forecasts.some(
-    (forecast) =>
-      forecast.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION &&
-      forecast.analysis?.policyVersion === MARKET_AWARE_POLICY_VERSION,
-  ),
-  // Retain the outcome-only aggregation for existing consumers. Visible current-policy
-  // metrics use the pressure group so different publication rules are never pooled.
-  deadline: getJournalSummary(
-    forecasts.filter((forecast) => forecast.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION),
-  ),
-  legacy: getJournalSummary(
-    forecasts.filter((forecast) => forecast.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION),
-  ),
-  hasLegacy: forecasts.some(
-    (forecast) => forecast.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION,
+  kalshi: getJournalSummary(
+    forecasts.filter((forecast) => forecast.outcomeDefinition === KALSHI_OUTCOME_DEFINITION),
   ),
 }));

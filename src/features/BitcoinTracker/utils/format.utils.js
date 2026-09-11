@@ -1,3 +1,6 @@
+import { OUTCOME_MODEL_VERSION } from './learning/model.utils';
+import { PRESSURE_MODEL_VERSION } from './pressureForecast.utils';
+
 const currencyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -12,7 +15,17 @@ export const formatPercent = (value, fractionDigits = 1) =>
   Number.isFinite(value) ? `${(value * 100).toFixed(fractionDigits)}%` : '—';
 
 export function getPredictionLabel(forecast) {
-  const usesPressure = forecast.modelVersion === PRESSURE_MODEL_VERSION;
+  if (forecast.kalshiMarket || forecast.kalshi) {
+    if (!['above', 'below'].includes(forecast.direction)) return 'No directional edge';
+    const prefix =
+      Math.max(forecast.aboveProbability, forecast.belowProbability) < 0.55
+        ? 'Slight lean'
+        : 'Likely';
+    return `${prefix} ${forecast.direction === 'above' ? 'Yes · at or above' : 'No · below'}`;
+  }
+  const usesPressure = [PRESSURE_MODEL_VERSION, OUTCOME_MODEL_VERSION].includes(
+    forecast.modelVersion,
+  );
   if (forecast.direction !== 'above' && forecast.direction !== 'below') {
     return usesPressure ? 'No directional edge' : 'Too close to call';
   }
@@ -46,4 +59,3 @@ export const formatDateTime = (value) =>
         timeZoneName: 'short',
       })
     : '—';
-import { PRESSURE_MODEL_VERSION } from './pressureForecast.utils';

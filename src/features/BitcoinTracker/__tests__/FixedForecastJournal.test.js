@@ -357,7 +357,7 @@ describe('analysis persistence and scoring', () => {
   });
 
   test.each(['analyzing', 'pending', 'resolved', 'unobserved', 'withheld'])(
-    'round-trips %s through version 5 without changing its deadline or policy',
+    'round-trips %s through version 7 without changing its deadline or policy',
     (status) => {
       const forecast =
         status === 'analyzing' || status === 'withheld' ? makeAnalysisForecast() : makePublished();
@@ -372,7 +372,7 @@ describe('analysis persistence and scoring', () => {
         });
       const storage = makeStorage();
       expect(saveJournal([forecast], storage)).toBeNull();
-      expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(5);
+      expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(7);
       const restored = loadJournal(storage);
       expect(restored).toEqual({ forecasts: [forecast], scheduledForecast: null, warning: null });
       expect(reducer(undefined, historyRestored(restored.forecasts)).forecasts).toEqual([forecast]);
@@ -450,51 +450,5 @@ describe('analysis persistence and scoring', () => {
     if (version === 2) envelope.scheduledForecast = null;
     const storage = { getItem: () => JSON.stringify(envelope) };
     expect(loadJournal(storage).warning).toContain('invalid');
-  });
-
-  test('coverage counts completed analysis decisions and excludes active analysis and legacy calls', () => {
-    const issued = makePublished();
-    const resolved = {
-      ...issued,
-      id: 'resolved',
-      status: 'resolved',
-      observedPrice: 72_000,
-      observedAt: expiresAt,
-      outcome: 'above',
-      correct: true,
-    };
-    const legacy = { ...resolved, id: 'legacy' };
-    delete legacy.analysis;
-    const forecasts = [
-      makeAnalysisForecast(),
-      issued,
-      resolved,
-      { ...issued, id: 'unobserved', status: 'unobserved' },
-      {
-        ...makeAnalysisForecast(),
-        id: 'withheld',
-        status: 'withheld',
-        withholdingReason: 'no-consensus',
-      },
-      legacy,
-    ];
-    expect(selectJournalSummary({ tracker: { forecasts } })).toEqual({
-      analysisCount: 1,
-      withheldCount: 1,
-      callCount: 3,
-      coverage: 0.75,
-      resolvedCount: 2,
-      scoredCount: 2,
-      correctCount: 2,
-      accuracy: 1,
-      brierScore: 0.0625,
-    });
-    expect(
-      selectJournalSummary({ tracker: { forecasts: [makeAnalysisForecast()] } }),
-    ).toMatchObject({
-      coverage: null,
-      accuracy: null,
-      brierScore: null,
-    });
   });
 });

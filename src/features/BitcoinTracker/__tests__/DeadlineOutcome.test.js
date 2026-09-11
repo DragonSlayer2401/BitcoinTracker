@@ -222,13 +222,13 @@ describe('deadline definition persistence and immutability', () => {
     ).toBeNull();
   });
 
-  test('round-trips proof under journal v5 and refuses to relabel it before its v4 introduction', () => {
+  test('round-trips proof under journal v7 and refuses to relabel it before its v4 introduction', () => {
     const resolved = observe(reducer(undefined, forecastRecorded(makePending())), makeProof())
       .forecasts[0];
     const storage = makeStorage();
     expect(saveJournal([resolved], storage)).toBeNull();
     const envelope = JSON.parse(storage.setItem.mock.calls[0][1]);
-    expect(envelope.version).toBe(5);
+    expect(envelope.version).toBe(7);
     expect(loadJournal(storage)).toEqual({
       forecasts: [resolved],
       scheduledForecast: null,
@@ -246,7 +246,7 @@ describe('deadline definition persistence and immutability', () => {
       warning: null,
     });
     expect(saveJournal([legacy], storage)).toBeNull();
-    expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(5);
+    expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(7);
     expect(loadJournal(storage).forecasts[0].outcomeDefinition).toBeUndefined();
   });
 

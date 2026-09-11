@@ -35,7 +35,15 @@ export default function MarketDiagnostics({ stream, conditions, forecast }) {
             buying and selling can shift the probability calculation. New fixed calls do not require
             all these signals to agree.
           </p>
-          {forecast?.pressure && (
+          {forecast?.learning?.applied && (
+            <p className="small text-secondary">
+              Learned model {forecast.learning.modelId} uses the captured market features to
+              estimate the deadline outcome. Pressure-model Above:{' '}
+              {formatPercent(forecast.learning.baselineAboveProbability)} · Learned Above:{' '}
+              {formatPercent(forecast.aboveProbability)}.
+            </p>
+          )}
+          {forecast?.pressure && !forecast?.learning?.applied && (
             <>
               <h3 className="h6">Pressure in the live calculation</h3>
               <p className="small text-secondary">
@@ -127,6 +135,11 @@ export default function MarketDiagnostics({ stream, conditions, forecast }) {
             manipulation.
           </p>
           <h3 className="h6">Price and volatility context</h3>
+          <p className="small text-secondary">
+            {conditions?.priceSource === 'cf-brti-history'
+              ? 'Returns and volatility use BRTI history. Trade volume, spread and liquidity describe Coinbase.'
+              : 'Returns and volatility use Coinbase candles while sufficient BRTI history is unavailable.'}
+          </p>
           <dl className="market-data-grid small">
             <div>
               <dt>1m / 3m return</dt>
@@ -143,7 +156,7 @@ export default function MarketDiagnostics({ stream, conditions, forecast }) {
               </dd>
             </div>
             <div>
-              <dt>Recent / usual volume</dt>
+              <dt>Coinbase recent / usual volume</dt>
               <dd>{number(features?.relativeVolume5To30Minutes)}×</dd>
             </div>
             <div>

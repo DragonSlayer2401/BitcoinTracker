@@ -219,12 +219,12 @@ describe('pressure snapshot publication', () => {
 
 describe('pressure forecast persistence and outcome consistency', () => {
   test.each([0.49, 0.5, 0.51])(
-    'round-trips a weak or tied %s snapshot under version 5',
+    'round-trips a weak or tied %s snapshot under version 7',
     (probability) => {
       const snapshot = makePending(probability);
       const storage = makeStorage();
       expect(saveJournal([snapshot], storage)).toBeNull();
-      expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(5);
+      expect(JSON.parse(storage.setItem.mock.calls[0][1]).version).toBe(7);
       expect(loadJournal(storage)).toEqual({
         forecasts: [snapshot],
         scheduledForecast: null,
@@ -341,7 +341,7 @@ describe('pressure forecast persistence and outcome consistency', () => {
 });
 
 describe('scheduled pressure policy retention', () => {
-  test('saves and starts the selected pressure policy under version 5', () => {
+  test('saves and starts the selected pressure policy under version 7', () => {
     const schedule = makeSchedule();
     const storage = makeStorage();
     expect(saveJournal([], storage, schedule)).toBeNull();

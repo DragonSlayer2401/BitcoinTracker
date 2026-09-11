@@ -1,15 +1,15 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import useForecastEvidence from '../hooks/useForecastEvidence';
 import { appendEvidenceRows } from '../utils/evidenceStorage.utils';
-import { getForecast } from '../utils/forecast.utils';
-import { DEADLINE_OUTCOME_DEFINITION } from '../utils/outcome.utils';
+import { getResearchForecast } from '../utils/researchForecast.utils';
+import { KALSHI_OUTCOME_DEFINITION, getKalshiOutcome } from '../utils/kalshi/contract.utils';
 
 jest.mock('../utils/evidenceStorage.utils', () => ({
   ...jest.requireActual('../utils/evidenceStorage.utils'),
   appendEvidenceRows: jest.fn(),
 }));
-jest.mock('../utils/forecast.utils', () => ({
-  getForecast: jest.fn(({ target, ticker }) => ({
+jest.mock('../utils/researchForecast.utils', () => ({
+  getResearchForecast: jest.fn(({ target, ticker }) => ({
     available: true,
     aboveProbability: ticker.price > target ? 0.7 : 0.3,
     belowProbability: ticker.price > target ? 0.3 : 0.7,
@@ -29,7 +29,20 @@ const actualStorage = jest.requireActual('../utils/evidenceStorage.utils');
 const NOW = Date.UTC(2026, 8, 9, 12, 0);
 const END = NOW + 900_000;
 const ticker = { price: 50000, time: NOW, receivedAt: NOW };
+const contract = {
+  ticker: 'KXBTC15M-26SEP091215-15',
+  eventTicker: 'KXBTC15M-26SEP091215',
+  seriesTicker: 'KXBTC15M',
+  target: 49750,
+  startsAt: NOW,
+  expiresAt: END,
+  outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
+  rulesVerified: true,
+  roundDigits: 2,
+  comparison: 'greater_or_equal',
+};
 const entry = {
+  kalshiMarket: contract,
   id: 'forecast-1',
   createdAt: NOW,
   startsAt: NOW,
@@ -40,18 +53,21 @@ const entry = {
   aboveProbability: null,
   belowProbability: null,
   direction: 'neutral',
-  outcomeDefinition: DEADLINE_OUTCOME_DEFINITION,
+  outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
   modelVersion: 'test-model',
   analysis: { policyVersion: 'test-policy' },
 };
-const proof = {
-  status: 'observed',
-  observedPrice: 50000,
-  observedAt: END - 1000,
-  observedTradeId: 100,
-  confirmedThrough: END + 1000,
-  completeSince: NOW,
-};
+const proof = getKalshiOutcome(
+  {
+    ...contract,
+    status: 'finalized',
+    result: 'yes',
+    settlementPrice: 50000,
+    receivedAt: END + 1000,
+    settledAt: END + 1000,
+  },
+  END + 1000,
+);
 const rows = () => appendEvidenceRows.mock.calls.flatMap(([batch]) => batch);
 let currentTime = NOW;
 
@@ -156,7 +172,11 @@ describe('prospective forecast evidence', () => {
       recordedAt: NOW + 5000,
       features: { targetDistance: 350 },
     });
-    expect(getForecast).toHaveBeenLastCalledWith(expect.objectContaining({ target: 49750 }));
+    expect(getResearchForecast).toHaveBeenLastCalledWith(
+      expect.objectContaining({ target: 49750 }),
+      undefined,
+      NOW,
+    );
   });
 
   test('retains exact decision inputs despite a lagging display clock and a changed current ticker', async () => {
@@ -275,7 +295,7 @@ describe('prospective forecast evidence', () => {
     await view.update({
       forecasts: [next],
       now: END + 1000,
-      stream: { getDeadlineOutcome: jest.fn(() => proof) },
+      kalshiOutcomes: [proof],
     });
     const outcome = rows().find((row) => row.event === 'outcome');
     expect(outcome).toMatchObject({
@@ -285,7 +305,7 @@ describe('prospective forecast evidence', () => {
       outcome: 'above',
       target: 49750,
       observedPrice: 50000,
-      observedTradeId: 100,
+      kalshiOutcome: proof,
       features: null,
       inputObservedAt: null,
     });
@@ -293,43 +313,16 @@ describe('prospective forecast evidence', () => {
     expect(rows().filter((row) => row.event === 'outcome')).toHaveLength(1);
   });
 
-  test('tracks multiple withheld outcomes and preserves failed observations in the denominator', async () => {
-    const withheld = { ...entry, status: 'withheld', withholdingReason: 'no-consensus' };
-    const second = { ...withheld, id: 'second', target: 51000 };
-    const view = await recorder([withheld, second]);
-    await view.update({
-      now: END + 16_000,
-      stream: { getDeadlineOutcome: jest.fn(() => ({ status: 'waiting' })) },
-    });
-    expect(rows().filter((row) => row.event === 'outcome')).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          forecastId: entry.id,
-          outcomeStatus: 'unobserved',
-          observedPrice: null,
-          decision: 'withheld',
-        }),
-        expect.objectContaining({
-          forecastId: second.id,
-          outcomeStatus: 'unobserved',
-          observedPrice: null,
-          decision: 'withheld',
-        }),
-      ]),
-    );
-  });
-
-  test('rejects an invalid withheld proof and eventually records unobserved', async () => {
+  test('withheld outcomes wait for official settlement instead of timing out', async () => {
     const view = await recorder([{ ...entry, status: 'withheld' }]);
-    await view.update({
-      now: END + 1000,
-      stream: { getDeadlineOutcome: jest.fn(() => ({ ...proof, observedAt: END + 1 })) },
-    });
+    await view.update({ now: END + 1000, kalshiOutcomes: [{ ...proof, observedAt: END + 1 }] });
     expect(rows().some((row) => row.event === 'outcome')).toBe(false);
-    await view.update({ now: END + 16_000 });
+    await view.update({ now: END + 60_000 });
+    expect(rows().some((row) => row.event === 'outcome')).toBe(false);
+    await view.update({ now: END + 61_000, kalshiOutcomes: [proof] });
     expect(rows().find((row) => row.event === 'outcome')).toMatchObject({
-      outcomeStatus: 'unobserved',
-      observedPrice: null,
+      outcomeStatus: 'observed',
+      kalshiOutcome: proof,
     });
   });
 

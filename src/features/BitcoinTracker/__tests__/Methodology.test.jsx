@@ -8,38 +8,24 @@ describe('Model and data rules panel', () => {
     render(<Methodology />);
     const panel = within(screen.getByRole('region', { name: 'Model and data rules' }));
 
-    expect(panel.getByText(/fixed estimate after three minutes/)).toHaveTextContent(
-      'accuracy remains unvalidated',
+    expect(panel.getByText(/Predicts the selected Kalshi event/)).toHaveTextContent(
+      'Accuracy remains unvalidated',
     );
     expect(screen.queryByRole('heading', { name: 'Probability model' })).not.toBeInTheDocument();
     await user.click(panel.getByRole('button', { name: 'View model rules' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Model and data rules' }));
 
     expect(dialog.getByRole('heading', { name: 'Probability model' })).toBeInTheDocument();
-    expect(dialog.getByRole('heading', { name: 'Data requirements' })).toBeInTheDocument();
+    expect(dialog.getByRole('heading', { name: 'The final minute' })).toBeVisible();
     expect(
-      dialog.getByRole('heading', { name: 'Start and observation windows' }),
-    ).toBeInTheDocument();
-    expect(dialog.getByRole('heading', { name: 'Journal metrics' })).toBeInTheDocument();
-    expect(dialog.getByText(/deadline is exactly 15 minutes after that start/)).toBeInTheDocument();
-    expect(
-      dialog.getByText(/fixed prediction keeps its original probabilities/),
-    ).toBeInTheDocument();
-    expect(dialog.getByRole('heading', { name: 'Fixed prediction observation' })).toBeVisible();
-    expect(dialog.getByText(/There is no 65% minimum/)).toHaveTextContent(
-      'no full minute of matching directional signals',
-    );
-    expect(dialog.getByText(/not a proven ability to predict future returns/)).toHaveTextContent(
-      'Older saved windows retain their original publication policy and percentages',
-    );
-    expect(dialog.getByText(/probabilities wait for capture/)).toBeInTheDocument();
-    expect(dialog.getByRole('link', { name: 'Coinbase Exchange ticker' })).toHaveAttribute(
+      dialog.getByRole('heading', { name: 'Fixed prediction and reversal risk' }),
+    ).toBeVisible();
+    expect(dialog.getByRole('heading', { name: 'Learning and validation' })).toBeVisible();
+    expect(dialog.getByText(/A tie is Yes/)).toBeVisible();
+    expect(dialog.getByText(/including a weak lean/)).toBeVisible();
+    expect(dialog.getByRole('link', { name: 'Kalshi settlement' })).toHaveAttribute(
       'href',
-      'https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker',
-    );
-    expect(dialog.getByRole('link', { name: 'one-minute candles' })).toHaveAttribute(
-      'href',
-      'https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles',
+      'https://help.kalshi.com/en/articles/13823838-crypto-markets',
     );
   });
 

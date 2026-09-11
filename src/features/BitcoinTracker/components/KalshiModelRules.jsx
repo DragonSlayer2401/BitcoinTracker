@@ -1,0 +1,119 @@
+export default function KalshiModelRules() {
+  return (
+    <div className="row g-4">
+      <section className="col-md-6">
+        <h3 className="h6">What the prediction means</h3>
+        <p>
+          The selected Kalshi Bitcoin event supplies the target and close time. Yes wins when its
+          final-minute CF Benchmarks BRTI average, rounded to cents, is at or above the target. No
+          wins below it. A tie is Yes. The official Kalshi result determines the score.
+        </p>
+        <p>
+          The countdown ends at the market close, even when settlement is published later. A
+          Coinbase last trade does not settle a Kalshi forecast.
+        </p>
+      </section>
+      <section className="col-md-6">
+        <h3 className="h6">Probability model</h3>
+        <p>
+          With enough complete BRTI history, the model measures volatility and price movement from
+          the same index Kalshi uses. Recent moves receive more weight, and a sudden jump widens
+          uncertainty. Coinbase candles provide a fallback while index history is incomplete.
+          Executed buying and selling pressure shifts the projected prices. Larger trades contribute
+          by their BTC volume, without an extra large-trade bonus. Weak or missing pressure does not
+          prevent a valid estimate.
+        </p>
+        <p>
+          The model estimates the average of the 60 benchmark readings. Prices seconds apart are
+          related, so it does not count them as 60 independent predictions. This is an unvalidated
+          approximation of future market behavior.
+        </p>
+      </section>
+      <section className="col-md-6">
+        <h3 className="h6">The final minute</h3>
+        <p>
+          Received benchmark readings become a known part of the ending average. The remaining
+          readings are estimated. Missing readings from elapsed seconds stay uncertain, including
+          when the app joins late. A price crossing alone does not mean the settlement average
+          crossed.
+        </p>
+        <p>
+          The chart shows Coinbase prices. It does not display a spot-price forecast range as if it
+          were a range for Kalshi’s settlement average.
+        </p>
+      </section>
+      <section className="col-md-6">
+        <h3 className="h6">Fixed prediction and reversal risk</h3>
+        <p>
+          Observation lasts up to three minutes, or roughly a quarter of the remaining time when
+          joining late, with a 15-second minimum. The first valid estimate is then fixed, including
+          a weak lean. Its target, deadline and percentages stay unchanged.
+        </p>
+        <p>
+          Live risk estimates the chance the fixed Yes/No call will lose. It uses that saved
+          contract, even while another event is being previewed. It is an estimated chance, not a
+          measured success rate.
+        </p>
+      </section>
+      <section className="col-md-6">
+        <h3 className="h6">Benchmark access</h3>
+        <p>
+          Without authorized BRTI access, the model uses an explicitly labeled Coinbase proxy. A
+          shared venue-to-index uncertainty floor of 0.05% remains in the calculation; this is an
+          engineering assumption, not a fitted error rate.
+        </p>
+        <p>
+          To connect BRTI, configure KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY on the server. Kalshi
+          must enable the required entitlement. Credentials stay on the server. Access and any
+          data-distribution terms need confirmation with Kalshi; no paid subscription is purchased
+          by this tool.
+        </p>
+      </section>
+      <section className="col-md-6">
+        <h3 className="h6">Learning and validation</h3>
+        <p>
+          Automatic research follows actual Kalshi events and captures estimates with 12, 9, 6, 3
+          and 1 minute remaining. Each event is one independent outcome, even with several
+          snapshots. Missing checkpoints are recorded as missing.
+        </p>
+        <p>
+          Earlier events train a candidate; separate later events calibrate and test it. It must
+          also pass a prospective comparison before activation. Only real Kalshi outcomes train the
+          model. BRTI and Coinbase history are evaluated separately, and older model inputs cannot
+          qualify a new version. New training never rewrites a saved call.
+        </p>
+        <p>
+          Keep the app or the persistent research collector running to capture inputs. Official
+          settlement can be retrieved after reconnection. Scores show observed performance, not
+          guaranteed future accuracy.
+        </p>
+      </section>
+      <div className="col-12 small">
+        Sources:{' '}
+        <a
+          href="https://help.kalshi.com/en/articles/13823838-crypto-markets"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Kalshi settlement
+        </a>
+        {' · '}
+        <a
+          href="https://docs.kalshi.com/cfbenchmarks/rest-passthrough"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Benchmark API access
+        </a>
+        {' · '}
+        <a
+          href="https://docs.kalshi.com/api-reference/market/get-market"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Market rules and official results
+        </a>
+      </div>
+    </div>
+  );
+}

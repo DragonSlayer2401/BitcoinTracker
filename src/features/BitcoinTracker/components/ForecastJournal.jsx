@@ -8,8 +8,6 @@ import {
   formatTime,
   getPredictionLabel,
 } from '../utils/format.utils';
-import { DEADLINE_OUTCOME_DEFINITION } from '../utils/outcome.utils';
-import { PRESSURE_POLICY_VERSION } from '../utils/fixedPrediction.utils';
 
 function ForecastTable({ forecasts, now, compact = false }) {
   return (
@@ -26,8 +24,8 @@ function ForecastTable({ forecasts, now, compact = false }) {
         <tr>
           <th scope="col">Target / window</th>
           <th scope="col">Estimate</th>
-          {!compact && <th scope="col">Above / below</th>}
-          {!compact && <th scope="col">Observed price</th>}
+          {!compact && <th scope="col">Yes / No</th>}
+          {!compact && <th scope="col">Settlement average</th>}
           <th scope="col">Result</th>
         </tr>
       </thead>
@@ -45,11 +43,7 @@ function ForecastTable({ forecasts, now, compact = false }) {
               </span>
               {!compact && (
                 <span className="d-block small text-secondary fw-normal">
-                  {entry.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION
-                    ? entry.analysis?.policyVersion === PRESSURE_POLICY_VERSION
-                      ? 'Pressure estimate · verified deadline'
-                      : 'Earlier filtered estimate · verified deadline'
-                    : 'Legacy sample after deadline'}
+                  {`Kalshi · ${entry.kalshiMarket?.ticker ?? 'Bitcoin 15m'}`}
                 </span>
               )}
             </th>
@@ -72,11 +66,7 @@ function ForecastTable({ forecasts, now, compact = false }) {
                 <td className="tabular">
                   {formatPrice(entry.observedPrice)}
                   {entry.observedAt && (
-                    <span className="d-block text-secondary small">
-                      {entry.outcomeDefinition === DEADLINE_OUTCOME_DEFINITION
-                        ? `${((entry.expiresAt - entry.observedAt) / 1000).toFixed(1)}s before deadline · trade ${entry.observedTradeId}`
-                        : `+${((entry.observedAt - entry.expiresAt) / 1000).toFixed(1)}s after deadline`}
-                    </span>
+                    <span className="d-block text-secondary small">Official Kalshi settlement</span>
                   )}
                 </td>
               </>
@@ -91,6 +81,8 @@ function ForecastTable({ forecasts, now, compact = false }) {
                   <Icon name="clock" size={13} />{' '}
                   {formatCountdown(entry.expiresAt - Math.max(now, entry.createdAt))}
                 </span>
+              ) : entry.status === 'awaiting-settlement' ? (
+                <span className="result-chip">Awaiting Kalshi</span>
               ) : entry.status === 'unobserved' ? (
                 <span className="text-secondary">Unobserved</span>
               ) : (
@@ -169,7 +161,7 @@ export default function ForecastJournal({ forecasts, summary, outcomeGroups, now
   const [showClear, setShowClear] = useState(false);
   const historyButton = useRef(null);
   const hasCompletedForecasts = forecasts.some(
-    (entry) => !['analyzing', 'pending'].includes(entry.status),
+    (entry) => !['analyzing', 'pending', 'awaiting-settlement'].includes(entry.status),
   );
 
   return (
@@ -191,7 +183,7 @@ export default function ForecastJournal({ forecasts, summary, outcomeGroups, now
         </Button>
       </div>
       <JournalSummary
-        summary={outcomeGroups?.pressure ?? summary}
+        summary={outcomeGroups?.kalshi ?? summary}
         compact
         current={Boolean(outcomeGroups)}
       />
@@ -225,40 +217,15 @@ export default function ForecastJournal({ forecasts, summary, outcomeGroups, now
           </p>
           {forecasts.length ? <ForecastTable forecasts={forecasts} now={now} /> : <EmptyJournal />}
           <div className="mt-3">
-            <section aria-labelledby={outcomeGroups ? 'pressure-summary-heading' : undefined}>
-              {outcomeGroups && (
-                <h3 id="pressure-summary-heading" className="h6">
-                  Pressure estimates · current policy
-                </h3>
-              )}
-              <JournalSummary summary={outcomeGroups?.pressure ?? summary} />
-            </section>
-            {outcomeGroups?.hasMarketAware && (
-              <section aria-labelledby="market-aware-summary-heading">
-                <h3 id="market-aware-summary-heading" className="h6 mt-2">
-                  Earlier filtered estimates · verified deadline
-                </h3>
-                <JournalSummary summary={outcomeGroups.marketAware} />
-              </section>
-            )}
-            {outcomeGroups?.hasLegacy && (
-              <section aria-labelledby="legacy-summary-heading">
-                <h3 id="legacy-summary-heading" className="h6 mt-2">
-                  Legacy sampled outcomes · earlier policies
-                </h3>
-                <JournalSummary summary={outcomeGroups.legacy} />
-              </section>
-            )}
+            <h3 className="h6">Kalshi · official results</h3>
+            <JournalSummary summary={outcomeGroups?.kalshi ?? summary} />
           </div>
           <p className="small text-secondary mt-2 mb-0">
-            Brier score is probability error; lower is better. Personal, overlapping observations
-            are not an independent validation set. Ties, neutral calls, and no-call windows are
-            excluded from directional accuracy. No-call windows have no probability error score.
-            Call coverage is the fraction of completed observation decisions that issued a fixed
-            prediction; ongoing observation and older immediate forecasts are excluded. The
-            dashboard summary covers only the current pressure policy, including estimates made
-            while trade-flow adjustments were unavailable. Earlier filtered forecasts and legacy
-            samples are reported separately.
+            Yes includes ties. Brier score is probability error; lower is better. Neutral calls and
+            no-call windows are excluded from directional accuracy. No-call windows have no
+            probability error score. Call coverage is the fraction of observation decisions that
+            issued a fixed prediction. Personal, overlapping observations are not an independent
+            validation set.
           </p>
         </Modal.Body>
         <Modal.Footer>
@@ -283,8 +250,8 @@ export default function ForecastJournal({ forecasts, summary, outcomeGroups, now
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
-          This removes completed, unobserved, and no-call entries from this browser. Active
-          observation and pending forecasts stay in place.
+          This removes completed and no-call entries from this browser. Active observation, pending
+          forecasts, and forecasts awaiting official settlement stay in place.
         </Modal.Body>
         <Modal.Footer>
           <Button variant="outline-secondary" onClick={() => setShowClear(false)}>

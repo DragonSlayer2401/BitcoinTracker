@@ -2,19 +2,52 @@ import {
   FIXED_PREDICTION_POLICY_VERSION,
   MARKET_AWARE_POLICY_VERSION,
   PRESSURE_POLICY_VERSION,
+  KALSHI_POLICY_VERSION,
+  usesSnapshotPolicy,
   getFixedForecastAnalysis,
   getQualifyingDirection,
 } from './fixedPrediction.utils';
 import { DEADLINE_OUTCOME_DEFINITION, isVerifiedDeadlineOutcome } from './outcome.utils';
 import { PRESSURE_MODEL_VERSION } from './pressureForecast.utils';
+import {
+  OUTCOME_MODEL_VERSION,
+  KALSHI_OUTCOME_MODEL_VERSION,
+  CALIBRATION_VERSION,
+} from './learning/model.utils';
+import { LEARNING_FEATURE_VERSION } from './learning/features.utils';
+import {
+  KALSHI_OUTCOME_DEFINITION,
+  isKalshiContract,
+  isVerifiedKalshiOutcome,
+} from './kalshi/contract.utils';
+import { KALSHI_MODEL_VERSION, KALSHI_MODEL_PARAMETERS } from './kalshi/forecast.utils';
 
 const journalKey = 'bitcoin-tracker:journal:v1';
-const journalVersion = 5;
+const journalVersion = 7;
 const forecastDuration = 15 * 60 * 1000;
 const observationWindow = 15 * 1000;
 const scheduleStartGrace = 15 * 1000;
 const maximumScheduleDelay = 24 * 60 * 60 * 1000;
 const maximumForecasts = 100;
+// Persisted calls retain the model and assumptions used at capture. A new live
+// model must not invalidate or silently recalculate the user's earlier calls.
+const legacyKalshiModelParameters = Object.freeze({
+  sampleCount: 60,
+  maximumBenchmarkAgeMs: 5000,
+  minimumProxyBasisLogDeviation: 0.0005,
+});
+const kalshiBaselineVersions = ['kalshi-brti-average-v1', KALSHI_MODEL_VERSION];
+const learnedModelVersions = [
+  'outcome-logistic-v1',
+  'outcome-logistic-kalshi-v1',
+  OUTCOME_MODEL_VERSION,
+  KALSHI_OUTCOME_MODEL_VERSION,
+];
+const kalshiModelVersions = [
+  ...kalshiBaselineVersions,
+  'outcome-logistic-kalshi-v1',
+  KALSHI_OUTCOME_MODEL_VERSION,
+];
 
 const snapshotFields = [
   'id',
@@ -55,7 +88,9 @@ export function getValidatedForecast(value) {
   const hasTimingMode = Object.prototype.hasOwnProperty.call(value, 'timingMode');
   const hasAnalysis = Object.prototype.hasOwnProperty.call(value, 'analysis');
   const hasDeadlineDefinition = Object.prototype.hasOwnProperty.call(value, 'outcomeDefinition');
-  const usesPressurePolicy = value.analysis?.policyVersion === PRESSURE_POLICY_VERSION;
+  const usesKalshi = value.outcomeDefinition === KALSHI_OUTCOME_DEFINITION;
+  const usesPressurePolicy = usesSnapshotPolicy(value.analysis?.policyVersion);
+  const usesOutcomeModel = learnedModelVersions.includes(value.modelVersion);
   const isEndTimeCapture = hasTimingMode && value.timingMode === 'end';
   const hasNoFixedPrediction = ['analyzing', 'withheld'].includes(value.status);
   const fields = [...snapshotFields];
@@ -63,10 +98,13 @@ export function getValidatedForecast(value) {
   if (hasTimingMode) fields.push('timingMode');
   if (hasAnalysis) fields.push('analysis');
   if (usesPressurePolicy) fields.push('calculationMode');
+  if (usesOutcomeModel) fields.push('learning');
   if (hasDeadlineDefinition) fields.push('outcomeDefinition');
+  if (usesKalshi) fields.push('kalshiMarket', 'kalshi');
   if (value.status === 'withheld') fields.push('withholdingReason');
   if (value.status === 'resolved') fields.push(...resultFields);
-  if (hasDeadlineDefinition && value.status === 'resolved')
+  if (usesKalshi && value.status === 'resolved') fields.push('kalshiOutcome');
+  if (hasDeadlineDefinition && !usesKalshi && value.status === 'resolved')
     fields.push('observedTradeId', 'confirmedThrough', 'completeSince');
   const startsAt = hasStartsAt ? value.startsAt : value.createdAt;
   if (
@@ -74,17 +112,38 @@ export function getValidatedForecast(value) {
     !fields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) ||
     !isIdentifier(value.id) ||
     !isIdentifier(value.modelVersion) ||
-    usesPressurePolicy !== (value.modelVersion === PRESSURE_MODEL_VERSION) ||
+    usesPressurePolicy !==
+      [PRESSURE_MODEL_VERSION, ...learnedModelVersions, ...kalshiBaselineVersions].includes(
+        value.modelVersion,
+      ) ||
+    (usesKalshi &&
+      (!isKalshiContract(value.kalshiMarket) ||
+        value.kalshiMarket.target !== value.target ||
+        value.kalshiMarket.expiresAt !== value.expiresAt ||
+        value.kalshiMarket.startsAt !== startsAt ||
+        value.analysis?.policyVersion !== KALSHI_POLICY_VERSION ||
+        !kalshiModelVersions.includes(value.modelVersion) ||
+        (hasNoFixedPrediction
+          ? value.kalshi !== null
+          : !isValidatedKalshiMetadata(value.kalshi, value)))) ||
+    (!usesKalshi &&
+      (kalshiModelVersions.includes(value.modelVersion) ||
+        value.analysis?.policyVersion === KALSHI_POLICY_VERSION)) ||
+    (usesOutcomeModel && (hasNoFixedPrediction || !isValidatedLearning(value.learning, value))) ||
     (usesPressurePolicy &&
       (hasNoFixedPrediction
         ? value.calculationMode !== null
-        : !['pressure-adjusted', 'baseline-fallback'].includes(value.calculationMode))) ||
+        : usesOutcomeModel
+          ? value.calculationMode !== 'outcome-trained'
+          : !['pressure-adjusted', 'baseline-fallback'].includes(value.calculationMode))) ||
     !isTimestamp(value.createdAt) ||
     !isTimestamp(startsAt) ||
     !isTimestamp(value.expiresAt) ||
     (hasDeadlineDefinition &&
-      (value.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION ||
-        ![MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION].includes(
+      (![DEADLINE_OUTCOME_DEFINITION, KALSHI_OUTCOME_DEFINITION].includes(
+        value.outcomeDefinition,
+      ) ||
+        ![MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION].includes(
           value.analysis?.policyVersion,
         ))) ||
     (hasTimingMode && (!isEndTimeCapture || !hasStartsAt)) ||
@@ -104,7 +163,14 @@ export function getValidatedForecast(value) {
         !isProbability(value.belowProbability) ||
         Math.abs(value.aboveProbability + value.belowProbability - 1) > 0.000001) ||
     !['above', 'below', 'neutral'].includes(value.direction) ||
-    !['analyzing', 'pending', 'resolved', 'unobserved', 'withheld'].includes(value.status)
+    ![
+      'analyzing',
+      'pending',
+      'resolved',
+      'unobserved',
+      'withheld',
+      ...(usesKalshi ? ['awaiting-settlement'] : []),
+    ].includes(value.status)
   ) {
     return null;
   }
@@ -134,8 +200,11 @@ export function getValidatedForecast(value) {
         FIXED_PREDICTION_POLICY_VERSION,
         MARKET_AWARE_POLICY_VERSION,
         PRESSURE_POLICY_VERSION,
+        KALSHI_POLICY_VERSION,
       ].includes(analysis.policyVersion) ||
-      ([MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION].includes(analysis.policyVersion) &&
+      ([MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION].includes(
+        analysis.policyVersion,
+      ) &&
         !hasDeadlineDefinition) ||
       !analysisFields.every((field) => analysis[field] === expectedAnalysis[field]) ||
       (hasNoFixedPrediction
@@ -164,20 +233,29 @@ export function getValidatedForecast(value) {
     if (
       !isPositiveNumber(value.observedPrice) ||
       !isTimestamp(value.observedAt) ||
-      (hasDeadlineDefinition
-        ? !isVerifiedDeadlineOutcome(
-            { ...value, status: 'observed' },
-            value.expiresAt,
-            value.confirmedThrough,
-          )
-        : value.observedAt < value.expiresAt ||
-          value.observedAt > value.expiresAt + observationWindow)
+      (usesKalshi
+        ? !isVerifiedKalshiOutcome(
+            value.kalshiOutcome,
+            value.kalshiMarket,
+            value.kalshiOutcome?.confirmedThrough,
+          ) ||
+          value.observedPrice !== value.kalshiOutcome.observedPrice ||
+          value.observedAt !== value.expiresAt
+        : hasDeadlineDefinition
+          ? !isVerifiedDeadlineOutcome(
+              { ...value, status: 'observed' },
+              value.expiresAt,
+              value.confirmedThrough,
+            )
+          : value.observedAt < value.expiresAt ||
+            value.observedAt > value.expiresAt + observationWindow)
     ) {
       return null;
     }
 
-    const outcome =
-      value.observedPrice > value.target
+    const outcome = usesKalshi
+      ? value.kalshiOutcome.outcome
+      : value.observedPrice > value.target
         ? 'above'
         : value.observedPrice < value.target
           ? 'below'
@@ -198,6 +276,92 @@ export function getValidatedForecast(value) {
   );
 }
 
+function isValidatedLearning(learning, forecast) {
+  const fields = [
+    'applied',
+    'modelId',
+    'calibrationVersion',
+    'trainingCutoffAt',
+    'baselineAboveProbability',
+    'aboveProbability',
+    'featureVersion',
+  ];
+  const legacyModel = ['outcome-logistic-v1', 'outcome-logistic-kalshi-v1'].includes(
+    forecast.modelVersion,
+  );
+  return (
+    isRecord(learning) &&
+    Object.keys(learning).length === fields.length &&
+    fields.every((field) => Object.prototype.hasOwnProperty.call(learning, field)) &&
+    learning.applied === true &&
+    isIdentifier(learning.modelId) &&
+    learning.modelId.startsWith(`${forecast.modelVersion}-`) &&
+    /^[a-z0-9-]+$/.test(learning.modelId.slice(forecast.modelVersion.length + 1)) &&
+    learning.calibrationVersion === CALIBRATION_VERSION &&
+    learning.featureVersion ===
+      (legacyModel ? 'deadline-reversal-features-v1' : LEARNING_FEATURE_VERSION) &&
+    isTimestamp(learning.trainingCutoffAt) &&
+    learning.trainingCutoffAt < forecast.createdAt &&
+    isProbability(learning.baselineAboveProbability) &&
+    learning.aboveProbability === forecast.aboveProbability
+  );
+}
+
+function isValidatedKalshiMetadata(metadata, forecast) {
+  if (!isRecord(metadata)) return false;
+  const counts = ['observedSampleCount', 'missingElapsedSampleCount', 'futureSampleCount'];
+  const numbers = [
+    'referencePrice',
+    'expectedSettlementAverage',
+    'settlementStandardDeviation',
+    'settlementLowerBound',
+    'settlementUpperBound',
+  ];
+  const usesProxy = metadata.referenceSource === 'coinbase-proxy';
+  const parameters = ['kalshi-brti-average-v1', 'outcome-logistic-kalshi-v1'].includes(
+    forecast.modelVersion,
+  )
+    ? legacyKalshiModelParameters
+    : KALSHI_MODEL_PARAMETERS;
+  return (
+    metadata.marketTicker === forecast.kalshiMarket.ticker &&
+    metadata.comparison === 'greater_or_equal' &&
+    metadata.roundDigits === 2 &&
+    ['coinbase-proxy', 'cf-brti'].includes(metadata.referenceSource) &&
+    metadata.modelKind === 'experimental' &&
+    metadata.approximate === true &&
+    counts.every(
+      (field) =>
+        Number.isSafeInteger(metadata[field]) && metadata[field] >= 0 && metadata[field] <= 60,
+    ) &&
+    counts.reduce((sum, field) => sum + metadata[field], 0) === 60 &&
+    metadata.futureSampleCount ===
+      Math.min(60, Math.ceil((forecast.expiresAt - forecast.createdAt) / 1000)) &&
+    numbers.every((field) => isPositiveNumber(metadata[field])) &&
+    metadata.settlementLowerBound <= metadata.settlementUpperBound &&
+    isTimestamp(metadata.referenceAt) &&
+    metadata.referenceAt <= forecast.createdAt &&
+    (usesProxy
+      ? metadata.referenceAt === forecast.createdAt &&
+        isPositiveNumber(metadata.basisLogDeviation) &&
+        metadata.basisLogDeviation >= parameters.minimumProxyBasisLogDeviation
+      : forecast.createdAt - metadata.referenceAt <= parameters.maximumBenchmarkAgeMs &&
+        metadata.basisLogDeviation === 0) &&
+    (metadata.requiredFutureAverage === null
+      ? metadata.missingElapsedSampleCount > 0
+      : typeof metadata.requiredFutureAverage === 'number' &&
+        Number.isFinite(metadata.requiredFutureAverage) &&
+        metadata.missingElapsedSampleCount === 0) &&
+    typeof metadata.warning === 'string' &&
+    metadata.warning.length <= 500 &&
+    (usesProxy
+      ? typeof metadata.basisAssumption === 'string'
+      : metadata.basisAssumption === null) &&
+    isRecord(metadata.parameters) &&
+    Object.entries(parameters).every(([key, value]) => metadata.parameters[key] === value)
+  );
+}
+
 export function getValidatedJournal(value) {
   if (!Array.isArray(value) || value.length > maximumForecasts) return null;
 
@@ -214,18 +378,34 @@ export function getValidatedJournal(value) {
 }
 
 export function getValidatedScheduledForecast(value) {
+  const usesKalshi = value?.outcomeDefinition === KALSHI_OUTCOME_DEFINITION;
   const hasDefinition =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'outcomeDefinition');
   const hasPolicy = isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'policyVersion');
   const fields = [...scheduleFields];
   if (hasDefinition) fields.push('outcomeDefinition');
   if (hasPolicy) fields.push('policyVersion');
+  if (usesKalshi) fields.push('marketTicker', 'eventTicker');
   if (
     !isRecord(value) ||
     Object.keys(value).length !== fields.length ||
     !fields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) ||
-    (hasDefinition && value.outcomeDefinition !== DEADLINE_OUTCOME_DEFINITION) ||
-    (hasPolicy && (!hasDefinition || value.policyVersion !== PRESSURE_POLICY_VERSION)) ||
+    (hasDefinition &&
+      ![DEADLINE_OUTCOME_DEFINITION, KALSHI_OUTCOME_DEFINITION].includes(
+        value.outcomeDefinition,
+      )) ||
+    (hasPolicy &&
+      (!hasDefinition ||
+        value.policyVersion !== (usesKalshi ? KALSHI_POLICY_VERSION : PRESSURE_POLICY_VERSION))) ||
+    (usesKalshi &&
+      (!hasPolicy ||
+        typeof value.marketTicker !== 'string' ||
+        !/^KXBTC15M-\d{2}[A-Z]{3}\d{6}-\d{2}$/.test(value.marketTicker) ||
+        typeof value.eventTicker !== 'string' ||
+        !/^KXBTC15M-\d{2}[A-Z]{3}\d{6}$/.test(value.eventTicker) ||
+        !value.marketTicker.startsWith(`${value.eventTicker}-`) ||
+        value.startsAt % 900_000 !== 0 ||
+        value.target !== null)) ||
     !isIdentifier(value.id) ||
     !isTimestamp(value.createdAt) ||
     !isTimestamp(value.startsAt) ||
@@ -233,8 +413,7 @@ export function getValidatedScheduledForecast(value) {
     value.startsAt <= value.createdAt ||
     value.startsAt - value.createdAt > maximumScheduleDelay ||
     value.expiresAt - value.startsAt !== forecastDuration ||
-    !isPositiveNumber(value.target) ||
-    value.target > 1_000_000_000 ||
+    (!usesKalshi && (!isPositiveNumber(value.target) || value.target > 1_000_000_000)) ||
     !['scheduled', 'missed'].includes(value.status)
   ) {
     return null;
@@ -290,7 +469,7 @@ export function loadJournal(storage) {
     const parsedJournal = JSON.parse(savedJournal);
     if (
       !isRecord(parsedJournal) ||
-      ![1, 2, 3, 4, journalVersion].includes(parsedJournal.version) ||
+      ![1, 2, 3, 4, 5, 6, journalVersion].includes(parsedJournal.version) ||
       Object.keys(parsedJournal).length !== (parsedJournal.version === 1 ? 2 : 3)
     ) {
       throw new Error('Invalid journal version.');
@@ -322,6 +501,16 @@ export function loadJournal(storage) {
         ))
     )
       throw new Error('Pressure forecasts require journal version 5.');
+    if (
+      parsedJournal.version < 7 &&
+      journal.forecasts.some((forecast) => forecast.outcomeDefinition === KALSHI_OUTCOME_DEFINITION)
+    )
+      throw new Error('Kalshi forecasts require journal version 7.');
+    if (
+      parsedJournal.version < 6 &&
+      journal.forecasts.some((forecast) => learnedModelVersions.includes(forecast.modelVersion))
+    )
+      throw new Error('Learned forecasts require journal version 6.');
     return { ...journal, warning: null };
   } catch {
     return {

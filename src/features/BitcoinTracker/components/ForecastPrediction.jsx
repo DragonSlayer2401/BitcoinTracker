@@ -10,8 +10,12 @@ export default function ForecastPrediction({
   compact = false,
 }) {
   const directionLabel = getPredictionLabel(forecast);
-  const inputCaption =
-    forecast.calculationMode === 'baseline-fallback'
+  const isKalshi = Boolean(forecast.kalshiMarket || forecast.kalshi);
+  const aboveLabel = isKalshi ? 'Yes · at or above' : 'Above target';
+  const belowLabel = isKalshi ? 'No · below' : 'Below target';
+  const inputCaption = forecast.learning?.applied
+    ? `Outcome model ${forecast.learning.modelId}`
+    : forecast.calculationMode === 'baseline-fallback'
       ? 'Captured without a usable pressure fit'
       : forecast.calculationMode === 'pressure-adjusted'
         ? 'Captured with trade pressure'
@@ -20,19 +24,21 @@ export default function ForecastPrediction({
             ? `Trade pressure ${forecast.pressure.direction === 'buy' ? 'toward Above' : forecast.pressure.direction === 'sell' ? 'toward Below' : 'balanced'}`
             : 'Baseline estimate · pressure still gathering or unavailable'
           : null;
-  const inputLabel = forecast.calculationMode
-    ? forecast.calculationMode === 'pressure-adjusted'
-      ? 'Trade pressure'
-      : 'Price only'
-    : forecast.pressure?.applied
-      ? forecast.pressure.direction === 'buy'
-        ? 'Buying pressure'
-        : forecast.pressure.direction === 'sell'
-          ? 'Selling pressure'
-          : 'Balanced pressure'
-      : forecast.pressure
-        ? 'Price only'
-        : null;
+  const inputLabel = forecast.learning?.applied
+    ? 'Learned model'
+    : forecast.calculationMode
+      ? forecast.calculationMode === 'pressure-adjusted'
+        ? 'Trade pressure'
+        : 'Price only'
+      : forecast.pressure?.applied
+        ? forecast.pressure.direction === 'buy'
+          ? 'Buying pressure'
+          : forecast.pressure.direction === 'sell'
+            ? 'Selling pressure'
+            : 'Balanced pressure'
+        : forecast.pressure
+          ? 'Price only'
+          : null;
 
   return (
     <section aria-label={label} className={compact ? 'live-estimate mt-2' : undefined}>
@@ -67,18 +73,18 @@ export default function ForecastPrediction({
       </div>
       <div className="probability-labels d-flex justify-content-between mt-1 mb-1">
         <div>
-          <span className="small text-secondary">Above target</span>
+          <span className="small text-secondary">{aboveLabel}</span>
           <strong className="ms-2">{formatPercent(forecast.aboveProbability)}</strong>
         </div>
         <div className="text-end">
-          <span className="small text-secondary">Below target</span>
+          <span className="small text-secondary">{belowLabel}</span>
           <strong className="ms-2">{formatPercent(forecast.belowProbability)}</strong>
         </div>
       </div>
       <div
         className={`probability-track ${forecast.available ? '' : 'unavailable'}`}
         role="img"
-        aria-label={`Above target ${formatPercent(forecast.aboveProbability)}, below target ${formatPercent(forecast.belowProbability)}`}
+        aria-label={`${aboveLabel} ${formatPercent(forecast.aboveProbability)}, ${belowLabel} ${formatPercent(forecast.belowProbability)}`}
       >
         <div
           className="probability-above"
