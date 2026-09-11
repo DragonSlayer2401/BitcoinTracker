@@ -12,8 +12,10 @@ unpublished targets stay pending. Future events can be armed before their target
 ## Data access and cost
 
 Kalshi targets, upcoming schedules, quotes and finalized results use public GET endpoints.
-The app's public-data mode needs no account key. It continues estimating with a clearly labeled
-Coinbase proxy when the official benchmark is unavailable. That proxy is not settlement data.
+The app's public-data mode needs no account key. When credentials are configured, all Kalshi
+reads are authenticated and budgeted against the reported account limits. The app continues
+estimating with a clearly labeled Coinbase proxy when the official benchmark is unavailable.
+That proxy is not settlement data.
 
 To enable the official benchmark:
 
@@ -37,8 +39,10 @@ To enable the official benchmark:
    `KALSHI_PRIVATE_KEY`.
 
 3. Save the file and run `pnpm kalshi:check` from the project directory (Node.js 24 recommended).
-   This makes one read-only request using the same signing and validation as the app. It prints
-   the feed status without exposing credentials and does not write to the research database.
+   This reads the benchmark using the same signing, rate limiter and validation as the app.
+   When needed, it first reads account limits and endpoint costs. It prints the feed status
+   without exposing credentials and does not write to the research database. It does update
+   the shared local or remote rate-limit store to account for its API requests.
    `live` confirms fresh official data; all other statuses exit with code 1:
 
    | Status           | Next step                                                                                                                     |
@@ -62,7 +66,8 @@ for the Key ID and downloaded private-key fields.
 Never put private keys in `NEXT_PUBLIC_` variables, browser code, source control, or chat.
 Remote access to the credentialed benchmark uses the same internal access policy as research
 endpoints: configure `RESEARCH_API_USERNAME`/`RESEARCH_API_PASSWORD`, HTTPS and deployment access
-controls. Signed requests are limited to the fixed BRTI read resource; no trading API is exposed.
+controls. Signed requests are limited to supported KXBTC15M market/series reads, the fixed BRTI
+read resource and account limit/cost metadata. No trading API is exposed.
 
 Kalshi's [public market guide](https://docs.kalshi.com/getting_started/quick_start_market_data)
 requires no authentication for market data. Its
@@ -72,6 +77,51 @@ It does not publish an entitlement price, so any charge and redistribution right
 confirmed with Kalshi. Its “50 tokens” is request quota, not a dollar fee. No service was bought.
 These access notes were checked September 10, 2026. Verify your account's live access using
 `pnpm kalshi:check` after entering your credentials.
+
+## Shared API limits
+
+Every outbound Kalshi request from the app, collector and check command uses one GET-only
+transport. The resource allowlist rejects unsupported paths and query parameters. The tracker
+makes **zero Kalshi writes**: saving forecasts and rate-limit reservations in our database does
+not spend Kalshi's write quota or place an order.
+
+With credentials, the limiter refreshes the account's reported read/write limits and endpoint
+costs when its five-minute policy expires. It uses at most half the reported read refill rate
+and capacity, with an additional ceiling of 100 tokens per second and 100 tokens of capacity.
+Each request reserves the greatest applicable endpoint cost and default cost, with floors of
+50 tokens for BRTI and 10 for other reads. Discovery requests also consume the shared budget;
+starting another process or rotating a key does not reset it. Public mode uses a conservative
+Basic-tier budget and still reads the current endpoint costs. See Kalshi's
+[token-bucket rules](https://docs.kalshi.com/getting_started/rate_limits),
+[account limits](https://docs.kalshi.com/api-reference/account/get-account-api-limits) and
+[endpoint costs](https://docs.kalshi.com/api-reference/account/list-non-default-endpoint-costs).
+
+Reservations and provider-requested pauses persist in `data/kalshi-rate-limits.db` for local
+runs. This separate file lets the app and collector coordinate without adding writes to the
+research archive. Run both from the same project directory. For multiple machines or hosted
+instances, configure every process using the same Kalshi account with the **same remote
+rate-limit database**:
+
+```dotenv
+KALSHI_RATE_LIMIT_DATABASE_URL=libsql://your-shared-database.turso.io
+KALSHI_RATE_LIMIT_AUTH_TOKEN=your-database-token
+```
+
+These optional overrides take precedence over an existing remote `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN`; that remote archive can also hold the limiter's separate table. Detected
+serverless deployments require a remote shared store. If its configuration, connection,
+database lock or saved policy prevents safe accounting, Kalshi reads pause instead of bypassing
+the limiter. Keep database tokens server-side and out of source control.
+
+Requests have a three-second admission deadline. A successful reservation that takes more than
+250 milliseconds to return is also discarded without sending or refunding its tokens, so a
+paused worker cannot dispatch an old permission. Slow storage may delay the error response,
+but never extends permission to send. A Kalshi 429 pauses all workers sharing the store, with exponential backoff from two
+seconds up to 60 seconds; a longer `Retry-After` is honored if provided. Requests are not blindly
+retried in a tight loop. The limiter controls this deployment's traffic; it cannot guarantee
+that other applications using the account, separate stores or a provider-side limit change
+will never cause a 429. Keep every tracker instance on the same store and allow room for other
+account activity.
 
 ## Probability and fixed calls
 

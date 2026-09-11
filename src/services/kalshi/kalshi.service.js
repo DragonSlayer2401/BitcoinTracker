@@ -1,5 +1,7 @@
 import 'server-only';
-import { constants, createHash, createPrivateKey, sign } from 'node:crypto';
+import { getKalshiCredentialFingerprint, hasKalshiCredentials } from './kalshi.auth';
+import { fetchKalshiResource as fetchResource } from './kalshi.transport';
+export { createKalshiReadHeaders, hasKalshiCredentials } from './kalshi.auth';
 import {
   assertKalshiTicker,
   KalshiDataError,
@@ -8,61 +10,9 @@ import {
   parseKalshiSeries,
 } from './kalshi.validation';
 
-const BASE_URL = 'https://external-api.kalshi.com/trade-api/v2';
-const REQUEST_TIMEOUT_MS = 8_000;
-const MAXIMUM_RESPONSE_BYTES = 1_000_000;
 const BENCHMARK_CACHE_MS = 1_000;
 let benchmarkCache = null;
 let benchmarkRequest = null;
-
-async function readBoundedJson(response) {
-  if (Number(response.headers?.get('content-length')) > MAXIMUM_RESPONSE_BYTES) {
-    throw new KalshiDataError('Kalshi returned too much market data.');
-  }
-  const reader = response.body?.getReader();
-  if (!reader) throw new KalshiDataError('Kalshi returned an empty market response.');
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  let size = 0;
-  let text = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAXIMUM_RESPONSE_BYTES) {
-        await reader.cancel();
-        throw new KalshiDataError('Kalshi returned too much market data.');
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-    text += decoder.decode();
-    return JSON.parse(text);
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-async function fetchResource(path, { headers = {} } = {}) {
-  try {
-    const response = await fetch(`${BASE_URL}${path}`, {
-      cache: 'no-store',
-      redirect: 'error',
-      headers: { Accept: 'application/json', ...headers },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      const status = [400, 401, 403, 404, 429].includes(response.status) ? response.status : 502;
-      throw new KalshiDataError('Kalshi market data is temporarily unavailable.', status);
-    }
-    return await readBoundedJson(response);
-  } catch (error) {
-    if (error instanceof KalshiDataError) throw error;
-    if (['TimeoutError', 'AbortError'].includes(error?.name)) {
-      throw new KalshiDataError('Kalshi took too long to respond. Please retry.', 504);
-    }
-    throw new KalshiDataError('Unable to load valid Kalshi market data. Please retry.');
-  }
-}
 
 async function fetchSeries() {
   return parseKalshiSeries(await fetchResource('/series/KXBTC15M'));
@@ -113,42 +63,6 @@ export async function fetchKalshiMarket(ticker) {
   return market;
 }
 
-export function hasKalshiCredentials(environment = process.env) {
-  return Boolean(environment.KALSHI_API_KEY_ID && environment.KALSHI_PRIVATE_KEY);
-}
-
-export function createKalshiReadHeaders(path, environment = process.env, now = Date.now()) {
-  if (!hasKalshiCredentials(environment)) {
-    throw new KalshiDataError('Configure server-side Kalshi credentials for BRTI access.', 503);
-  }
-  // Deliberately restricted to this one read-only endpoint; there is no general
-  // signing proxy and no credential, portfolio, or trading route in the browser.
-  if (path.split('?')[0] !== '/cfbenchmarks/values') {
-    throw new KalshiDataError('This Kalshi resource is not supported.', 400);
-  }
-  try {
-    const key = createPrivateKey(environment.KALSHI_PRIVATE_KEY.replace(/\\n/g, '\n'));
-    if (key.asymmetricKeyType !== 'rsa') throw new Error('Invalid key type.');
-    const timestamp = String(now);
-    const signature = sign(
-      'sha256',
-      Buffer.from(`${timestamp}GET/trade-api/v2${path.split('?')[0]}`),
-      {
-        key,
-        padding: constants.RSA_PKCS1_PSS_PADDING,
-        saltLength: constants.RSA_PSS_SALTLEN_DIGEST,
-      },
-    );
-    return {
-      'KALSHI-ACCESS-KEY': environment.KALSHI_API_KEY_ID,
-      'KALSHI-ACCESS-TIMESTAMP': timestamp,
-      'KALSHI-ACCESS-SIGNATURE': signature.toString('base64'),
-    };
-  } catch {
-    throw new KalshiDataError('The server-side Kalshi signing key is invalid.', 503);
-  }
-}
-
 function unavailableBenchmark(status, reason) {
   return {
     status,
@@ -164,7 +78,7 @@ function unavailableBenchmark(status, reason) {
 async function requestKalshiBenchmark() {
   const path = '/cfbenchmarks/values?id=BRTI&maxResolution=PER_SECOND';
   try {
-    const response = await fetchResource(path, { headers: createKalshiReadHeaders(path) });
+    const response = await fetchResource(path);
     return parseKalshiBenchmark(response);
   } catch (error) {
     if ([401, 403].includes(error.status)) {
@@ -198,11 +112,7 @@ export async function fetchKalshiBenchmark({ expiresAt } = {}) {
   }
   // Memoize only this fixed BRTI read. Credential rotation cannot reuse another
   // key's response, and a cold serverless instance simply fetches the full hour.
-  const credentialFingerprint = createHash('sha256')
-    .update(process.env.KALSHI_API_KEY_ID)
-    .update('\0')
-    .update(process.env.KALSHI_PRIVATE_KEY)
-    .digest('hex');
+  const credentialFingerprint = getKalshiCredentialFingerprint();
   const cacheAge = now - (benchmarkCache?.receivedAt ?? 0);
   if (
     benchmarkCache?.credentialFingerprint === credentialFingerprint &&

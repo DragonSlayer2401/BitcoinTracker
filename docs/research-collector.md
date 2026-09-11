@@ -11,6 +11,34 @@ pnpm research:collect
 
 The launcher loads `.env.local`, then `.env`; existing environment values take precedence. Local storage defaults to `data/bitcoin-research.db`; configured Turso credentials let the collector and hosted app share an archive.
 
+## Kalshi API budget
+
+The collector, app and `pnpm kalshi:check` share the same durable limiter for every Kalshi GET.
+Configured Kalshi credentials authenticate all of those reads. The account's limit and cost
+policy refreshes after five minutes; the tracker uses at most half the reported read rate and
+capacity, capped at 100 tokens per second and 100 tokens of capacity. It reserves at least
+50 tokens per BRTI request and 10 per other read, or more if the discovered endpoint cost
+requires it. These are quota tokens, not fees. The collector sends no Kalshi write requests.
+Its research inserts and limiter updates are writes to our database, not Kalshi's write bucket.
+See the [Kalshi limit design and official references](kalshi.md#shared-api-limits).
+
+Local processes launched from this project share `data/kalshi-rate-limits.db`, separately from
+the research archive and collector state file. When running on multiple machines or serverless
+instances, point **every app and collector using the same Kalshi account** to the same remote
+store with `KALSHI_RATE_LIMIT_DATABASE_URL` and `KALSHI_RATE_LIMIT_AUTH_TOKEN`. Existing remote
+`TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` values are used when those overrides are absent. Detected
+serverless deployments require a remote shared store; an unavailable or locked limiter pauses
+Kalshi requests. Starting more collectors does not grant more quota.
+
+Individual reads have a three-second admission deadline; delayed permissions expire before
+dispatch, even if storage takes longer to answer. A Kalshi 429 applies a shared exponential
+pause starting at two seconds and increasing to 60 seconds, honoring a longer `Retry-After`
+when present. The transport reports the temporary failure rather than rapidly resending it;
+normal collection can try again after the pause. Checkpoints still obey their capture windows:
+data delayed beyond a checkpoint is recorded as missing, never fabricated. Other applications
+using the account or changes to Kalshi's limits can still cause throttling outside this
+deployment's control.
+
 ## Collection rules
 
 The recorder follows actual published targets and close times. It captures once at each 12/9/6/3/1-minute checkpoint, within five seconds of that checkpoint. Late starts do not invent earlier forecasts. Unknown targets or invalid data produce missing-checkpoint metadata. Finalized results are fetched later for the exact contract.

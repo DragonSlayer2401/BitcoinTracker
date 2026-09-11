@@ -16,6 +16,9 @@ export function kalshiErrorResponse(error) {
     },
     {
       status: error instanceof KalshiDataError ? error.status : 502,
+      ...(Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0
+        ? { headers: { 'Retry-After': String(Math.ceil(error.retryAfterMs / 1000)) } }
+        : {}),
     },
   );
 }

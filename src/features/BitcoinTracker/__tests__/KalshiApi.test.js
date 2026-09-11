@@ -18,6 +18,18 @@ import {
 } from '../../../services/kalshi/kalshi.validation';
 
 jest.mock('server-only', () => ({}), { virtual: true });
+// Transport concurrency and durable quota accounting have dedicated integration tests.
+jest.mock('../../../services/kalshi/rateLimit/rateLimit.repository', () => ({
+  getKalshiRateLimitRepository: async () => ({
+    getPolicy: async (credentialFingerprint) => ({
+      credentialFingerprint,
+      defaultCost: 10,
+      endpointCosts: [],
+    }),
+    reserve: async () => ({ allowed: true, waitMs: 0 }),
+    block: async () => {},
+  }),
+}));
 
 const now = Date.parse('2026-09-10T21:50:00Z');
 const seriesPayload = {
@@ -257,7 +269,7 @@ describe('Kalshi contract and benchmark integration', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  it('signs only the fixed read-only CF resource with RSA-PSS and excludes query parameters', () => {
+  it('signs allowlisted reads with RSA-PSS, excludes query parameters and rejects trading paths', () => {
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const environment = {
       KALSHI_API_KEY_ID: 'test-key',

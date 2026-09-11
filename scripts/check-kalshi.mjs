@@ -22,6 +22,19 @@ try {
 
   if (benchmark.status === 'live' && benchmark.available) {
     console.log('Official BRTI access confirmed. Restart the app and any running collector.');
+    const { getKalshiRateLimitRepository } =
+      await import('../src/services/kalshi/rateLimit/rateLimit.repository.js');
+    const { getKalshiCredentialFingerprint } =
+      await import('../src/services/kalshi/kalshi.auth.js');
+    const limits = await (
+      await getKalshiRateLimitRepository()
+    ).getPolicy(getKalshiCredentialFingerprint());
+    if (limits) {
+      console.log(
+        `Shared read budget: ${limits.refillRate} tokens/second; account allowance: ${limits.reportedRead.refill_rate} tokens/second.`,
+      );
+      console.log('Kalshi write requests: disabled.');
+    }
   } else {
     if (benchmark.reason) console.log(benchmark.reason);
     if (benchmark.status === 'not-configured') {
