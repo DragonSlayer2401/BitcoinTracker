@@ -388,7 +388,11 @@ test('a legacy Coinbase artifact cannot adjust a Kalshi forecast or appear as it
     readModelArtifacts: async () => [legacy],
     getActiveModelArtifact: async () => legacy,
   });
-  expect(await service.getResearchModels()).toEqual({ active: null, candidate: null });
+  expect(await service.getResearchModels()).toEqual({
+    active: null,
+    candidate: null,
+    earlyCandidate: null,
+  });
 });
 
 test('weighted normalization and logistic fit are not changed by replicated checkpoints', () => {

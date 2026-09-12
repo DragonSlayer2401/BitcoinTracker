@@ -36,32 +36,36 @@ export const LEARNING_REQUIREMENTS = Object.freeze({
   bootstrapReplicates: 500,
 });
 
-const representative = getWindowRepresentative;
-const weightedCheckpoints = (groups) =>
-  groups.flatMap((group) => {
+export function getWeightedCheckpoints(groups) {
+  return groups.flatMap((group) => {
     // Multiple collectors may see the same checkpoint. Retain one contemporaneous decision per
     // contract horizon, then give every independent window a total fitting weight of one.
     const checkpoints = new Map();
     for (const row of [...group.rows].sort(
       (a, b) => a.capturedAt - b.capturedAt || a.id.localeCompare(b.id),
     )) {
-      const key = row.decision?.checkpointMinutes ?? Math.round(row.horizonMinutes);
-      if (!checkpoints.has(key)) checkpoints.set(key, row);
+      const checkpointMinutes = row.decision?.checkpointMinutes ?? Math.round(row.horizonMinutes);
+      if (!checkpoints.has(checkpointMinutes)) checkpoints.set(checkpointMinutes, row);
     }
     return [...checkpoints.values()].map((row) => ({ ...row, weight: 1 / checkpoints.size }));
   });
-const bothClasses = (rows) =>
-  [0, 1].every(
+}
+
+function hasEnoughExamplesOfBothOutcomes(rows) {
+  return [0, 1].every(
     (outcome) =>
       rows.filter((row) => row.outcome === outcome).length >=
       LEARNING_REQUIREMENTS.minimumClassExamples,
   );
-const cutoff = (groups) =>
-  groups.length
+}
+
+export function getLatestResolvedAt(groups) {
+  return groups.length
     ? Math.max(
         ...groups.map((group) => Math.max(group.endAt, ...group.rows.map((row) => row.resolvedAt))),
       )
     : 0;
+}
 
 /** Different price feeds and baseline releases are separate experiments, never pooled evidence. */
 export function selectLearningPipelineRows(rows) {
@@ -97,23 +101,24 @@ export function splitLearningWindows(rows) {
   const trainingEnd = Math.floor(groups.length * 0.5);
   const calibrationEnd = Math.floor(groups.length * 0.75);
   const trainingGroups = groups.slice(0, trainingEnd);
-  const trainingCutoffAt = cutoff(trainingGroups);
+  // A later partition must start after both the contract deadline and label publication.
+  const trainingCutoffAt = getLatestResolvedAt(trainingGroups);
   const calibrationGroups = groups
     .slice(trainingEnd, calibrationEnd)
     .filter((group) => group.startAt >= trainingCutoffAt);
-  const calibrationCutoffAt = cutoff(calibrationGroups);
+  const calibrationCutoffAt = getLatestResolvedAt(calibrationGroups);
   const testGroups = groups
     .slice(calibrationEnd)
     .filter((group) => group.startAt >= Math.max(trainingCutoffAt, calibrationCutoffAt));
   return {
-    train: trainingGroups.map(representative),
-    calibration: calibrationGroups.map(representative),
-    test: testGroups.map(representative),
-    trainingCheckpoints: weightedCheckpoints(trainingGroups),
-    calibrationCheckpoints: weightedCheckpoints(calibrationGroups),
+    train: trainingGroups.map(getWindowRepresentative),
+    calibration: calibrationGroups.map(getWindowRepresentative),
+    test: testGroups.map(getWindowRepresentative),
+    trainingCheckpoints: getWeightedCheckpoints(trainingGroups),
+    calibrationCheckpoints: getWeightedCheckpoints(calibrationGroups),
     trainingCutoffAt,
     calibrationCutoffAt,
-    evaluationCutoffAt: cutoff(testGroups),
+    evaluationCutoffAt: getLatestResolvedAt(testGroups),
     groupCount: groups.length,
     purgedGroups:
       groups.length - trainingGroups.length - calibrationGroups.length - testGroups.length,
@@ -159,8 +164,8 @@ function comparePredictions(rows, probabilities) {
   return { candidate, current, benchmark, marketBenchmark, candidateOnMarketRows, reasons };
 }
 
-function fingerprint(rows) {
-  let value = 2166136261;
+export function getDatasetFingerprint(rows) {
+  let hash = 2166136261;
   for (const row of rows) {
     const encoded = JSON.stringify([
       row.id,
@@ -172,9 +177,57 @@ function fingerprint(rows) {
       getLearningPipeline(row.learningFeatures),
     ]);
     for (let index = 0; index < encoded.length; index++)
-      value = Math.imul(value ^ encoded.charCodeAt(index), 16777619) >>> 0;
+      hash = Math.imul(hash ^ encoded.charCodeAt(index), 16777619) >>> 0;
   }
-  return value.toString(36);
+  return hash.toString(36);
+}
+
+/** A fit can adjust only horizons, target distances and feed states seen during training. */
+export function getModelApplicability(trainingCheckpoints, pipeline, outcomeDefinition) {
+  return {
+    baselineModelVersion: pipeline.baselineModelVersion,
+    featureInputSources: [pipeline.featureInputSource],
+    minimumHorizonMinutes: Math.min(...trainingCheckpoints.map((row) => row.horizonMinutes)),
+    maximumHorizonMinutes: Math.max(...trainingCheckpoints.map((row) => row.horizonMinutes)),
+    minimumTargetDistance: Math.min(
+      ...trainingCheckpoints.map((row) => row.learningFeatures.targetDistance),
+    ),
+    maximumTargetDistance: Math.max(
+      ...trainingCheckpoints.map((row) => row.learningFeatures.targetDistance),
+    ),
+    availabilityPatterns: [
+      ...new Set(
+        trainingCheckpoints.map((row) =>
+          LEARNING_AVAILABILITY_INDEXES.map((index) => row.features[index]).join(''),
+        ),
+      ),
+    ],
+    ...(outcomeDefinition === KALSHI_OUTCOME_DEFINITION
+      ? {
+          referenceSources: [
+            ...new Set(trainingCheckpoints.map((row) => row.learningFeatures.referenceSource)),
+          ],
+        }
+      : {}),
+  };
+}
+
+function getCalibrationRows(rows, model, modelDomain) {
+  return rows
+    .filter((row) => isWithinOutcomeModelDomain(modelDomain, row.learningFeatures))
+    .map((row) => ({
+      ...row,
+      // Platt calibration learns one intercept and slope from the raw model's log odds.
+      features: [logit(predictLogistic(model, row.features))],
+    }));
+}
+
+function countLearnedAdjustments(rows, probabilities, modelDomain) {
+  return rows.filter(
+    (row, index) =>
+      isWithinOutcomeModelDomain(modelDomain, row.learningFeatures) &&
+      Math.abs(probabilities[index] - row.learningFeatures.baselineAboveProbability) > 1e-9,
+  ).length;
 }
 
 /** A trained candidate is always shadow-only, even when its retrospective test passes. */
@@ -191,11 +244,14 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
     purgedGroups: split.purgedGroups,
     pipeline,
   };
-  const sufficient =
+  const hasEnoughIndependentWindows =
     split.train.length >= LEARNING_REQUIREMENTS.minimumTrainingWindows &&
     split.calibration.length >= LEARNING_REQUIREMENTS.minimumCalibrationWindows &&
     split.test.length >= LEARNING_REQUIREMENTS.minimumTestWindows;
-  if (!sufficient || ![split.train, split.calibration, split.test].every(bothClasses)) {
+  if (
+    !hasEnoughIndependentWindows ||
+    ![split.train, split.calibration, split.test].every(hasEnoughExamplesOfBothOutcomes)
+  ) {
     return {
       status: 'insufficient-data',
       artifact: null,
@@ -206,49 +262,24 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
     };
   }
   try {
+    // Fit the classifier using training checkpoints only; later rows cannot change its scaling.
     const model = fitLogistic(
       split.trainingCheckpoints,
       LEARNING_FEATURE_NAMES.map((_, index) => index),
       { penalty: LEARNING_REQUIREMENTS.penalty, maximumIterations: 50 },
     );
-    const applicability = {
-      baselineModelVersion: pipeline.baselineModelVersion,
-      featureInputSources: [pipeline.featureInputSource],
-      minimumHorizonMinutes: Math.min(
-        ...split.trainingCheckpoints.map((row) => row.horizonMinutes),
-      ),
-      maximumHorizonMinutes: Math.max(
-        ...split.trainingCheckpoints.map((row) => row.horizonMinutes),
-      ),
-      minimumTargetDistance: Math.min(
-        ...split.trainingCheckpoints.map((row) => row.learningFeatures.targetDistance),
-      ),
-      maximumTargetDistance: Math.max(
-        ...split.trainingCheckpoints.map((row) => row.learningFeatures.targetDistance),
-      ),
-      availabilityPatterns: [
-        ...new Set(
-          split.trainingCheckpoints.map((row) =>
-            LEARNING_AVAILABILITY_INDEXES.map((index) => row.features[index]).join(''),
-          ),
-        ),
-      ],
-      ...(outcomeDefinition === KALSHI_OUTCOME_DEFINITION
-        ? {
-            referenceSources: [
-              ...new Set(
-                split.trainingCheckpoints.map((row) => row.learningFeatures.referenceSource),
-              ),
-            ],
-          }
-        : {}),
-    };
+    const applicability = getModelApplicability(
+      split.trainingCheckpoints,
+      pipeline,
+      outcomeDefinition,
+    );
+    const modelDomain = { applicability, outcomeDefinition };
     const supportedCalibration = split.calibration.filter((row) =>
-      isWithinOutcomeModelDomain({ applicability, outcomeDefinition }, row.learningFeatures),
+      isWithinOutcomeModelDomain(modelDomain, row.learningFeatures),
     );
     if (
       supportedCalibration.length < LEARNING_REQUIREMENTS.minimumCalibrationWindows ||
-      !bothClasses(supportedCalibration)
+      !hasEnoughExamplesOfBothOutcomes(supportedCalibration)
     )
       return {
         status: 'insufficient-data',
@@ -257,14 +288,8 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
         reason:
           'More independent calibration windows are needed within the training horizon and observed feed-availability states.',
       };
-    const calibrationRows = split.calibrationCheckpoints
-      .filter((row) =>
-        isWithinOutcomeModelDomain({ applicability, outcomeDefinition }, row.learningFeatures),
-      )
-      .map((row) => ({
-        ...row,
-        features: [logit(predictLogistic(model, row.features))],
-      }));
+    // Calibrate on the separate middle partition, then evaluate on untouched later windows.
+    const calibrationRows = getCalibrationRows(split.calibrationCheckpoints, model, modelDomain);
     const calibration = fitLogistic(calibrationRows, [0], {
       penalty: LEARNING_REQUIREMENTS.penalty,
       maximumIterations: 50,
@@ -278,16 +303,12 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
           'The calibration period reverses the learned ordering; collect later evidence before trying another candidate.',
       };
     const probabilities = split.test.map((row) =>
-      isWithinOutcomeModelDomain({ applicability, outcomeDefinition }, row.learningFeatures)
+      isWithinOutcomeModelDomain(modelDomain, row.learningFeatures)
         ? predictLogistic(calibration, [logit(predictLogistic(model, row.features))])
         : row.learningFeatures.baselineAboveProbability,
     );
     const evaluation = comparePredictions(split.test, probabilities);
-    evaluation.modelUses = split.test.filter(
-      (row, index) =>
-        isWithinOutcomeModelDomain({ applicability, outcomeDefinition }, row.learningFeatures) &&
-        Math.abs(probabilities[index] - row.learningFeatures.baselineAboveProbability) > 1e-9,
-    ).length;
+    evaluation.modelUses = countLearnedAdjustments(split.test, probabilities, modelDomain);
     evaluation.fallbackUses = split.test.length - evaluation.modelUses;
     if (evaluation.modelUses < LEARNING_REQUIREMENTS.minimumTestModelUses)
       evaluation.reasons.push(
@@ -295,7 +316,7 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
       );
     const version = KALSHI_OUTCOME_MODEL_VERSION;
     const artifact = {
-      id: `${version}-${now}-${fingerprint(usable)}`,
+      id: `${version}-${now}-${getDatasetFingerprint(usable)}`,
       version,
       status: 'shadow',
       trainedAt: now,
@@ -305,7 +326,7 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
       calibrationCutoffAt: split.calibrationCutoffAt,
       evaluationCutoffAt: split.evaluationCutoffAt,
       shadowStartsAt: now,
-      datasetFingerprint: fingerprint(usable),
+      datasetFingerprint: getDatasetFingerprint(usable),
       applicability,
       model,
       calibration: { version: CALIBRATION_VERSION, model: calibration },
@@ -340,36 +361,39 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
   }
 }
 
-function pairedUncertainty(rows, probabilities) {
+export function getPairedBootstrapUncertainty(rows, probabilities) {
+  // Reuse the same sampled window for all models. A fixed seed makes repeated audits stable.
   let seed = 0x1a2b3c4d;
-  const random = () => {
+  const getNextRandomValue = () => {
     seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
     return seed / 4294967296;
   };
-  const accuracy = [];
-  const brier = [];
-  const benchmarkAccuracy = [];
+  const accuracyDifferences = [];
+  const brierDifferences = [];
+  const benchmarkAccuracyDifferences = [];
   for (let sample = 0; sample < LEARNING_REQUIREMENTS.bootstrapReplicates; sample++) {
-    let accuracyDelta = 0;
-    let brierDelta = 0;
-    let benchmarkDelta = 0;
+    let accuracyDifference = 0;
+    let brierDifference = 0;
+    let benchmarkAccuracyDifference = 0;
     for (let index = 0; index < rows.length; index++) {
-      const selected = Math.floor(random() * rows.length);
-      const row = rows[selected];
-      const probability = probabilities[selected];
-      const correct = probability === 0.5 ? 0.5 : Number(Number(probability > 0.5) === row.outcome);
-      accuracyDelta +=
-        correct -
+      const selectedIndex = Math.floor(getNextRandomValue() * rows.length);
+      const row = rows[selectedIndex];
+      const probability = probabilities[selectedIndex];
+      const candidateAccuracy =
+        probability === 0.5 ? 0.5 : Number(Number(probability > 0.5) === row.outcome);
+      accuracyDifference +=
+        candidateAccuracy -
         (row.probability === 0.5 ? 0.5 : Number(Number(row.probability > 0.5) === row.outcome));
-      benchmarkDelta +=
-        correct - (row.currentSide === 0.5 ? 0.5 : Number(row.currentSide === row.outcome));
-      brierDelta += (probability - row.outcome) ** 2 - (row.probability - row.outcome) ** 2;
+      benchmarkAccuracyDifference +=
+        candidateAccuracy -
+        (row.currentSide === 0.5 ? 0.5 : Number(row.currentSide === row.outcome));
+      brierDifference += (probability - row.outcome) ** 2 - (row.probability - row.outcome) ** 2;
     }
-    accuracy.push(accuracyDelta / rows.length);
-    brier.push(brierDelta / rows.length);
-    benchmarkAccuracy.push(benchmarkDelta / rows.length);
+    accuracyDifferences.push(accuracyDifference / rows.length);
+    brierDifferences.push(brierDifference / rows.length);
+    benchmarkAccuracyDifferences.push(benchmarkAccuracyDifference / rows.length);
   }
-  const interval = (values) => {
+  const getConfidenceInterval = (values) => {
     values.sort((a, b) => a - b);
     return [
       values[Math.floor(values.length * 0.025)],
@@ -379,9 +403,9 @@ function pairedUncertainty(rows, probabilities) {
   return {
     method: 'paired-independent-window-bootstrap',
     confidenceLevel: 0.95,
-    accuracyDifference: interval(accuracy),
-    brierDifference: interval(brier),
-    benchmarkAccuracyDifference: interval(benchmarkAccuracy),
+    accuracyDifference: getConfidenceInterval(accuracyDifferences),
+    brierDifference: getConfidenceInterval(brierDifferences),
+    benchmarkAccuracyDifference: getConfidenceInterval(benchmarkAccuracyDifferences),
   };
 }
 
@@ -425,7 +449,10 @@ export function evaluateShadowCandidate(model, events, { now = Date.now() } = {}
   });
   const coverage = prospective.length ? scored.length / prospective.length : 0;
   const evaluationComplete = prospective.length >= LEARNING_REQUIREMENTS.minimumShadowWindows;
-  if (scored.length < LEARNING_REQUIREMENTS.minimumShadowWindows || !bothClasses(scored))
+  if (
+    scored.length < LEARNING_REQUIREMENTS.minimumShadowWindows ||
+    !hasEnoughExamplesOfBothOutcomes(scored)
+  )
     return {
       status: evaluationComplete ? 'shadow' : 'insufficient-data',
       evaluationComplete,
@@ -443,13 +470,9 @@ export function evaluateShadowCandidate(model, events, { now = Date.now() } = {}
     };
   const probabilities = scored.map((row) => row.decision.shadowPrediction.aboveProbability);
   const evaluation = comparePredictions(scored, probabilities);
-  evaluation.modelUses = scored.filter(
-    (row, index) =>
-      isWithinOutcomeModelDomain(model, row.learningFeatures) &&
-      Math.abs(probabilities[index] - row.learningFeatures.baselineAboveProbability) > 1e-9,
-  ).length;
+  evaluation.modelUses = countLearnedAdjustments(scored, probabilities, model);
   evaluation.fallbackUses = scored.length - evaluation.modelUses;
-  const uncertainty = pairedUncertainty(scored, probabilities);
+  const uncertainty = getPairedBootstrapUncertainty(scored, probabilities);
   const reasons = [...evaluation.reasons];
   if (evaluation.modelUses < LEARNING_REQUIREMENTS.minimumShadowModelUses)
     reasons.push('At least 60 of the prospective windows must actually use a learned adjustment.');

@@ -2,6 +2,7 @@ import { logit } from './statistics.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
 
 export const LEARNING_FEATURE_VERSION = 'deadline-reversal-features-v2';
+// Persisted model coefficients address these positions. Reordering requires a new feature version.
 export const LEARNING_FEATURE_NAMES = Object.freeze([
   'baselineLogOdds',
   'targetDistance',
@@ -31,9 +32,9 @@ export const LEARNING_FEATURE_NAMES = Object.freeze([
   'spreadAvailable',
 ]);
 export const LEARNING_AVAILABILITY_INDEXES = [19, 20, 21, 22, 23, 24, 25];
-const bounded = (value, limit = 8) => Math.max(-limit, Math.min(limit, value));
-const timestamp = (value) => Number.isSafeInteger(value) && value >= 0;
-const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+const getBoundedFeatureValue = (value, limit = 8) => Math.max(-limit, Math.min(limit, value));
+const isValidTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
+const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 
 export function getLearningPipeline(snapshot) {
   if (
@@ -51,13 +52,13 @@ export function getLearningPipeline(snapshot) {
 }
 
 export function matchesLearningPipeline(snapshot, pipeline) {
-  const current = getLearningPipeline(snapshot);
+  const snapshotPipeline = getLearningPipeline(snapshot);
   return Boolean(
-    current &&
+    snapshotPipeline &&
     pipeline &&
-    current.baselineModelVersion === pipeline.baselineModelVersion &&
-    current.referenceSource === pipeline.referenceSource &&
-    current.featureInputSource === pipeline.featureInputSource,
+    snapshotPipeline.baselineModelVersion === pipeline.baselineModelVersion &&
+    snapshotPipeline.referenceSource === pipeline.referenceSource &&
+    snapshotPipeline.featureInputSource === pipeline.featureInputSource,
   );
 }
 
@@ -73,12 +74,12 @@ export function getLearningFeatures({
   outcomeDefinition = forecast?.outcomeDefinition ?? KALSHI_OUTCOME_DEFINITION,
 } = {}) {
   const features = conditions?.features;
-  const unavailable = (reason) => ({
+  const getUnavailableSnapshot = (reason) => ({
     schemaVersion: LEARNING_FEATURE_VERSION,
     available: false,
     reason,
     values: null,
-    featureCutoffAt: timestamp(now) ? now : null,
+    featureCutoffAt: isValidTimestamp(now) ? now : null,
     target,
     expiresAt,
     outcomeDefinition,
@@ -91,23 +92,23 @@ export function getLearningFeatures({
     !forecast?.available ||
     !conditions?.available ||
     !features ||
-    !timestamp(now) ||
-    !timestamp(expiresAt) ||
+    !isValidTimestamp(now) ||
+    !isValidTimestamp(expiresAt) ||
     expiresAt <= now ||
     expiresAt - now > 900_000 ||
-    !finite(spot) ||
+    !isFiniteNumber(spot) ||
     spot <= 0 ||
-    !finite(target) ||
+    !isFiniteNumber(target) ||
     target <= 0 ||
-    !finite(forecast.aboveProbability) ||
+    !isFiniteNumber(forecast.aboveProbability) ||
     forecast.aboveProbability < 0 ||
     forecast.aboveProbability > 1 ||
-    !timestamp(features.latestCompletedAt) ||
+    !isValidTimestamp(features.latestCompletedAt) ||
     features.latestCompletedAt > now ||
     now - features.latestCompletedAt > 120_000
   )
-    return unavailable('Fresh, contemporaneous price-history features are required.');
-  const required = [
+    return getUnavailableSnapshot('Fresh, contemporaneous price-history features are required.');
+  const requiredFeatureNames = [
     'effectiveMinuteVolatility',
     'logReturn1Minute',
     'logReturn3Minutes',
@@ -117,80 +118,97 @@ export function getLearningFeatures({
     'latestRangeToMedianRatio',
   ];
   if (
-    required.some((name) => !finite(features[name])) ||
+    requiredFeatureNames.some((name) => !isFiniteNumber(features[name])) ||
     features.effectiveMinuteVolatility <= 0 ||
     (features.relativeVolume5To30Minutes != null &&
-      (!finite(features.relativeVolume5To30Minutes) || features.relativeVolume5To30Minutes < 0)) ||
+      (!isFiniteNumber(features.relativeVolume5To30Minutes) ||
+        features.relativeVolume5To30Minutes < 0)) ||
     (features.spreadFraction != null &&
-      (!finite(features.spreadFraction) || features.spreadFraction < 0)) ||
+      (!isFiniteNumber(features.spreadFraction) || features.spreadFraction < 0)) ||
     (features.closePosition !== null &&
-      (!finite(features.closePosition) || features.closePosition < 0 || features.closePosition > 1))
+      (!isFiniteNumber(features.closePosition) ||
+        features.closePosition < 0 ||
+        features.closePosition > 1))
   )
-    return unavailable('Required price-history features are missing or invalid.');
-  const horizon = (expiresAt - now) / 60_000;
-  const volumeAvailable = finite(features.relativeVolume5To30Minutes);
-  const spreadAvailable = finite(features.spreadFraction);
-  const sigma = features.effectiveMinuteVolatility;
-  const targetDistance = Math.log(spot / target) / (sigma * Math.sqrt(horizon));
-  const heartbeat = stream?.quality?.heartbeatAt;
-  const freshFlow =
+    return getUnavailableSnapshot('Required price-history features are missing or invalid.');
+  const horizonMinutes = (expiresAt - now) / 60_000;
+  const volumeAvailable = isFiniteNumber(features.relativeVolume5To30Minutes);
+  const spreadAvailable = isFiniteNumber(features.spreadFraction);
+  const minuteVolatility = features.effectiveMinuteVolatility;
+  const targetDistance = Math.log(spot / target) / (minuteVolatility * Math.sqrt(horizonMinutes));
+  const heartbeatAt = stream?.quality?.heartbeatAt;
+  const hasFreshFlow =
     ['live', 'warming'].includes(stream?.status) &&
-    timestamp(heartbeat) &&
-    heartbeat <= now &&
-    now - heartbeat <= 5000;
-  const windows = [15, 60, 180].map((seconds) => {
+    isValidTimestamp(heartbeatAt) &&
+    heartbeatAt <= now &&
+    now - heartbeatAt <= 5000;
+  const flowWindows = [15, 60, 180].map((seconds) => {
     const window = stream?.flow?.windows?.[seconds];
     const available =
-      freshFlow &&
+      hasFreshFlow &&
       window?.available === true &&
-      finite(window.imbalance) &&
+      isFiniteNumber(window.imbalance) &&
       Math.abs(window.imbalance) <= 1;
     return { available, imbalance: available ? window.imbalance : 0 };
   });
   const liquidity = stream?.liquidity;
   const depthAvailable =
     liquidity?.available === true &&
-    timestamp(liquidity.updatedAt) &&
+    isValidTimestamp(liquidity.updatedAt) &&
     liquidity.updatedAt <= now &&
     now - liquidity.updatedAt <= 5000 &&
-    finite(liquidity.depth?.[10]?.imbalance) &&
+    isFiniteNumber(liquidity.depth?.[10]?.imbalance) &&
     Math.abs(liquidity.depth[10].imbalance) <= 1;
   const depthChangeAvailable =
     depthAvailable &&
     liquidity.depthChange60?.available === true &&
-    finite(liquidity.depthChange60.bidFraction) &&
-    finite(liquidity.depthChange60.askFraction);
+    isFiniteNumber(liquidity.depthChange60.bidFraction) &&
+    isFiniteNumber(liquidity.depthChange60.askFraction);
   const pressureChange =
-    windows[0].available && windows[1].available ? windows[0].imbalance - windows[1].imbalance : 0;
+    flowWindows[0].available && flowWindows[1].available
+      ? flowWindows[0].imbalance - flowWindows[1].imbalance
+      : 0;
+  // Continuous inputs precede their availability flags, in LEARNING_FEATURE_NAMES order.
+  // Availability flags distinguish missing optional feeds from measured zero values.
   const values = [
-    bounded(logit(forecast.aboveProbability)),
-    bounded(targetDistance),
-    horizon / 15,
+    getBoundedFeatureValue(logit(forecast.aboveProbability)),
+    getBoundedFeatureValue(targetDistance),
+    horizonMinutes / 15,
     ...[1, 3, 5, 15].map((minutes) =>
-      bounded(
+      getBoundedFeatureValue(
         features[`logReturn${minutes === 1 ? '1Minute' : `${minutes}Minutes`}`] /
-          (sigma * Math.sqrt(minutes)),
+          (minuteVolatility * Math.sqrt(minutes)),
       ),
     ),
-    bounded(features.logReturnAcceleration3Minutes / (sigma * Math.sqrt(6))),
-    volumeAvailable ? bounded(Math.log(Math.max(1e-6, features.relativeVolume5To30Minutes))) : 0,
-    bounded(features.latestRangeToMedianRatio),
+    getBoundedFeatureValue(
+      features.logReturnAcceleration3Minutes / (minuteVolatility * Math.sqrt(6)),
+    ),
+    volumeAvailable
+      ? getBoundedFeatureValue(Math.log(Math.max(1e-6, features.relativeVolume5To30Minutes)))
+      : 0,
+    getBoundedFeatureValue(features.latestRangeToMedianRatio),
     features.closePosition === null ? 0 : features.closePosition - 0.5,
-    spreadAvailable ? bounded(features.spreadFraction / sigma) : 0,
-    ...windows.map((window) => window.imbalance),
+    spreadAvailable ? getBoundedFeatureValue(features.spreadFraction / minuteVolatility) : 0,
+    ...flowWindows.map((window) => window.imbalance),
     pressureChange,
-    windows[1].available ? bounded(features.logReturn1Minute / sigma) * windows[1].imbalance : 0,
+    flowWindows[1].available
+      ? getBoundedFeatureValue(features.logReturn1Minute / minuteVolatility) *
+        flowWindows[1].imbalance
+      : 0,
     depthAvailable ? liquidity.depth[10].imbalance : 0,
     depthChangeAvailable
-      ? bounded(liquidity.depthChange60.bidFraction - liquidity.depthChange60.askFraction)
+      ? getBoundedFeatureValue(
+          liquidity.depthChange60.bidFraction - liquidity.depthChange60.askFraction,
+        )
       : 0,
-    ...windows.map((window) => Number(window.available)),
+    ...flowWindows.map((window) => Number(window.available)),
     Number(depthAvailable),
     Number(depthChangeAvailable),
     Number(volumeAvailable),
     Number(spreadAvailable),
   ];
-  if (!values.every(finite)) return unavailable('Learning features cannot be calculated safely.');
+  if (!values.every(isFiniteNumber))
+    return getUnavailableSnapshot('Learning features cannot be calculated safely.');
   return {
     schemaVersion: LEARNING_FEATURE_VERSION,
     available: true,
@@ -207,7 +225,7 @@ export function getLearningFeatures({
     featureInputSource: forecast.kalshi?.priceDynamicsSource ?? null,
     settlementKnownFraction: (forecast.kalshi?.observedSampleCount ?? 0) / 60,
     missingFeeds: [
-      ...windows.flatMap((window, index) =>
+      ...flowWindows.flatMap((window, index) =>
         window.available ? [] : [`flow-${[15, 60, 180][index]}`],
       ),
       ...(depthAvailable ? [] : ['depth']),
@@ -228,24 +246,24 @@ export function isLearningFeatureSnapshot(
     getLearningPipeline(snapshot) !== null &&
     Array.isArray(snapshot.values) &&
     snapshot.values.length === LEARNING_FEATURE_NAMES.length &&
-    snapshot.values.every((value) => finite(value) && Math.abs(value) <= 16) &&
+    snapshot.values.every((value) => isFiniteNumber(value) && Math.abs(value) <= 16) &&
     LEARNING_AVAILABILITY_INDEXES.every(
       (index) => snapshot.values[index] === 0 || snapshot.values[index] === 1,
     ) &&
-    finite(snapshot.baselineAboveProbability) &&
+    isFiniteNumber(snapshot.baselineAboveProbability) &&
     snapshot.baselineAboveProbability >= 0 &&
     snapshot.baselineAboveProbability <= 1 &&
-    finite(snapshot.targetDistance) &&
+    isFiniteNumber(snapshot.targetDistance) &&
     snapshot.target === target &&
     snapshot.expiresAt === expiresAt &&
     snapshot.outcomeDefinition === KALSHI_OUTCOME_DEFINITION &&
     (!outcomeDefinition || snapshot.outcomeDefinition === outcomeDefinition) &&
     (snapshot.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION ||
       (['cf-brti', 'coinbase-proxy'].includes(snapshot.referenceSource) &&
-        finite(snapshot.settlementKnownFraction) &&
+        isFiniteNumber(snapshot.settlementKnownFraction) &&
         snapshot.settlementKnownFraction >= 0 &&
         snapshot.settlementKnownFraction <= 1)) &&
-    timestamp(snapshot.featureCutoffAt) &&
+    isValidTimestamp(snapshot.featureCutoffAt) &&
     snapshot.featureCutoffAt === cutoffAt &&
     cutoffAt < expiresAt,
   );

@@ -18,7 +18,41 @@ Multiple checkpoints and collectors for the same event do not count as independe
 
 Non-Kalshi evidence and model artifacts are rejected. The one-time Kalshi-only migration removes the previous archive records and browser queues before uploads resume.
 
-## Candidate training and activation
+## Early learning
+
+The baseline can earn a small learned correction before there is enough evidence for the full
+model. Early artifacts use `outcome-early-kalshi-v1`. This model has one input: the settlement
+model's original probability. It fits an intercept and slope to its log odds, learning whether
+those percentages tend to be too high, too low or too confident. Price dynamics and trade
+pressure still enter through the original settlement calculation. This does not train a new
+multi-feature direction model on a small sample.
+
+Early training requires at least 40 independent events, including at least eight YES and eight
+NO outcomes. Version and price-source compatibility rules still apply. A trained candidate is
+experimental and has no influence on displayed predictions while it collects prospective
+evidence. Candidate probabilities must be recorded at capture time, before the outcome is known.
+
+The first 40 eligible future events form a fixed validation group, with at least 20 actual
+learned adjustments required. Missing predictions cannot be reconstructed from later data.
+Repeated analysis cannot keep extending an unsuccessful group until a favorable result appears.
+Promotion requires a measured reduction in probability error against the settlement baseline,
+supported by a paired 95% uncertainty interval, without reducing directional accuracy. The
+report also shows the current-side benchmark. Reaching the event count alone does not approve it.
+
+An approved early model blends 20% of its learned correction into the baseline and limits the
+final change to at most five percentage points in either direction. Unsupported inputs keep the
+baseline. The system continues checking future outcomes, using a minimum of 40 monitoring
+events, and can suspend an adjustment whose performance deteriorates. Retraining requires at
+least 20 newly recorded independent events. The full model's larger validation requirements
+remain in place, and it can take over after independently passing them.
+
+Research data identifies the model currently in use, early training and future-validation
+progress, observed accuracy and Brier scores when available, and any suspension. A candidate,
+an active early adjustment and an active full model are different states. All scores describe
+recorded outcomes, not guaranteed future accuracy. Existing fixed calls keep the probabilities
+captured when they were saved.
+
+## Full model training and activation
 
 The current baseline is `kalshi-brti-average-v2`; learned artifacts use `outcome-logistic-kalshi-v2` with `deadline-reversal-features-v2`. Features describe target distance, time remaining, recent returns, volatility, ranges, Coinbase volume, executed flow, spread, liquidity and availability. Native BRTI history supplies price movement when available. Missing exchange volume/spread have their own availability indicators; neither is invented for an index. Logistic fitting and probability calibration use jStat-based shared statistics.
 
@@ -49,4 +83,7 @@ An already initialized local archive can be read while a database viewer holds a
 reports a locked database, finish or close the viewer's transaction; the app retains pending
 uploads and retries them. It never closes the viewer or commits/reverts its unsaved edits.
 
-No trained weights or accuracy claim ship with this change. Prospective outcomes are needed to assess whether the model helps Kalshi users. See [Kalshi methodology](kalshi.md) and [collector setup](research-collector.md).
+No trained weights or accuracy claim ship with this change. Both learning stages use the existing
+recorder, database and authorized Kalshi/BRTI access; no additional paid API is needed for early
+learning. Prospective outcomes are needed to assess whether either model helps Kalshi users. See
+[Kalshi methodology](kalshi.md) and [collector setup](research-collector.md).

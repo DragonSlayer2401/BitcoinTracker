@@ -12,10 +12,10 @@ import {
 } from '../kalshi/contract.utils';
 import { getKalshiMarketProbability } from '../kalshi/marketQuote.utils';
 
-const validProbability = (value) =>
+const isValidProbability = (value) =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
-const validTime = (value) => Number.isSafeInteger(value) && value >= 0;
-const sameWindow = (left, right) =>
+const isValidTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
+const isSameForecastWindow = (left, right) =>
   left.forecastId === right.forecastId &&
   left.target === right.target &&
   left.expiresAt === right.expiresAt &&
@@ -24,12 +24,122 @@ const sameWindow = (left, right) =>
   left.outcomeDefinition === right.outcomeDefinition &&
   (left.kalshiMarket?.ticker ?? null) === (right.kalshiMarket?.ticker ?? null);
 
-/** Only the contemporaneous issued decision can be a training row. Observations never duplicate it. */
-export function getVerifiedLearningRows(events = [], now = Date.now()) {
-  const outcomeDefinition = KALSHI_OUTCOME_DEFINITION;
+/** Deduplicate recorded evidence before matching decisions to official outcomes. */
+export function collectLearningEvents(events, now) {
   const decisions = new Map();
   const outcomes = new Map();
   const conflicts = new Set();
+  for (const event of Array.isArray(events) ? events : []) {
+    if (
+      !event ||
+      typeof event.forecastId !== 'string' ||
+      !isValidTimestamp(event.recordedAt) ||
+      event.recordedAt > now ||
+      event.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION ||
+      !isKalshiContract(event.kalshiMarket) ||
+      event.target !== event.kalshiMarket.target ||
+      event.expiresAt !== event.kalshiMarket.expiresAt ||
+      event.windowStartAt !== event.kalshiMarket.startsAt
+    )
+      continue;
+    if (event.event === 'decision') {
+      const previous = decisions.get(event.forecastId);
+      if (!previous) decisions.set(event.forecastId, event);
+      else if (
+        !isSameForecastWindow(previous, event) ||
+        previous.aboveProbability !== event.aboveProbability ||
+        previous.capturedAt !== event.capturedAt
+      )
+        conflicts.add(event.forecastId);
+      else if (event.recordedAt < previous.recordedAt) decisions.set(event.forecastId, event);
+    }
+    if (event.event === 'outcome') {
+      const previous = outcomes.get(event.forecastId);
+      if (!previous) outcomes.set(event.forecastId, event);
+      else if (
+        !isSameForecastWindow(previous, event) ||
+        previous.observedPrice !== event.observedPrice ||
+        previous.observedAt !== event.observedAt ||
+        previous.outcomeStatus !== event.outcomeStatus ||
+        previous.outcome !== event.outcome
+      )
+        conflicts.add(event.forecastId);
+    }
+  }
+  return { decisions, outcomes, conflicts };
+}
+
+function hasMatchingOfficialOutcome(decision, outcome) {
+  return (
+    isSameForecastWindow(decision, outcome) &&
+    isVerifiedKalshiOutcome(outcome.kalshiOutcome, decision.kalshiMarket, outcome.recordedAt) &&
+    outcome.observedPrice === outcome.kalshiOutcome.observedPrice &&
+    outcome.observedAt === outcome.kalshiOutcome.observedAt &&
+    outcome.confirmedThrough === outcome.kalshiOutcome.confirmedThrough
+  );
+}
+
+export function hasContemporaneousInputs(decision) {
+  const cutoffAt = decision.inputObservedAt;
+  return (
+    decision.inputStatus === 'captured' &&
+    isValidTimestamp(cutoffAt) &&
+    decision.featureCutoffAt === cutoffAt &&
+    decision.capturedAt === cutoffAt &&
+    cutoffAt >= decision.windowStartAt &&
+    cutoffAt <= decision.recordedAt &&
+    cutoffAt < decision.expiresAt &&
+    Number.isFinite(decision.spot) &&
+    decision.spot > 0
+  );
+}
+
+function createLearningRow(decision, outcome, observedSide, featuresAvailable) {
+  const cutoffAt = decision.inputObservedAt;
+  const learningFeatures = decision.learningFeatures;
+  return {
+    id: decision.forecastId,
+    windowStart: decision.windowStartAt,
+    windowStartAt: decision.windowStartAt,
+    capturedAt: cutoffAt,
+    expiresAt: decision.expiresAt,
+    resolvedAt: outcome.recordedAt,
+    target: decision.target,
+    probability: decision.aboveProbability,
+    // Kalshi settles in cents and includes equality on the YES side.
+    currentSide: Number(Math.round(decision.spot * 100) / 100 >= decision.target),
+    outcome: observedSide,
+    horizonMinutes: (decision.expiresAt - cutoffAt) / 60_000,
+    features: featuresAvailable ? learningFeatures.values : null,
+    learningFeatures,
+    modelVersion: decision.modelVersion,
+    modelId: typeof decision.learning?.modelId === 'string' ? decision.learning.modelId : null,
+    captureKey: decision.forecastId,
+    intervalCovered:
+      decision.intervalCoverage === 0.8 &&
+      Number.isFinite(decision.intervalLow) &&
+      decision.intervalLow > 0 &&
+      Number.isFinite(decision.intervalHigh) &&
+      decision.intervalHigh >= decision.intervalLow
+        ? outcome.observedPrice >= decision.intervalLow &&
+          outcome.observedPrice <= decision.intervalHigh
+        : undefined,
+    decision,
+    outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
+    marketTicker: decision.kalshiMarket?.ticker ?? null,
+    marketProbability: getKalshiMarketProbability(
+      decision.kalshiQuote,
+      decision.kalshiMarket,
+      cutoffAt,
+    ),
+    outcomeEvent: outcome,
+  };
+}
+
+/** Only the contemporaneous issued decision can be a training row. Observations never duplicate it. */
+export function getVerifiedLearningRows(events = [], now = Date.now()) {
+  const outcomeDefinition = KALSHI_OUTCOME_DEFINITION;
+  const { decisions, outcomes, conflicts } = collectLearningEvents(events, now);
   const counts = {
     savedForecasts: 0,
     issuedCalls: 0,
@@ -42,43 +152,6 @@ export function getVerifiedLearningRows(events = [], now = Date.now()) {
     conflictingForecasts: 0,
     learningExamples: 0,
   };
-  for (const event of Array.isArray(events) ? events : []) {
-    if (
-      !event ||
-      typeof event.forecastId !== 'string' ||
-      !validTime(event.recordedAt) ||
-      event.recordedAt > now ||
-      event.outcomeDefinition !== outcomeDefinition ||
-      !isKalshiContract(event.kalshiMarket) ||
-      event.target !== event.kalshiMarket.target ||
-      event.expiresAt !== event.kalshiMarket.expiresAt ||
-      event.windowStartAt !== event.kalshiMarket.startsAt
-    )
-      continue;
-    if (event.event === 'decision') {
-      const previous = decisions.get(event.forecastId);
-      if (!previous) decisions.set(event.forecastId, event);
-      else if (
-        !sameWindow(previous, event) ||
-        previous.aboveProbability !== event.aboveProbability ||
-        previous.capturedAt !== event.capturedAt
-      )
-        conflicts.add(event.forecastId);
-      else if (event.recordedAt < previous.recordedAt) decisions.set(event.forecastId, event);
-    }
-    if (event.event === 'outcome') {
-      const previous = outcomes.get(event.forecastId);
-      if (!previous) outcomes.set(event.forecastId, event);
-      else if (
-        !sameWindow(previous, event) ||
-        previous.observedPrice !== event.observedPrice ||
-        previous.observedAt !== event.observedAt ||
-        previous.outcomeStatus !== event.outcomeStatus ||
-        previous.outcome !== event.outcome
-      )
-        conflicts.add(event.forecastId);
-    }
-  }
   const rows = [];
   const resolved = [];
   for (const decision of decisions.values()) {
@@ -88,16 +161,16 @@ export function getVerifiedLearningRows(events = [], now = Date.now()) {
       continue;
     }
     if (
-      !validTime(decision.windowStartAt) ||
-      !validTime(decision.expiresAt) ||
+      !isValidTimestamp(decision.windowStartAt) ||
+      !isValidTimestamp(decision.expiresAt) ||
       decision.windowStartAt >= decision.expiresAt ||
       !Number.isFinite(decision.target) ||
       decision.target <= 0
     )
       continue;
     const issued =
-      validProbability(decision.aboveProbability) &&
-      validProbability(decision.belowProbability) &&
+      isValidProbability(decision.aboveProbability) &&
+      isValidProbability(decision.belowProbability) &&
       Math.abs(decision.aboveProbability + decision.belowProbability - 1) < 1e-6;
     if (issued) counts.issuedCalls++;
     const outcome = outcomes.get(decision.forecastId);
@@ -109,15 +182,7 @@ export function getVerifiedLearningRows(events = [], now = Date.now()) {
       counts.unobserved++;
       continue;
     }
-    if (
-      !sameWindow(decision, outcome) ||
-      !(
-        isVerifiedKalshiOutcome(outcome.kalshiOutcome, decision.kalshiMarket, outcome.recordedAt) &&
-        outcome.observedPrice === outcome.kalshiOutcome.observedPrice &&
-        outcome.observedAt === outcome.kalshiOutcome.observedAt &&
-        outcome.confirmedThrough === outcome.kalshiOutcome.confirmedThrough
-      )
-    ) {
+    if (!hasMatchingOfficialOutcome(decision, outcome)) {
       counts.invalidOutcomes++;
       continue;
     }
@@ -135,18 +200,7 @@ export function getVerifiedLearningRows(events = [], now = Date.now()) {
     }
     resolved.push({ decision, outcome, issued });
     if (!issued) continue;
-    const cutoff = decision.inputObservedAt;
-    if (
-      decision.inputStatus !== 'captured' ||
-      !validTime(cutoff) ||
-      decision.featureCutoffAt !== cutoff ||
-      decision.capturedAt !== cutoff ||
-      cutoff < decision.windowStartAt ||
-      cutoff > decision.recordedAt ||
-      cutoff >= decision.expiresAt ||
-      !Number.isFinite(decision.spot) ||
-      decision.spot <= 0
-    ) {
+    if (!hasContemporaneousInputs(decision)) {
       counts.missingLearningFeatures++;
       continue;
     }
@@ -154,47 +208,11 @@ export function getVerifiedLearningRows(events = [], now = Date.now()) {
     const featuresAvailable = isLearningFeatureSnapshot(learningFeatures, {
       target: decision.target,
       expiresAt: decision.expiresAt,
-      cutoffAt: cutoff,
+      cutoffAt: decision.inputObservedAt,
       outcomeDefinition,
     });
     if (!featuresAvailable) counts.missingLearningFeatures++;
-    const row = {
-      id: decision.forecastId,
-      windowStart: decision.windowStartAt,
-      windowStartAt: decision.windowStartAt,
-      capturedAt: cutoff,
-      expiresAt: decision.expiresAt,
-      resolvedAt: outcome.recordedAt,
-      target: decision.target,
-      probability: decision.aboveProbability,
-      currentSide: Number(Math.round(decision.spot * 100) / 100 >= decision.target),
-      outcome: observedSide,
-      horizonMinutes: (decision.expiresAt - cutoff) / 60_000,
-      features: featuresAvailable ? learningFeatures.values : null,
-      learningFeatures,
-      modelVersion: decision.modelVersion,
-      modelId: typeof decision.learning?.modelId === 'string' ? decision.learning.modelId : null,
-      captureKey: decision.forecastId,
-      intervalCovered:
-        decision.intervalCoverage === 0.8 &&
-        Number.isFinite(decision.intervalLow) &&
-        decision.intervalLow > 0 &&
-        Number.isFinite(decision.intervalHigh) &&
-        decision.intervalHigh >= decision.intervalLow
-          ? outcome.observedPrice >= decision.intervalLow &&
-            outcome.observedPrice <= decision.intervalHigh
-          : undefined,
-      decision,
-      outcomeDefinition,
-      marketTicker: decision.kalshiMarket?.ticker ?? null,
-      marketProbability: getKalshiMarketProbability(
-        decision.kalshiQuote,
-        decision.kalshiMarket,
-        cutoff,
-      ),
-      outcomeEvent: outcome,
-    };
-    rows.push(row);
+    rows.push(createLearningRow(decision, outcome, observedSide, featuresAvailable));
   }
   counts.learningExamples = rows.filter((row) => row.features).length;
   return {
@@ -232,9 +250,10 @@ export function getWindowRepresentative(group) {
     (a, b) => a.capturedAt - b.capturedAt || a.id.localeCompare(b.id),
   );
   if (sorted[0]?.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION) return sorted[0];
-  const horizon = [12, 9, 6, 3, 1][Math.floor(group.startAt / 900_000) % 5];
+  const selectedHorizonMinutes = [12, 9, 6, 3, 1][Math.floor(group.startAt / 900_000) % 5];
   return sorted.reduce((closest, row) =>
-    Math.abs(row.horizonMinutes - horizon) < Math.abs(closest.horizonMinutes - horizon)
+    Math.abs(row.horizonMinutes - selectedHorizonMinutes) <
+    Math.abs(closest.horizonMinutes - selectedHorizonMinutes)
       ? row
       : closest,
   );
@@ -292,8 +311,18 @@ export function analyzeForecastEvidence(events, now = Date.now()) {
   const outcomeDefinition = KALSHI_OUTCOME_DEFINITION;
   const { rows, counts, resolved } = getVerifiedLearningRows(events, now, { outcomeDefinition });
   const cohortName = 'kalshi-background';
-  const background = rows.filter((row) => row.decision.cohort === cohortName);
-  const independent = getIndependentRows(background.length ? background : rows);
+  const backgroundRows = rows.filter((row) => row.decision.cohort === cohortName);
+  const reportRows = backgroundRows.length ? backgroundRows : rows;
+  const independent = getIndependentRows(reportRows);
+  const matchedMarketRows = independent.filter((row) => row.marketProbability !== null);
+  const inputPipelines = [
+    ...new Map(
+      reportRows
+        .map((row) => getLearningPipeline(row.learningFeatures))
+        .filter(Boolean)
+        .map((pipeline) => [JSON.stringify(pipeline), pipeline]),
+    ).values(),
+  ];
   const countsByHorizon = [
     { label: 'Under 3 minutes', minimum: 0, maximum: 3 },
     { label: '3–6 minutes', minimum: 3, maximum: 6 },
@@ -303,15 +332,13 @@ export function analyzeForecastEvidence(events, now = Date.now()) {
     label,
     ...scoreLearningRows(
       getIndependentRows(
-        (background.length ? background : rows).filter(
-          (row) => row.horizonMinutes >= minimum && row.horizonMinutes < maximum,
-        ),
+        reportRows.filter((row) => row.horizonMinutes >= minimum && row.horizonMinutes < maximum),
       ),
     ),
   }));
   return {
     status: independent.length ? 'collecting' : 'insufficient-data',
-    primaryCohort: background.length ? cohortName : 'manual',
+    primaryCohort: backgroundRows.length ? cohortName : 'manual',
     outcomeDefinition,
     counts,
     independentWindows: independent.length,
@@ -319,28 +346,17 @@ export function analyzeForecastEvidence(events, now = Date.now()) {
     issuedMetrics: scoreLearningRows(rows),
     marketBenchmark: {
       ...scoreLearningRows(
-        independent
-          .filter((row) => row.marketProbability !== null)
-          .map((row) => ({ ...row, probability: row.marketProbability })),
+        matchedMarketRows.map((row) => ({ ...row, probability: row.marketProbability })),
       ),
       label: 'Kalshi YES bid/ask midpoint at the same capture time',
-      matchedModel: scoreLearningRows(independent.filter((row) => row.marketProbability !== null)),
+      matchedModel: scoreLearningRows(matchedMarketRows),
     },
     byHorizon: countsByHorizon,
-    byInputSource: [
-      ...new Map(
-        (background.length ? background : rows)
-          .map((row) => getLearningPipeline(row.learningFeatures))
-          .filter(Boolean)
-          .map((pipeline) => [JSON.stringify(pipeline), pipeline]),
-      ).values(),
-    ].map((pipeline) => ({
+    byInputSource: inputPipelines.map((pipeline) => ({
       ...pipeline,
       ...scoreLearningRows(
         getIndependentRows(
-          (background.length ? background : rows).filter((row) =>
-            matchesLearningPipeline(row.learningFeatures, pipeline),
-          ),
+          reportRows.filter((row) => matchesLearningPipeline(row.learningFeatures, pipeline)),
         ),
       ),
     })),
@@ -412,7 +428,7 @@ export function analyzeSavedForecasts(forecasts = [], now = Date.now()) {
   });
   return {
     savedForecasts: saved.length,
-    issuedCalls: saved.filter((forecast) => validProbability(forecast.aboveProbability)).length,
+    issuedCalls: saved.filter((forecast) => isValidProbability(forecast.aboveProbability)).length,
     resolvedForecasts: resolved.length,
     unobserved: saved.filter((forecast) => forecast.status === 'unobserved').length,
     withheld: saved.filter((forecast) => forecast.status === 'withheld').length,

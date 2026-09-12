@@ -1,83 +1,103 @@
 import jStat from 'jstat';
 
 export const getBoundedProbability = (value) => Math.max(0.01, Math.min(0.99, value));
+// Both branches describe the same curve; splitting at zero avoids exponential overflow.
 export const sigmoid = (value) =>
   value >= 0 ? 1 / (1 + Math.exp(-value)) : Math.exp(value) / (1 + Math.exp(value));
-export const logit = (value) =>
-  Math.log(
-    Math.max(1e-6, Math.min(1 - 1e-6, value)) / (1 - Math.max(1e-6, Math.min(1 - 1e-6, value))),
-  );
+export const logit = (value) => {
+  const probability = Math.max(1e-6, Math.min(1 - 1e-6, value));
+  return Math.log(probability / (1 - probability));
+};
 
 // Full-batch penalized logistic regression. Normalization is fitted only from
 // supplied training rows; callers pass a disjoint set for calibration.
 export function fitLogistic(rows, indexes, { penalty = 0.001, maximumIterations = 30 } = {}) {
   if (!rows.length || !indexes.length)
     throw new Error('Logistic fitting requires training data and features.');
-  const weights = rows.map((row) => row.weight ?? 1);
-  if (weights.some((weight) => !Number.isFinite(weight) || weight <= 0))
+  const rowWeights = rows.map((row) => row.weight ?? 1);
+  if (rowWeights.some((weight) => !Number.isFinite(weight) || weight <= 0))
     throw new Error('Logistic fitting weights must be positive and finite.');
-  const totalWeight = jStat.sum(weights);
-  const mean = (values) =>
-    values.reduce((sum, value, index) => sum + value * weights[index], 0) / totalWeight;
-  const means = indexes.map((index) => mean(rows.map((row) => row.features[index])));
+  const totalWeight = jStat.sum(rowWeights);
+  const getWeightedMean = (values) =>
+    values.reduce((sum, value, index) => sum + value * rowWeights[index], 0) / totalWeight;
+
+  // Put each input on a comparable scale. A constant feature uses scale one to avoid division by zero.
+  const means = indexes.map((index) => getWeightedMean(rows.map((row) => row.features[index])));
   const scales = indexes.map(
     (index, column) =>
-      Math.sqrt(mean(rows.map((row) => (row.features[index] - means[column]) ** 2))) || 1,
+      Math.sqrt(getWeightedMean(rows.map((row) => (row.features[index] - means[column]) ** 2))) ||
+      1,
   );
-  const matrix = rows.map((row) => [
+  // The leading one gives the model an intercept independent of the input features.
+  const standardizedRows = rows.map((row) => [
     1,
     ...indexes.map((index, column) => (row.features[index] - means[column]) / scales[column]),
   ]);
-  const dimension = indexes.length + 1;
-  let coefficients = Array(dimension).fill(0);
-  const loss = (values) =>
-    mean(
-      matrix.map((features, index) => {
-        const score = features.reduce((sum, value, column) => sum + value * values[column], 0);
+  const coefficientCount = indexes.length + 1;
+  let coefficients = Array(coefficientCount).fill(0);
+  const getPenalizedLoss = (candidateCoefficients) =>
+    getWeightedMean(
+      standardizedRows.map((features, index) => {
+        const score = features.reduce(
+          (sum, value, column) => sum + value * candidateCoefficients[column],
+          0,
+        );
         return (
           Math.max(score, 0) - rows[index].outcome * score + Math.log1p(Math.exp(-Math.abs(score)))
         );
       }),
     ) +
-    (penalty * jStat.sumsqrd(values.slice(1))) / 2;
-  let previousLoss = loss(coefficients);
+    (penalty * jStat.sumsqrd(candidateCoefficients.slice(1))) / 2;
+  let previousLoss = getPenalizedLoss(coefficients);
   let iterations = 0;
   for (; iterations < maximumIterations; iterations++) {
-    const gradient = Array(dimension).fill(0);
-    const hessian = Array.from({ length: dimension }, () => Array(dimension).fill(0));
+    // The gradient measures the loss slope; the Hessian measures how that slope changes.
+    // Together they define a Newton update for all coefficients at once.
+    const gradient = Array(coefficientCount).fill(0);
+    const hessian = Array.from({ length: coefficientCount }, () => Array(coefficientCount).fill(0));
     for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-      const features = matrix[rowIndex];
+      const features = standardizedRows[rowIndex];
       let score = 0;
-      for (let column = 0; column < dimension; column++)
+      for (let column = 0; column < coefficientCount; column++)
         score += features[column] * coefficients[column];
       const probability = sigmoid(score);
-      const residual = (probability - rows[rowIndex].outcome) * weights[rowIndex];
-      const weight = Math.max(1e-8, probability * (1 - probability)) * weights[rowIndex];
-      for (let first = 0; first < dimension; first++) {
-        gradient[first] += features[first] * residual;
-        for (let second = 0; second <= first; second++)
-          hessian[first][second] += features[first] * features[second] * weight;
+      const weightedResidual = (probability - rows[rowIndex].outcome) * rowWeights[rowIndex];
+      const curvatureWeight =
+        Math.max(1e-8, probability * (1 - probability)) * rowWeights[rowIndex];
+      for (let firstColumn = 0; firstColumn < coefficientCount; firstColumn++) {
+        gradient[firstColumn] += features[firstColumn] * weightedResidual;
+        for (let secondColumn = 0; secondColumn <= firstColumn; secondColumn++)
+          hessian[firstColumn][secondColumn] +=
+            features[firstColumn] * features[secondColumn] * curvatureWeight;
       }
     }
-    for (let first = 0; first < dimension; first++) {
-      gradient[first] = gradient[first] / totalWeight + (first ? penalty * coefficients[first] : 0);
-      for (let second = 0; second <= first; second++)
-        hessian[second][first] = hessian[first][second] /= totalWeight;
-      hessian[first][first] += first ? penalty : 1e-8;
+    // Penalize feature coefficients, leaving the intercept unpenalized. The tiny intercept
+    // curvature keeps the linear solve stable when fitted probabilities approach zero or one.
+    for (let firstColumn = 0; firstColumn < coefficientCount; firstColumn++) {
+      gradient[firstColumn] =
+        gradient[firstColumn] / totalWeight +
+        (firstColumn ? penalty * coefficients[firstColumn] : 0);
+      for (let secondColumn = 0; secondColumn <= firstColumn; secondColumn++)
+        hessian[secondColumn][firstColumn] = hessian[firstColumn][secondColumn] /= totalWeight;
+      hessian[firstColumn][firstColumn] += firstColumn ? penalty : 1e-8;
     }
-    const step = jStat.lstsq(hessian, gradient);
-    if (!step.every(Number.isFinite))
+    const coefficientUpdate = jStat.lstsq(hessian, gradient);
+    if (!coefficientUpdate.every(Number.isFinite))
       throw new Error('Logistic optimizer produced a non-finite update.');
-    let rate = 1;
-    let next = coefficients.map((value, index) => value - step[index]);
-    let nextLoss = loss(next);
-    while (nextLoss > previousLoss && rate > 1 / 256) {
-      rate /= 2;
-      next = coefficients.map((value, index) => value - rate * step[index]);
-      nextLoss = loss(next);
+
+    // Halve an overshooting update until it improves the loss or reaches the fixed step limit.
+    let stepScale = 1;
+    let nextCoefficients = coefficients.map((value, index) => value - coefficientUpdate[index]);
+    let nextLoss = getPenalizedLoss(nextCoefficients);
+    while (nextLoss > previousLoss && stepScale > 1 / 256) {
+      stepScale /= 2;
+      nextCoefficients = coefficients.map(
+        (value, index) => value - stepScale * coefficientUpdate[index],
+      );
+      nextLoss = getPenalizedLoss(nextCoefficients);
     }
     if (nextLoss > previousLoss) break;
-    coefficients = next;
+    coefficients = nextCoefficients;
     if (Math.abs(previousLoss - nextLoss) < 1e-9) {
       previousLoss = nextLoss;
       break;
@@ -132,8 +152,10 @@ export function scoreProbabilities(rows, threshold = 0.55) {
       throw new Error('Invalid probability scoring input.');
     const probability = row.probability;
     squaredError += (probability - row.outcome) ** 2;
-    const safe = Math.max(1e-6, Math.min(1 - 1e-6, probability));
-    logLoss -= row.outcome * Math.log(safe) + (1 - row.outcome) * Math.log(1 - safe);
+    const boundedProbability = Math.max(1e-6, Math.min(1 - 1e-6, probability));
+    logLoss -=
+      row.outcome * Math.log(boundedProbability) +
+      (1 - row.outcome) * Math.log(1 - boundedProbability);
     if (Math.max(probability, 1 - probability) >= threshold) {
       calls++;
       correct += Number(Number(probability > 0.5) === row.outcome);

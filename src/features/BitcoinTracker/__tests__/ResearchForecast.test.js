@@ -16,6 +16,12 @@ import { getFixedForecastAnalysis, KALSHI_POLICY_VERSION } from '../utils/fixedP
 import { getValidatedForecast, loadJournal, saveJournal } from '../utils/journal.utils';
 import { appendEvidenceRows } from '../utils/evidenceStorage.utils';
 import { OUTCOME_MODEL_VERSION, CALIBRATION_VERSION } from '../utils/learning/model.utils';
+import {
+  EARLY_MODEL_VERSION,
+  EARLY_CALIBRATION_VERSION,
+  EARLY_LEARNING_REQUIREMENTS,
+  EARLY_FIT_PARAMETERS,
+} from '../utils/learning/earlyModel.utils';
 import { LEARNING_FEATURE_NAMES, LEARNING_FEATURE_VERSION } from '../utils/learning/features.utils';
 import { KALSHI_OUTCOME_DEFINITION, getKalshiOutcome } from '../utils/kalshi/contract.utils';
 
@@ -143,6 +149,38 @@ function analyzing() {
   };
 }
 
+function earlyArtifact(overrides = {}) {
+  const base = artifact();
+  const id = `${EARLY_MODEL_VERSION}-integration`;
+  return {
+    ...base,
+    id,
+    version: EARLY_MODEL_VERSION,
+    calibrationCutoffAt: base.trainingCutoffAt,
+    evaluationCutoffAt: base.trainingCutoffAt,
+    requirements: { ...EARLY_LEARNING_REQUIREMENTS },
+    model: {
+      indexes: [0],
+      means: [0],
+      scales: [1],
+      coefficients: [-4, 1],
+      penalty: EARLY_FIT_PARAMETERS.penalty,
+    },
+    calibration: { version: EARLY_CALIBRATION_VERSION },
+    applicability: {
+      ...base.applicability,
+      minimumBaselineProbability: 0,
+      maximumBaselineProbability: 1,
+    },
+    activation: {
+      ...base.activation,
+      modelId: id,
+      shadowEvaluation: { ...base.activation.shadowEvaluation, modelId: id },
+    },
+    ...overrides,
+  };
+}
+
 function createObservation({
   now = START,
   models = { active: artifact() },
@@ -193,6 +231,84 @@ describe('learned forecast integration', () => {
   afterEach(() => {
     cleanup();
     jest.useRealTimers();
+  });
+
+  test('records early and full candidates independently without changing the live baseline', () => {
+    const input = market(CAPTURE);
+    const full = artifact();
+    const early = earlyArtifact({ activation: undefined });
+    const baseline = getResearchForecast(input);
+    const preview = getResearchForecast(input, { candidate: full, earlyCandidate: early }, START);
+    expect(preview.aboveProbability).toBe(baseline.aboveProbability);
+    expect(preview.shadowPrediction?.modelId).toBe(full.id);
+    expect(preview.earlyShadowPrediction).toMatchObject({
+      modelId: early.id,
+      featureCutoffAt: CAPTURE,
+    });
+    expect(preview.earlyShadowPrediction.aboveProbability).toBeLessThan(baseline.aboveProbability);
+    expect(
+      getResearchForecast(input, { early: { candidate: early } }, START).earlyShadowPrediction,
+    ).toEqual(preview.earlyShadowPrediction);
+    expect(getResearchForecast(input, { earlyCandidate: early }).earlyShadowPrediction).toBeNull();
+    expect(
+      getResearchForecast(
+        input,
+        {
+          earlyCandidate: earlyArtifact({ trainedAt: START + 1000, shadowStartsAt: START + 1000 }),
+        },
+        START,
+      ).earlyShadowPrediction,
+    ).toBeNull();
+  });
+
+  test('captures and restores an activated early correction without changing saved probabilities', async () => {
+    const model = earlyArtifact();
+    const baseline = getResearchForecast(market(CAPTURE));
+    const view = createObservation({ now: CAPTURE, models: { active: model } });
+    await flush();
+    const fixed = JSON.parse(JSON.stringify(stored(view)));
+    expect(fixed).toMatchObject({
+      status: 'pending',
+      modelVersion: EARLY_MODEL_VERSION,
+      calculationMode: 'outcome-trained',
+      learning: { modelId: model.id, calibrationVersion: EARLY_CALIBRATION_VERSION },
+    });
+    expect(Math.abs(fixed.aboveProbability - baseline.aboveProbability)).toBeLessThanOrEqual(
+      0.05 + 1e-9,
+    );
+    expect(getValidatedForecast(fixed)).toEqual(fixed);
+    expect(saveJournal([fixed], window.localStorage)).toBeNull();
+    expect(loadJournal(window.localStorage).forecasts).toEqual([fixed]);
+    expect(evidenceRows().find((row) => row.event === 'decision')?.learning.modelId).toBe(model.id);
+    view.update(CAPTURE + 1000, { models: {} });
+    await flush();
+    expect(stored(view)).toEqual(fixed);
+    const excessive = {
+      ...fixed,
+      aboveProbability: Math.min(0.99, baseline.aboveProbability + 0.1),
+    };
+    excessive.learning = { ...fixed.learning, aboveProbability: excessive.aboveProbability };
+    excessive.belowProbability = 1 - excessive.aboveProbability;
+    expect(getValidatedForecast(excessive)).toBeNull();
+  });
+
+  test('archives early shadow inputs at capture and falls back when an early model is retired', async () => {
+    const early = earlyArtifact({ activation: undefined });
+    const view = createObservation({ now: CAPTURE, models: { earlyCandidate: early } });
+    await flush();
+    const decision = evidenceRows().find((row) => row.event === 'decision');
+    expect(decision.earlyShadowPrediction).toMatchObject({
+      modelId: early.id,
+      featureCutoffAt: CAPTURE,
+    });
+    const input = market(CAPTURE);
+    expect(
+      getResearchForecast(input, {
+        active: earlyArtifact({
+          retirement: { retiredAt: CAPTURE - 1, reason: 'Performance worsened.' },
+        }),
+      }).aboveProbability,
+    ).toBe(getResearchForecast(input).aboveProbability);
   });
 
   test('applies an activated reversal model to the same deadline while retaining the baseline comparison', () => {

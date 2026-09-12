@@ -3,8 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { selectScheduledForecast } from '../state/selectors/trackerSelectors';
 import { scheduledForecastStarted, scheduleStartMissed } from '../state/slices/trackerSlice';
 import { getKalshiContract, KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
-import { KALSHI_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
-import { getFixedForecastAnalysis, KALSHI_POLICY_VERSION } from '../utils/fixedPrediction.utils';
+import { createKalshiForecastRecord } from '../utils/kalshi/forecastRecord.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import {
   getKalshiReferenceQuote,
@@ -84,29 +83,12 @@ export default function useKalshiSchedule({
     dispatch(
       scheduledForecastStarted({
         now: capturedAt,
-        forecast: {
+        forecast: createKalshiForecastRecord({
           id: schedule.id,
+          contract,
           createdAt: capturedAt,
-          startsAt: contract.startsAt,
-          timingMode: 'end',
-          expiresAt: contract.expiresAt,
           price: reference.price,
-          target: contract.target,
-          aboveProbability: null,
-          belowProbability: null,
-          direction: 'neutral',
-          modelVersion: KALSHI_MODEL_VERSION,
-          status: 'analyzing',
-          calculationMode: null,
-          analysis: getFixedForecastAnalysis({
-            startedAt: capturedAt,
-            expiresAt: contract.expiresAt,
-            policyVersion: KALSHI_POLICY_VERSION,
-          }),
-          outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
-          kalshiMarket: contract,
-          kalshi: null,
-        },
+        }),
       }),
     );
   }, [

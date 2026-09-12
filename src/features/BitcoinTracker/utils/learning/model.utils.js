@@ -7,37 +7,42 @@ import {
   matchesLearningPipeline,
 } from './features.utils';
 import { getBoundedProbability, logit, predictLogistic } from './statistics.utils';
+import {
+  isEarlyModelArtifact,
+  isWithinEarlyModelDomain,
+  predictEarlyCandidate,
+} from './earlyModel.utils';
 
 export const OUTCOME_MODEL_VERSION = 'outcome-logistic-kalshi-v2';
 export const KALSHI_OUTCOME_MODEL_VERSION = OUTCOME_MODEL_VERSION;
 export const CALIBRATION_VERSION = 'platt-v1';
-const timestamp = (value) => Number.isSafeInteger(value) && value >= 0;
-const numbers = (values, length) =>
+const isValidTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
+const isFiniteNumberArray = (values, length) =>
   Array.isArray(values) && values.length === length && values.every(Number.isFinite);
 
 export function matchesOutcomeModelPipeline(model, snapshot) {
-  const support = model?.applicability;
+  const applicability = model?.applicability;
   return matchesLearningPipeline(snapshot, {
-    baselineModelVersion: support?.baselineModelVersion,
-    referenceSource: support?.referenceSources?.[0],
-    featureInputSource: support?.featureInputSources?.[0],
+    baselineModelVersion: applicability?.baselineModelVersion,
+    referenceSource: applicability?.referenceSources?.[0],
+    featureInputSource: applicability?.featureInputSources?.[0],
   });
 }
 
 export function isWithinOutcomeModelDomain(model, snapshot) {
-  const horizon = (snapshot?.expiresAt - snapshot?.featureCutoffAt) / 60_000;
-  const support = model?.applicability;
-  const availability = LEARNING_AVAILABILITY_INDEXES.map((index) => snapshot?.values?.[index]).join(
-    '',
-  );
+  const horizonMinutes = (snapshot?.expiresAt - snapshot?.featureCutoffAt) / 60_000;
+  const applicability = model?.applicability;
+  const availabilityPattern = LEARNING_AVAILABILITY_INDEXES.map(
+    (index) => snapshot?.values?.[index],
+  ).join('');
   return Boolean(
-    Number.isFinite(horizon) &&
-    support &&
-    horizon >= support.minimumHorizonMinutes - 1e-9 &&
-    horizon <= support.maximumHorizonMinutes + 1e-9 &&
-    snapshot.targetDistance >= support.minimumTargetDistance - 1e-9 &&
-    snapshot.targetDistance <= support.maximumTargetDistance + 1e-9 &&
-    support.availabilityPatterns?.includes(availability) &&
+    Number.isFinite(horizonMinutes) &&
+    applicability &&
+    horizonMinutes >= applicability.minimumHorizonMinutes - 1e-9 &&
+    horizonMinutes <= applicability.maximumHorizonMinutes + 1e-9 &&
+    snapshot.targetDistance >= applicability.minimumTargetDistance - 1e-9 &&
+    snapshot.targetDistance <= applicability.maximumTargetDistance + 1e-9 &&
+    applicability.availabilityPatterns?.includes(availabilityPattern) &&
     // Source identity alone is insufficient: BRTI spot with Coinbase history is a different
     // feature generation process from native BRTI history, even for the same settlement rule.
     (model?.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION ||
@@ -51,10 +56,10 @@ function isLogisticFit(model, indexes) {
     Array.isArray(model.indexes) &&
     model.indexes.length === indexes.length &&
     model.indexes.every((value, index) => value === indexes[index]) &&
-    numbers(model.means, indexes.length) &&
-    numbers(model.scales, indexes.length) &&
+    isFiniteNumberArray(model.means, indexes.length) &&
+    isFiniteNumberArray(model.scales, indexes.length) &&
     model.scales.every((value) => value > 0) &&
-    numbers(model.coefficients, indexes.length + 1) &&
+    isFiniteNumberArray(model.coefficients, indexes.length + 1) &&
     model.coefficients.every((value) => Math.abs(value) <= 1000),
   );
 }
@@ -84,7 +89,7 @@ export function isOutcomeModelArtifact(model) {
       model.calibrationCutoffAt,
       model.evaluationCutoffAt,
       model.shadowStartsAt,
-    ].every(timestamp) &&
+    ].every(isValidTimestamp) &&
     model.trainingCutoffAt < model.calibrationCutoffAt &&
     model.calibrationCutoffAt < model.evaluationCutoffAt &&
     model.evaluationCutoffAt <= model.trainedAt &&
@@ -113,6 +118,8 @@ export function isOutcomeModelArtifact(model) {
 
 /** Used only to record prospective shadow scores; never makes a shadow candidate active. */
 export function predictOutcomeCandidate(model, snapshot) {
+  if (model?.retirement) return null;
+  if (isEarlyModelArtifact(model)) return predictEarlyCandidate(model, snapshot);
   if (
     !isOutcomeModelArtifact(model) ||
     !isLearningFeatureSnapshot(snapshot, {
@@ -125,8 +132,8 @@ export function predictOutcomeCandidate(model, snapshot) {
   )
     return null;
   if (!isWithinOutcomeModelDomain(model, snapshot)) return snapshot.baselineAboveProbability;
-  const raw = predictLogistic(model.model, snapshot.values);
-  const probability = predictLogistic(model.calibration.model, [logit(raw)]);
+  const uncalibratedProbability = predictLogistic(model.model, snapshot.values);
+  const probability = predictLogistic(model.calibration.model, [logit(uncalibratedProbability)]);
   return Number.isFinite(probability) ? getBoundedProbability(probability) : null;
 }
 
@@ -137,24 +144,27 @@ export function applyOutcomeModel(
 ) {
   if (
     !baseForecast?.available ||
-    !timestamp(now) ||
+    !isValidTimestamp(now) ||
     !isLearningFeatureSnapshot(learningFeatures, {
       target,
       expiresAt,
       cutoffAt: now,
       outcomeDefinition: model?.outcomeDefinition,
     }) ||
-    !isOutcomeModelArtifact(model) ||
+    !(isOutcomeModelArtifact(model) || isEarlyModelArtifact(model)) ||
+    model.retirement ||
     baseForecast.outcomeDefinition !== model.outcomeDefinition ||
     model.activation?.modelId !== model.id ||
     model.activation?.shadowEvaluation?.eligibleForPromotion !== true ||
-    !timestamp(model.activation?.activatedAt) ||
+    !isValidTimestamp(model.activation?.activatedAt) ||
     model.activation.activatedAt > now ||
     model.activation.activatedAt < model.trainedAt
   )
     return baseForecast;
   if (
-    !isWithinOutcomeModelDomain(model, learningFeatures) ||
+    !(isEarlyModelArtifact(model)
+      ? isWithinEarlyModelDomain(model, learningFeatures)
+      : isWithinOutcomeModelDomain(model, learningFeatures)) ||
     Math.abs(learningFeatures.baselineAboveProbability - baseForecast.aboveProbability) > 1e-9
   )
     return baseForecast;

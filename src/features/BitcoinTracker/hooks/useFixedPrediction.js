@@ -14,6 +14,7 @@ import {
 } from '../utils/kalshi/marketConditions.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION } from '../utils/learning/model.utils';
+import { EARLY_MODEL_VERSION } from '../utils/learning/earlyModel.utils';
 
 export default function useFixedPrediction({
   forecast,
@@ -77,8 +78,9 @@ export default function useFixedPrediction({
       reference.time < (observations.current.samples.at(-1)?.quoteTime ?? 0) ||
       (estimate.modelVersion !== forecast.modelVersion &&
         !(
-          [OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION].includes(estimate.modelVersion) &&
-          estimate.learning?.applied
+          [OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION, EARLY_MODEL_VERSION].includes(
+            estimate.modelVersion,
+          ) && estimate.learning?.applied
         ))
     ) {
       estimate.available = false;

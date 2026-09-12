@@ -30,6 +30,26 @@ const timestampFields = [
   'confirmedThrough',
   'completeSince',
 ];
+const terminalForecastStates = ['withheld', 'unobserved', 'resolved'];
+const immutableContractFields = [
+  'target',
+  'expiresAt',
+  'startsAt',
+  'outcomeDefinition',
+  'analysis',
+  'kalshiMarket',
+];
+const immutablePredictionFields = [
+  'createdAt',
+  'price',
+  'aboveProbability',
+  'belowProbability',
+  'direction',
+  'calculationMode',
+  'learning',
+  'modelVersion',
+  'kalshi',
+];
 
 export function isResearchIdentifier(value) {
   return (
@@ -167,6 +187,57 @@ export function validateForecastSnapshot(row) {
     throw new ResearchDataError('Saved forecast probabilities must match its publication state.');
   }
   return getCanonicalResearchJson(row);
+}
+
+/** Snapshots can arrive out of order, but cannot rewrite a saved decision. */
+export function validateForecastSnapshotConsistency(original, snapshot) {
+  const hasConflictingOutcome =
+    terminalForecastStates.includes(original.status) &&
+    terminalForecastStates.includes(snapshot.status) &&
+    original.status !== snapshot.status;
+  const hasConflictingPublication =
+    (original.status === 'withheld' && snapshot.aboveProbability != null) ||
+    (snapshot.status === 'withheld' && original.aboveProbability != null);
+  if (hasConflictingOutcome || hasConflictingPublication) {
+    throw new ResearchDataError(
+      'A forecast cannot replace a previously saved final outcome or publication decision.',
+      409,
+    );
+  }
+
+  // Analyzing snapshots may publish a prediction later. Once both snapshots have
+  // predictions, their captured inputs and probabilities must agree exactly.
+  const bothHavePrediction = original.aboveProbability != null && snapshot.aboveProbability != null;
+  const immutableFields = bothHavePrediction
+    ? [...immutableContractFields, ...immutablePredictionFields]
+    : immutableContractFields;
+  const hasChangedImmutableField = immutableFields.some(
+    (field) =>
+      getCanonicalResearchJson(original[field] ?? null) !==
+      getCanonicalResearchJson(snapshot[field] ?? null),
+  );
+  if (hasChangedImmutableField) {
+    throw new ResearchDataError(
+      'A forecast snapshot cannot change its original target, deadline, or captured prediction.',
+      409,
+    );
+  }
+}
+
+export function validateModelArtifact(artifact) {
+  if (
+    !isResearchIdentifier(artifact?.id) ||
+    !isResearchIdentifier(artifact?.version) ||
+    !isResearchTimestamp(artifact?.trainedAt)
+  ) {
+    throw new ResearchDataError(
+      'Model artifacts require a stable identifier, version, and training timestamp.',
+    );
+  }
+  if (artifact.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION) {
+    throw new ResearchDataError('Only Kalshi model artifacts can be stored.');
+  }
+  return getCanonicalResearchJson(artifact, 2 * 1024 * 1024);
 }
 
 export function getResearchPage({ after = 0, limit = 500 } = {}) {

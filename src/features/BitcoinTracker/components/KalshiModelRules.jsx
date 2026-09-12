@@ -77,10 +77,16 @@ export default function KalshiModelRules() {
           snapshots. Missing checkpoints are recorded as missing.
         </p>
         <p>
-          Earlier events train a candidate; separate later events calibrate and test it. It must
-          also pass a prospective comparison before activation. Only real Kalshi outcomes train the
-          model. BRTI and Coinbase history are evaluated separately, and older model inputs cannot
-          qualify a new version. New training never rewrites a saved call.
+          Early learning fits a small correction after at least 40 events, then tests it on a fixed
+          group of 40 future events. A candidate changes no displayed probabilities. If approved, it
+          blends in 20% of the correction and changes a probability by at most 5 percentage points
+          in either direction. Later outcome checks can suspend the adjustment.
+        </p>
+        <p>
+          The full model keeps separate training, calibration and test groups of at least 120, 60
+          and 60 events, followed by 120 future validation events. Only real Kalshi outcomes train
+          either model. BRTI and Coinbase history are evaluated separately, and older model inputs
+          cannot qualify a new version. New training never rewrites a saved call.
         </p>
         <p>
           Keep the app or the persistent research collector running to capture inputs. Official

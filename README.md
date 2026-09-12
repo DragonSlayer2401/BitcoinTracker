@@ -63,3 +63,7 @@ pnpm research:collect --once
 ```
 
 No deployment or trading execution is included.
+
+## Working on the code
+
+Start with the [developer reading guide](docs/architecture.md) for the code's reading order, forecast lifecycle, data owners, and storage rules. Follow [the verification guide](docs/TESTING.md) when making changes.

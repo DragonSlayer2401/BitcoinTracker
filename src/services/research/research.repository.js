@@ -4,9 +4,9 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createClient } from '@libsql/client';
-import { KALSHI_RESEARCH_MIGRATION, migrateResearchToKalshi } from './research.migration';
-import { getResearchWriteTransaction, runResearchSchemaStatements } from './research.connection';
-import { KALSHI_OUTCOME_DEFINITION } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { getResearchWriteTransaction } from './research.connection';
+import { initializeResearchSchema } from './research.schema';
+import { EARLY_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/earlyModel.utils';
 import {
   ResearchDataError,
   getCanonicalResearchJson,
@@ -15,68 +15,12 @@ import {
   isResearchTimestamp,
   validateEvidenceRow,
   validateForecastSnapshot,
+  validateForecastSnapshotConsistency,
+  validateModelArtifact,
   validateResearchBatch,
 } from './research.validation';
 
-const statements = [
-  `CREATE TABLE IF NOT EXISTS research_migrations (
-    migration_id TEXT PRIMARY KEY,
-    applied_at INTEGER NOT NULL,
-    details TEXT NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS evidence_events (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id TEXT NOT NULL UNIQUE,
-    forecast_id TEXT NOT NULL,
-    recorded_at INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    payload TEXT NOT NULL
-  )`,
-  'CREATE INDEX IF NOT EXISTS evidence_forecast ON evidence_events(forecast_id)',
-  "CREATE INDEX IF NOT EXISTS evidence_event_kind ON evidence_events(json_extract(payload, '$.event'), sequence)",
-  `CREATE TABLE IF NOT EXISTS forecast_snapshots (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    snapshot_id TEXT NOT NULL UNIQUE,
-    forecast_id TEXT NOT NULL,
-    state TEXT NOT NULL,
-    state_rank INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    payload TEXT NOT NULL
-  )`,
-  'CREATE INDEX IF NOT EXISTS forecast_identity ON forecast_snapshots(forecast_id)',
-  `CREATE TABLE IF NOT EXISTS model_artifacts (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_id TEXT NOT NULL UNIQUE,
-    saved_at INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    payload TEXT NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS model_activations (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_id TEXT NOT NULL,
-    activated_at INTEGER NOT NULL,
-    evaluation TEXT NOT NULL,
-    FOREIGN KEY(model_id) REFERENCES model_artifacts(model_id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS research_leases (
-    lease_key TEXT PRIMARY KEY,
-    owner_id TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
-  )`,
-];
-const schemaObjects = statements.map((statement) => {
-  const [, type, name] = statement.match(/CREATE (TABLE|INDEX) IF NOT EXISTS ([a-z_]+)/);
-  return {
-    name,
-    type: type.toLowerCase(),
-    columns: [...statement.matchAll(/^\s*([a-z_]+)\s+(?:TEXT|INTEGER)\b/gm)].map(
-      (match) => match[1],
-    ),
-  };
-});
-const guardedTables = ['evidence_events', 'forecast_snapshots', 'model_artifacts'];
-const stateRanks = {
+const forecastStateRanks = {
   analyzing: 0,
   pending: 1,
   'awaiting-settlement': 2,
@@ -84,7 +28,22 @@ const stateRanks = {
   unobserved: 3,
   resolved: 4,
 };
-const getHash = (json) => createHash('sha256').update(json).digest('hex');
+const getContentHash = (json) => createHash('sha256').update(json).digest('hex');
+
+function getStoredModel(row) {
+  return {
+    ...JSON.parse(row.payload),
+    ...(row.retired_at == null
+      ? {}
+      : {
+          retirement: {
+            retiredAt: Number(row.retired_at),
+            reason: row.retirement_reason,
+            wasActive: Boolean(row.was_active),
+          },
+        }),
+  };
+}
 
 export function getResearchDatabaseConfiguration(environment = process.env) {
   const isHosted = Boolean(
@@ -147,55 +106,54 @@ async function readAllResearchPages(readPage, maximumRows) {
   return rows;
 }
 
+async function insertForecastSnapshot(transaction, entry) {
+  const previousSnapshots = await transaction.execute({
+    sql: 'SELECT payload FROM forecast_snapshots WHERE forecast_id = ?',
+    args: [entry.row.id],
+  });
+  for (const snapshot of previousSnapshots.rows) {
+    validateForecastSnapshotConsistency(JSON.parse(snapshot.payload), entry.row);
+  }
+  await transaction.execute({
+    sql: 'INSERT INTO forecast_snapshots(snapshot_id, forecast_id, state, state_rank, created_at, content_hash, payload) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    args: [
+      entry.id,
+      entry.row.id,
+      entry.row.status,
+      forecastStateRanks[entry.row.status],
+      entry.row.createdAt,
+      entry.hash,
+      entry.json,
+    ],
+  });
+}
+
+async function insertEvidenceEvent(transaction, entry) {
+  await transaction.execute({
+    sql: 'INSERT INTO evidence_events(event_id, forecast_id, recorded_at, content_hash, payload) VALUES (?, ?, ?, ?, ?)',
+    args: [entry.id, entry.row.forecastId, entry.row.recordedAt, entry.hash, entry.json],
+  });
+}
+
 export function createResearchRepository({ client, mode = 'local-database' }) {
-  let ready;
+  let schemaInitialization;
   let pendingWrite = Promise.resolve();
+
   function runWriteOperation(operation) {
     const result = pendingWrite.then(operation);
+    // A rejected batch must not prevent later uploads from using the queue.
     pendingWrite = result.catch(() => {});
     return result;
   }
-  async function hasInitializedSchema() {
-    const schema = await client.execute(
-      "SELECT name, type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
-    );
-    const objects = new Map(schema.rows.map((row) => [row.name, row.type]));
-    if (
-      schemaObjects.some((item) => objects.get(item.name) !== item.type) ||
-      guardedTables.some((table) => objects.get(`${table}_kalshi_only`) !== 'trigger')
-    )
-      return false;
-    const migration = await client.execute({
-      sql: 'SELECT migration_id FROM research_migrations WHERE migration_id = ?',
-      args: [KALSHI_RESEARCH_MIGRATION],
-    });
-    if (!migration.rows.length) return false;
-    for (const table of schemaObjects.filter((item) => item.type === 'table')) {
-      const result = await client.execute(`PRAGMA table_info(${table.name})`);
-      const columns = new Set(result.rows.map((row) => row.name));
-      if (table.columns.some((column) => !columns.has(column))) return false;
-    }
-    return true;
-  }
+
   async function initialize() {
-    if (!ready) {
-      ready = (async () => {
-        // Existing archives can be read while a database viewer holds a transaction.
-        // Require the current schema and migration before avoiding startup write locks.
-        if (await hasInitializedSchema()) return;
-        await runResearchSchemaStatements(client, statements);
-        await migrateResearchToKalshi(client);
-        if (!(await hasInitializedSchema()))
-          throw new ResearchDataError(
-            'Research storage has an incomplete schema. Existing data is retained; restore the missing schema objects before recording more evidence.',
-            503,
-          );
-      })().catch((error) => {
-        ready = null;
+    if (!schemaInitialization) {
+      schemaInitialization = initializeResearchSchema(client).catch((error) => {
+        schemaInitialization = null;
         throw error;
       });
     }
-    await ready;
+    await schemaInitialization;
   }
 
   async function getWriteAvailability() {
@@ -221,17 +179,20 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
     }
   }
 
-  async function appendEvents(table, entries, getEntry) {
+  async function appendEvents(table, rows, prepareEntry) {
     return runWriteOperation(async () => {
-      validateResearchBatch(entries);
-      const prepared = entries.map(getEntry);
+      validateResearchBatch(rows);
+      const entries = rows.map(prepareEntry);
       await initialize();
+
+      const isForecastBatch = table === 'forecast_snapshots';
+      const identityColumn = isForecastBatch ? 'snapshot_id' : 'event_id';
+      const insertEntry = isForecastBatch ? insertForecastSnapshot : insertEvidenceEvent;
       const transaction = await getResearchWriteTransaction(client);
       let inserted = 0;
       let duplicates = 0;
       try {
-        for (const entry of prepared) {
-          const identityColumn = table === 'evidence_events' ? 'event_id' : 'snapshot_id';
+        for (const entry of entries) {
           const existing = await transaction.execute({
             sql: `SELECT content_hash FROM ${table} WHERE ${identityColumn} = ?`,
             args: [entry.id],
@@ -246,78 +207,7 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
             duplicates += 1;
             continue;
           }
-          if (table === 'forecast_snapshots') {
-            const previous = await transaction.execute({
-              sql: 'SELECT payload FROM forecast_snapshots WHERE forecast_id = ?',
-              args: [entry.row.id],
-            });
-            for (const item of previous.rows) {
-              const original = JSON.parse(item.payload);
-              const terminalStates = ['withheld', 'unobserved', 'resolved'];
-              if (
-                (terminalStates.includes(original.status) &&
-                  terminalStates.includes(entry.row.status) &&
-                  original.status !== entry.row.status) ||
-                (original.status === 'withheld' && entry.row.aboveProbability != null) ||
-                (entry.row.status === 'withheld' && original.aboveProbability != null)
-              ) {
-                throw new ResearchDataError(
-                  'A forecast cannot replace a previously saved final outcome or publication decision.',
-                  409,
-                );
-              }
-              const immutableFields = [
-                'target',
-                'expiresAt',
-                'startsAt',
-                'outcomeDefinition',
-                'analysis',
-                'kalshiMarket',
-              ];
-              if (original.aboveProbability != null && entry.row.aboveProbability != null) {
-                immutableFields.push(
-                  'createdAt',
-                  'price',
-                  'aboveProbability',
-                  'belowProbability',
-                  'direction',
-                  'calculationMode',
-                  'learning',
-                  'modelVersion',
-                  'kalshi',
-                );
-              }
-              if (
-                immutableFields.some(
-                  (field) =>
-                    getCanonicalResearchJson(original[field] ?? null) !==
-                    getCanonicalResearchJson(entry.row[field] ?? null),
-                )
-              ) {
-                throw new ResearchDataError(
-                  'A forecast snapshot cannot change its original target, deadline, or captured prediction.',
-                  409,
-                );
-              }
-            }
-            await transaction.execute({
-              sql: 'INSERT INTO forecast_snapshots(snapshot_id, forecast_id, state, state_rank, created_at, content_hash, payload) VALUES (?, ?, ?, ?, ?, ?, ?)',
-              args: [
-                entry.id,
-                entry.row.id,
-                entry.row.status,
-                stateRanks[entry.row.status],
-                entry.row.createdAt,
-                entry.hash,
-                entry.json,
-              ],
-            });
-          } else {
-            await transaction.execute({
-              sql: 'INSERT INTO evidence_events(event_id, forecast_id, recorded_at, content_hash, payload) VALUES (?, ?, ?, ?, ?)',
-              args: [entry.id, entry.row.forecastId, entry.row.recordedAt, entry.hash, entry.json],
-            });
-          }
+          await insertEntry(transaction, entry);
           inserted += 1;
         }
         await transaction.commit();
@@ -332,13 +222,13 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
     persistEvidenceRows(rows) {
       return appendEvents('evidence_events', rows, (row) => {
         const json = validateEvidenceRow(row);
-        return { row, id: row.eventId, json, hash: getHash(json) };
+        return { row, id: row.eventId, json, hash: getContentHash(json) };
       });
     },
     persistForecastSnapshots(rows) {
       return appendEvents('forecast_snapshots', rows, (row) => {
         const json = validateForecastSnapshot(row);
-        return { row, id: `${row.id}:${row.status}`, json, hash: getHash(json) };
+        return { row, id: `${row.id}:${row.status}`, json, hash: getContentHash(json) };
       });
     },
     async readStoredEvidence(parameters) {
@@ -396,25 +286,16 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
     },
     async writeModelArtifact(artifact) {
       return runWriteOperation(async () => {
-        if (
-          !isResearchIdentifier(artifact?.id) ||
-          !isResearchIdentifier(artifact?.version) ||
-          !isResearchTimestamp(artifact?.trainedAt)
-        )
-          throw new ResearchDataError(
-            'Model artifacts require a stable identifier, version, and training timestamp.',
-          );
-        if (artifact.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION)
-          throw new ResearchDataError('Only Kalshi model artifacts can be stored.');
-        const json = getCanonicalResearchJson(artifact, 2 * 1024 * 1024);
+        const json = validateModelArtifact(artifact);
+        const contentHash = getContentHash(json);
         await initialize();
-        const transaction = await client.transaction('write');
+        const transaction = await getResearchWriteTransaction(client);
         try {
           const existing = await transaction.execute({
             sql: 'SELECT content_hash FROM model_artifacts WHERE model_id = ?',
             args: [artifact.id],
           });
-          if (existing.rows.length && existing.rows[0].content_hash !== getHash(json))
+          if (existing.rows.length && existing.rows[0].content_hash !== contentHash)
             throw new ResearchDataError(
               'A model version cannot overwrite an existing artifact.',
               409,
@@ -422,7 +303,7 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
           if (!existing.rows.length)
             await transaction.execute({
               sql: 'INSERT INTO model_artifacts(model_id, saved_at, content_hash, payload) VALUES (?, ?, ?, ?)',
-              args: [artifact.id, Date.now(), getHash(json), json],
+              args: [artifact.id, Date.now(), contentHash, json],
             });
           await transaction.commit();
           return artifact;
@@ -435,22 +316,31 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
       if (!isResearchIdentifier(id)) throw new ResearchDataError('Invalid model identifier.');
       await initialize();
       const result = await client.execute({
-        sql: 'SELECT payload FROM model_artifacts WHERE model_id = ?',
+        sql: `SELECT payload, retired_at, model_retirements.reason AS retirement_reason,
+          EXISTS(SELECT 1 FROM model_activations WHERE model_activations.model_id = model_artifacts.model_id) AS was_active
+          FROM model_artifacts LEFT JOIN model_retirements USING(model_id) WHERE model_id = ?`,
         args: [id],
       });
-      return result.rows.length ? JSON.parse(result.rows[0].payload) : null;
+      return result.rows.length ? getStoredModel(result.rows[0]) : null;
     },
     async readModelArtifacts() {
       await initialize();
-      const result = await client.execute('SELECT payload FROM model_artifacts ORDER BY sequence');
-      return result.rows.map((row) => JSON.parse(row.payload));
+      const result = await client.execute(`SELECT payload, retired_at,
+        model_retirements.reason AS retirement_reason,
+        EXISTS(SELECT 1 FROM model_activations WHERE model_activations.model_id = model_artifacts.model_id) AS was_active
+        FROM model_artifacts
+        LEFT JOIN model_retirements USING(model_id) ORDER BY model_artifacts.sequence`);
+      return result.rows.map(getStoredModel);
     },
     async getActiveModelArtifact() {
       await initialize();
       const result = await client.execute(
-        'SELECT payload, model_id, activated_at, evaluation FROM model_artifacts JOIN model_activations USING(model_id) ORDER BY model_activations.sequence DESC LIMIT 1',
+        `SELECT payload, model_id, activated_at, evaluation, retired_at FROM model_artifacts
+          JOIN model_activations USING(model_id) LEFT JOIN model_retirements USING(model_id)
+          ORDER BY model_activations.sequence DESC LIMIT 1`,
       );
-      if (!result.rows.length) return null;
+      // Retirement disables the latest activation; it must not resurrect an older model.
+      if (!result.rows.length || result.rows[0].retired_at != null) return null;
       const row = result.rows[0];
       return {
         ...JSON.parse(row.payload),
@@ -463,6 +353,7 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
     },
     async activateModelArtifact(id, { activatedAt, shadowEvaluation } = {}) {
       if (
+        !isResearchIdentifier(id) ||
         !isResearchTimestamp(activatedAt) ||
         shadowEvaluation?.eligibleForPromotion !== true ||
         shadowEvaluation.modelId !== id ||
@@ -473,16 +364,103 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
           'Activation requires a timestamp and a passing prospective shadow evaluation.',
         );
       }
-      const artifact = await repository.readModelArtifact(id);
-      if (!artifact)
-        throw new ResearchDataError('The model artifact must be saved before activation.', 404);
-      if (activatedAt <= artifact.trainedAt)
-        throw new ResearchDataError('Model activation must follow training.');
-      await client.execute({
-        sql: 'INSERT INTO model_activations(model_id, activated_at, evaluation) VALUES (?, ?, ?)',
-        args: [id, activatedAt, getCanonicalResearchJson(shadowEvaluation)],
+      return runWriteOperation(async () => {
+        await initialize();
+        const transaction = await getResearchWriteTransaction(client);
+        try {
+          const stored = await transaction.execute({
+            sql: `SELECT payload, retired_at FROM model_artifacts
+              LEFT JOIN model_retirements USING(model_id) WHERE model_id = ?`,
+            args: [id],
+          });
+          if (!stored.rows.length)
+            throw new ResearchDataError('The model artifact must be saved before activation.', 404);
+          if (stored.rows[0].retired_at != null)
+            throw new ResearchDataError('A retired model cannot be activated again.', 409);
+          const artifact = JSON.parse(stored.rows[0].payload);
+          if (activatedAt <= artifact.trainedAt)
+            throw new ResearchDataError('Model activation must follow training.');
+          const current = await transaction.execute(`SELECT payload, activated_at, retired_at
+            FROM model_artifacts JOIN model_activations USING(model_id)
+            LEFT JOIN model_retirements USING(model_id)
+            ORDER BY model_activations.sequence DESC LIMIT 1`);
+          const latest = current.rows[0];
+          if (latest && activatedAt < Number(latest.activated_at))
+            throw new ResearchDataError('Activation cannot replace a newer activation.', 409);
+          if (
+            artifact.version === EARLY_MODEL_VERSION &&
+            latest &&
+            latest.retired_at == null &&
+            JSON.parse(latest.payload).version !== EARLY_MODEL_VERSION
+          ) {
+            throw new ResearchDataError(
+              'An early model cannot replace the full learned model.',
+              409,
+            );
+          }
+          await transaction.execute({
+            sql: 'INSERT INTO model_activations(model_id, activated_at, evaluation) VALUES (?, ?, ?)',
+            args: [id, activatedAt, getCanonicalResearchJson(shadowEvaluation)],
+          });
+          await transaction.commit();
+          return { ...artifact, activation: { modelId: id, activatedAt, shadowEvaluation } };
+        } finally {
+          transaction.close();
+        }
       });
-      return { ...artifact, activation: { modelId: id, activatedAt, shadowEvaluation } };
+    },
+    async retireModelArtifact(id, { retiredAt, reason } = {}) {
+      if (
+        !isResearchIdentifier(id) ||
+        !isResearchTimestamp(retiredAt) ||
+        typeof reason !== 'string' ||
+        !reason.trim() ||
+        reason.length > 2000
+      ) {
+        throw new ResearchDataError(
+          'Model retirement requires an identifier, timestamp and reason.',
+        );
+      }
+      return runWriteOperation(async () => {
+        await initialize();
+        const transaction = await getResearchWriteTransaction(client);
+        try {
+          const stored = await transaction.execute({
+            sql: `SELECT payload, retired_at, model_retirements.reason AS retirement_reason,
+              EXISTS(SELECT 1 FROM model_activations WHERE model_activations.model_id = model_artifacts.model_id) AS was_active
+              FROM model_artifacts LEFT JOIN model_retirements USING(model_id) WHERE model_id = ?`,
+            args: [id],
+          });
+          if (!stored.rows.length)
+            throw new ResearchDataError('The model artifact must be saved before retirement.', 404);
+          const artifact = getStoredModel(stored.rows[0]);
+          if (retiredAt <= artifact.trainedAt)
+            throw new ResearchDataError('Model retirement must follow training.');
+          const activated = await transaction.execute({
+            sql: 'SELECT MAX(activated_at) AS latest_activation FROM model_activations WHERE model_id = ?',
+            args: [id],
+          });
+          if (retiredAt < Number(activated.rows[0].latest_activation ?? 0))
+            throw new ResearchDataError('Model retirement cannot precede its activation.');
+          if (!artifact.retirement) {
+            await transaction.execute({
+              sql: 'INSERT INTO model_retirements(model_id, retired_at, reason) VALUES (?, ?, ?)',
+              args: [id, retiredAt, reason.trim()],
+            });
+          }
+          await transaction.commit();
+          return {
+            ...artifact,
+            retirement: artifact.retirement ?? {
+              retiredAt,
+              reason: reason.trim(),
+              wasActive: activated.rows[0].latest_activation != null,
+            },
+          };
+        } finally {
+          transaction.close();
+        }
+      });
     },
     async getResearchStatus() {
       await initialize();
@@ -587,6 +565,8 @@ export const getActiveModelArtifact = async () =>
 export const getActiveModel = getActiveModelArtifact;
 export const activateModelArtifact = async (id, activation) =>
   (await getDefaultRepository()).activateModelArtifact(id, activation);
+export const retireModelArtifact = async (id, retirement) =>
+  (await getDefaultRepository()).retireModelArtifact(id, retirement);
 export const acquireLearningLease = async (parameters) =>
   (await getDefaultRepository()).acquireLearningLease(parameters);
 export const releaseLearningLease = async (ownerId) =>

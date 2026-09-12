@@ -138,6 +138,7 @@ export function getEvidenceRow({
   recordingSessionId,
   learningFeatures,
   shadowPrediction,
+  earlyShadowPrediction,
 }) {
   const timestamp = event === 'observation' ? Math.floor(now / 5000) * 5000 : now;
   const canHaveInputs =
@@ -196,6 +197,9 @@ export function getEvidenceRow({
       : null,
     shadowPrediction: canHaveInputs
       ? (shadowPrediction ?? inputEstimate?.shadowPrediction ?? null)
+      : null,
+    earlyShadowPrediction: canHaveInputs
+      ? (earlyShadowPrediction ?? inputEstimate?.earlyShadowPrediction ?? null)
       : null,
     learning: inputEstimate?.learning ?? entry.learning ?? null,
     calculationMode: entry.calculationMode ?? null,

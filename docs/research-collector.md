@@ -43,7 +43,14 @@ deployment's control.
 
 The recorder follows actual published targets and close times. It captures once at each 12/9/6/3/1-minute checkpoint, within five seconds of that checkpoint. Late starts do not invent earlier forecasts. Unknown targets or invalid data produce missing-checkpoint metadata. Finalized results are fetched later for the exact contract.
 
-All checkpoints and overlapping collectors for an event are grouped in evaluation. Multiple collectors do not produce extra independent examples. Every five minutes, outside capture boundaries, the collector can analyze records and evaluate candidate models. Candidates still need the retrospective and future shadow checks described in [outcome learning](forecast-learning.md).
+All checkpoints and overlapping collectors for an event are grouped in evaluation. Multiple
+collectors do not produce extra independent examples. Every five minutes, outside capture
+boundaries, the collector can analyze records and evaluate candidate models. Early learning can
+fit a small correction after 40 eligible events, then must pass a fixed group of 40 future events
+before it changes predictions. An approved correction is limited to five percentage points;
+continued outcome checks can suspend it. Full model training keeps its larger, separate
+training/calibration/test and future-validation requirements. Neither model activates merely
+because it has enough records. See [outcome learning](forecast-learning.md) for the requirements.
 
 `--once` waits briefly for market inputs, performs one recorder step, checks storage and exits. It is a connectivity/storage check, not verification of a complete event. A continuous collector needs an awake, connected machine.
 
