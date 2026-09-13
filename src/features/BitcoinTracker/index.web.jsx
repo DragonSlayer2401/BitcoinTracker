@@ -12,6 +12,7 @@ import BitcoinPriceSummary from './components/BitcoinPriceSummary';
 import TrackerHeader from './components/TrackerHeader';
 import Icon from './components/Icon';
 import PriceChart from './components/PriceChart';
+import { getBenchmarkChartData } from './utils/benchmarkChart.utils';
 import MarketData from './components/MarketData';
 import ForecastPanel from './components/ForecastPanel';
 import ForecastJournal from './components/ForecastJournal';
@@ -83,21 +84,19 @@ export default function BitcoinTracker() {
     refetchOnReconnect: true,
   });
   const benchmark = benchmarkQuery.data;
+  const benchmarkData = useMemo(() => getBenchmarkChartData(benchmark, now), [benchmark, now]);
   const {
     stream,
     ticker,
     candles,
     quoteAge,
     historyAge,
-    priceChange,
     hasStreamTicker,
     isQuoteFresh,
-    isFeedFresh,
     hasQuoteError,
     hasRequestError,
     isLoading,
     isRefreshing,
-    feedStatusLabel,
     refreshMarketData,
   } = useCoinbaseMarketData(now);
   const derivatives = useDerivativesMarketData();
@@ -347,8 +346,7 @@ export default function BitcoinTracker() {
         <Container fluid className="tracker-container">
           <TrackerHeader
             now={now}
-            isFeedFresh={isFeedFresh}
-            feedStatusLabel={feedStatusLabel}
+            benchmarkData={benchmarkData}
             hasStreamTicker={hasStreamTicker}
           />
           {hasRequestError && (
@@ -380,18 +378,13 @@ export default function BitcoinTracker() {
           {kalshiSettlement.warning && <Alert variant="warning">{kalshiSettlement.warning}</Alert>}
           <div className="tracker-workspace">
             <div className="market-panel dashboard-panel">
-              <BitcoinPriceSummary
-                ticker={ticker}
-                isQuoteFresh={isQuoteFresh}
-                priceChange={priceChange}
-              />
+              <BitcoinPriceSummary benchmarkData={benchmarkData} />
               <PriceChart
-                candles={candles}
-                ticker={ticker}
+                benchmarkData={benchmarkData}
                 forecast={forecast}
                 target={target}
                 now={now}
-                horizonMinutes={horizonMinutes}
+                deadline={forecastDeadline}
               />
             </div>
             <ForecastPanel

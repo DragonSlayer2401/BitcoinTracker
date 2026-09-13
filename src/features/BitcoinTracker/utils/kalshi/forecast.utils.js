@@ -361,7 +361,7 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
     sampleCount: benchmarkConditions.available
       ? benchmarkConditions.features.completedCandleCount - 1
       : base.sampleCount,
-    // Existing chart helpers draw a future spot-price path, which is not this average.
+    // Keep settlement bounds separate from generic spot intervals; the BRTI chart reads them below.
     lowerBound: null,
     upperBound: null,
     intervalAvailable: false,

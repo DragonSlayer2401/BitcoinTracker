@@ -235,6 +235,29 @@ describe('BitcoinTracker interactions', () => {
     jest.restoreAllMocks();
   });
 
+  test('keeps the headline on BRTI when Coinbase prices change independently', async () => {
+    const contract = createKalshiContract();
+    useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [contract], receivedAt: NOW }));
+    const current = { time: NOW, price: 50_123.45 };
+    useGetKalshiBenchmarkQuery.mockReturnValue(
+      createQuery({
+        available: true,
+        status: 'live',
+        current,
+        samples: [{ time: NOW - 900_000, price: 50_000 }, current],
+        receivedAt: NOW,
+      }),
+    );
+    const { rerenderTracker } = await renderTracker();
+    const headline = within(screen.getByRole('region', { name: 'Bitcoin index price' }));
+    expect(headline.getByText('$50,123.45')).toBeInTheDocument();
+    expect(screen.getByText('BRTI live')).toBeInTheDocument();
+    quoteQuery = createQuery(createMarket(NOW, 51_000).ticker);
+    rerenderTracker();
+    expect(headline.getByText('$50,123.45')).toBeInTheDocument();
+    expect(headline.queryByText('$51,000.00')).not.toBeInTheDocument();
+  });
+
   test('defaults to the actual Kalshi target and close time instead of a new fifteen-minute window', async () => {
     const contract = createKalshiContract();
     useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [contract], receivedAt: NOW }));

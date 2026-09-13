@@ -7,6 +7,8 @@ import {
 import { KalshiDataError } from '../../../services/kalshi/kalshi.validation';
 
 const ticker = 'KXBTC15M-26SEP101830-30';
+const historyPath =
+  '/cfbenchmarks/history/values?id=BRTI&timespan=HOUR&timestamp=2026-09-10T20%3A00%3A00.000Z&maxResolution=PER_SECOND';
 const now = Date.parse('2026-09-10T21:50:00Z');
 const limits = {
   read: { refill_rate: 200, bucket_capacity: 400 },
@@ -34,6 +36,13 @@ describe('Kalshi read resource restrictions', () => {
     [`/historical/markets/${ticker}`, false, false],
     ['/cfbenchmarks/values?id=BRTI', true, false],
     ['/cfbenchmarks/values?id=BRTI&maxResolution=PER_SECOND', true, false],
+    [historyPath, true, false],
+    [historyPath.replace('&maxResolution=PER_SECOND', ''), true, false],
+    [
+      '/cfbenchmarks/history/values?maxResolution=PER_SECOND&timestamp=2024-02-29T23%3A00%3A00.000Z&timespan=HOUR&id=BRTI',
+      true,
+      false,
+    ],
     ['/account/limits', false, true],
     ['/account/endpoint_costs', false, true],
   ])('allows the existing read %s', (path, isBenchmark, isDiscovery) => {
@@ -88,9 +97,60 @@ describe('Kalshi read resource restrictions', () => {
     '/cfbenchmarks/values?id=BRTI&maxResolution=PER_MILLISECOND',
     '/cfbenchmarks/values?id=BRTI&history=true',
     '/cfbenchmarks/values?id=%42RTI',
+    '/cfbenchmarks/history/values',
+    '/cfbenchmarks/history/values?id=BRTI',
+    historyPath.replace('&timespan=HOUR', ''),
+    historyPath.replace('&timestamp=2026-09-10T20%3A00%3A00.000Z', ''),
+    historyPath.replace('id=BRTI', 'id=ETHUSD_RTI'),
+    historyPath.replace('id=BRTI', '%69d=BRTI'),
+    historyPath.replace('id=BRTI', 'id=%42RTI'),
+    historyPath.replace('timespan=HOUR', 'timespan=DAY'),
+    historyPath.replace('maxResolution=PER_SECOND', 'maxResolution=PER_MINUTE'),
+    historyPath.replace('/history/', '/%68istory/'),
+    historyPath.replace('/history/', '/history%2F'),
+    historyPath.replace('/history/', '/history/../'),
+    historyPath.replace('/history/', '/history//'),
+    historyPath.replace('/history/', '/history\\'),
+    `${historyPath}&id=BRTI`,
+    `${historyPath}&other=true`,
+    `${historyPath}&timestamp=2026-09-10T21%3A00%3A00.000Z`,
+    `${historyPath}#fragment`,
+    `${historyPath}?other=true`,
+    `${historyPath}&`,
+    `${historyPath}\n`,
   ])('rejects unsupported or disguised request %p', (path) => {
     expect(() => getKalshiReadResource(path)).toThrow(KalshiDataError);
     expect(() => getKalshiReadResource(path)).toThrow(expect.objectContaining({ status: 400 }));
+  });
+
+  it.each([
+    '2026-09-10T20:00:00.000Z',
+    '2026-09-10T20%3a00%3a00.000Z',
+    '2026-09-10T20%253A00%253A00.000Z',
+    '2026-09-10T20%3A00%3A00Z',
+    '2026-09-10T20%3A00%3A00.0Z',
+    '2026-09-10T20%3A00%3A00.001Z',
+    '2026-09-10T20%3A01%3A00.000Z',
+    '2026-09-10T20%3A00%3A01.000Z',
+    '2026-09-10T20%3A00%3A00.000%2B00%3A00',
+    '2026-09-10T20%3A00%3A00.000z',
+    '2026-09-10t20%3A00%3A00.000Z',
+    '2026-09-10T24%3A00%3A00.000Z',
+    '2026-13-10T20%3A00%3A00.000Z',
+    '2026-02-29T20%3A00%3A00.000Z',
+    '2026-09-31T20%3A00%3A00.000Z',
+    '2026-09-00T20%3A00%3A00.000Z',
+    '2026-9-10T20%3A00%3A00.000Z',
+    '2026-09-10',
+    '1789070400000',
+    '2026-09-10T20%3A00%3A00.000Z%26id%3DETHUSD_RTI',
+    '2026-09-10T20%3A00%3A00.000Z%0A',
+    '2026-09-10T20%3A00%3A00.000Z\n',
+    '',
+  ])('rejects noncanonical or invalid history hour %p', (timestamp) => {
+    expect(() =>
+      getKalshiReadResource(historyPath.replace('2026-09-10T20%3A00%3A00.000Z', timestamp)),
+    ).toThrow(expect.objectContaining({ status: 400 }));
   });
 });
 
@@ -157,10 +217,30 @@ describe('Kalshi conservative account policy', () => {
   it('cannot reserve below the documented cost floors', () => {
     const policy = createPolicy({
       default_cost: 0,
-      endpoint_costs: [{ method: 'GET', path: '/cfbenchmarks/values', cost: 1 }],
+      endpoint_costs: [
+        { method: 'GET', path: '/cfbenchmarks/values', cost: 1 },
+        { method: 'GET', path: '/cfbenchmarks/history/values', cost: 1 },
+      ],
     });
     expect(getKalshiReadCost(policy, '/cfbenchmarks/values?id=BRTI')).toBe(50);
+    expect(getKalshiReadCost(policy, historyPath)).toBe(50);
+    expect(getKalshiReadCost(policy, historyPath.replace('&maxResolution=PER_SECOND', ''))).toBe(
+      50,
+    );
     expect(getKalshiReadCost(policy, '/account/limits')).toBe(10);
+  });
+
+  it.each([
+    '/cfbenchmarks/history/values',
+    '/trade-api/v2/cfbenchmarks/history/values',
+    '/cfbenchmarks/history/{path}',
+    '/trade-api/v2/cfbenchmarks/{*path}',
+    '/trade-api/v2/cfbenchmarks/*endpoint',
+    '/cfbenchmarks/*',
+    '/trade-api/v2/*',
+  ])('respects the historical benchmark cost pattern %s', (path) => {
+    const policy = createPolicy({ endpoint_costs: [{ method: 'GET', path, cost: 80 }] });
+    expect(getKalshiReadCost(policy, historyPath)).toBe(80);
   });
 
   it.each([

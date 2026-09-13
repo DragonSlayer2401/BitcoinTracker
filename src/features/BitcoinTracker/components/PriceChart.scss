@@ -35,6 +35,18 @@
     overflow-wrap: anywhere;
   }
 
+  .legend-area.settlement {
+    background: rgba(128, 199, 255, 0.2);
+  }
+
+  .settlement-average-label {
+    color: #80c7ff;
+  }
+
+  .chart-settlement-note {
+    font-size: 11px;
+  }
+
   @media (max-width: 767.98px) {
     .price-chart-canvas {
       height: 200px;

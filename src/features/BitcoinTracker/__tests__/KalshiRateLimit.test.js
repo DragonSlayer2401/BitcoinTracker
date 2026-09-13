@@ -14,6 +14,8 @@ import { createKalshiRatePolicy } from '../../../services/kalshi/rateLimit/rateL
 jest.mock('server-only', () => ({}), { virtual: true });
 
 const initialTime = Date.UTC(2026, 8, 10, 12);
+const historyPath =
+  '/cfbenchmarks/history/values?id=BRTI&timespan=HOUR&timestamp=2026-09-10T10%3A00%3A00.000Z&maxResolution=PER_SECOND';
 const policyAt = (now = initialTime, overrides = {}) => ({
   ...createKalshiRatePolicy(
     {
@@ -140,6 +142,27 @@ describe('shared durable Kalshi request budget', () => {
     });
   });
 
+  test('historical BRTI shares the live budget and cannot understate its benchmark cost', async () => {
+    await repository.savePolicy(policyAt());
+    timestamp += 1000;
+    expect(await repository.reserve({ cost: 1, path: historyPath })).toEqual({
+      allowed: true,
+      waitMs: 0,
+    });
+    expect(await repository.reserve({ cost: 1, path: '/cfbenchmarks/values?id=BRTI' })).toEqual({
+      allowed: true,
+      waitMs: 0,
+    });
+    expect(await repository.reserve({ cost: 1, path: historyPath })).toEqual({
+      allowed: false,
+      waitMs: 500,
+    });
+    expect(await repository.reserve({ cost: 10, path: '/series/KXBTC15M' })).toEqual({
+      allowed: false,
+      waitMs: 100,
+    });
+  });
+
   test('known discovery policy uses the lower configured rate and cannot bypass endpoint costs', async () => {
     await repository.savePolicy(policyAt(initialTime, { refillRate: 20, bucketCapacity: 50 }));
     expect(await repository.reserve({ cost: 10, bootstrap: true })).toEqual({
@@ -155,7 +178,7 @@ describe('shared durable Kalshi request budget', () => {
   });
 
   test('bootstrap cannot bypass verified account limits for ordinary market or benchmark reads', async () => {
-    for (const requestPath of ['/series/KXBTC15M', '/cfbenchmarks/values?id=BRTI']) {
+    for (const requestPath of ['/series/KXBTC15M', '/cfbenchmarks/values?id=BRTI', historyPath]) {
       await expect(
         repository.reserve({ cost: 50, bootstrap: true, path: requestPath }),
       ).rejects.toMatchObject({ status: 400 });

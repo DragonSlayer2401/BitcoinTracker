@@ -9,6 +9,7 @@ const MARKET_QUERY_NAMES = new Set([
   'exchange_index',
   'max_close_ts',
 ]);
+const BENCHMARK_HISTORY_QUERY_NAMES = new Set(['id', 'timespan', 'timestamp', 'maxResolution']);
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 
 function rejectResource() {
@@ -32,6 +33,13 @@ function isQueryInteger(value, minimum, maximum = Number.MAX_SAFE_INTEGER) {
   );
 }
 
+function isEncodedHistoryHour(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}%3A00%3A00\.000Z$/.test(value)) return false;
+  const timestamp = value.replaceAll('%3A', ':');
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === timestamp;
+}
+
 // This is the complete outbound resource allowlist, not a general signing proxy.
 // Reject encoded or normalized aliases before URL parsing can hide their original path.
 export function getKalshiReadResource(path) {
@@ -39,27 +47,48 @@ export function getKalshiReadResource(path) {
     typeof path !== 'string' ||
     path.length > 512 ||
     !path.startsWith('/') ||
-    /[^A-Za-z0-9/_?=&-]/.test(path) ||
     path.includes('//')
   ) {
     rejectResource();
   }
   const [pathname, query, extraQuery] = path.split('?');
-  if (extraQuery !== undefined || query === '') rejectResource();
+  if (/[^A-Za-z0-9/_-]/.test(pathname) || extraQuery !== undefined || query === '') {
+    rejectResource();
+  }
+  const isBenchmarkHistory = pathname === '/cfbenchmarks/history/values';
   const parameters = new Map();
   if (query !== undefined) {
     for (const pair of query.split('&')) {
       const [name, value, extraValue] = pair.split('=');
-      if (!name || !value || extraValue !== undefined || parameters.has(name)) {
+      if (
+        !name ||
+        !value ||
+        /[^A-Za-z0-9_-]/.test(name) ||
+        extraValue !== undefined ||
+        parameters.has(name) ||
+        (isBenchmarkHistory && name === 'timestamp'
+          ? !isEncodedHistoryHour(value)
+          : /[^A-Za-z0-9_-]/.test(value))
+      ) {
         rejectResource();
       }
       parameters.set(name, value);
     }
   }
 
-  const isBenchmark = pathname === '/cfbenchmarks/values';
+  const isBenchmark = pathname === '/cfbenchmarks/values' || isBenchmarkHistory;
   const isDiscovery = ['/account/limits', '/account/endpoint_costs'].includes(pathname);
-  if (isBenchmark) {
+  if (isBenchmarkHistory) {
+    if (
+      parameters.get('id') !== 'BRTI' ||
+      parameters.get('timespan') !== 'HOUR' ||
+      !parameters.has('timestamp') ||
+      [...parameters.keys()].some((name) => !BENCHMARK_HISTORY_QUERY_NAMES.has(name)) ||
+      (parameters.has('maxResolution') && parameters.get('maxResolution') !== 'PER_SECOND')
+    ) {
+      rejectResource();
+    }
+  } else if (isBenchmark) {
     if (
       parameters.get('id') !== 'BRTI' ||
       [...parameters.keys()].some((name) => !['id', 'maxResolution'].includes(name)) ||
