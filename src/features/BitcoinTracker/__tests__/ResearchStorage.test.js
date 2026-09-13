@@ -20,6 +20,8 @@ import {
 } from '../../../services/research/research.validation';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { KALSHI_RESEARCH_MIGRATION } from '../../../services/research/research.migration';
+import { getDerivativesForecast } from '../utils/derivativesForecast.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 
 jest.mock('server-only', () => ({}), { virtual: true });
 
@@ -259,6 +261,36 @@ describe('durable research evidence', () => {
         forecast({ status: 'unobserved', analysis: { policyVersion: 'test', startedAt: now } }),
       ]),
     ).resolves.toMatchObject({ inserted: 1 });
+  });
+
+  test('issued derivatives diagnostics cannot be changed or removed by a later server snapshot', async () => {
+    const derivatives = {
+      ...getDerivativesForecast(),
+      baselineAboveProbability: 0.6,
+      aboveProbability: 0.6,
+    };
+    const pending = forecast({ modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION, derivatives });
+    await repository.persistForecastSnapshots([pending]);
+    const awaiting = {
+      ...pending,
+      status: 'awaiting-settlement',
+      derivatives: Object.fromEntries(Object.entries(derivatives).reverse()),
+    };
+    await expect(repository.persistForecastSnapshots([awaiting])).resolves.toMatchObject({
+      inserted: 1,
+    });
+    for (const replacement of [{ ...derivatives, reason: 'Changed after capture' }, null]) {
+      await expect(
+        repository.persistForecastSnapshots([{ ...awaiting, derivatives: replacement }]),
+      ).rejects.toMatchObject({ status: 409 });
+    }
+    expect((await repository.readStoredForecasts()).rows).toEqual([awaiting]);
+    expect((await repository.readForecastSnapshotEvents()).rows).toEqual([pending, awaiting]);
+    const historical = forecast({ id: 'historical' });
+    await repository.persistForecastSnapshots([historical]);
+    expect(
+      (await repository.readStoredForecasts()).rows.find((row) => row.id === 'historical'),
+    ).not.toHaveProperty('derivatives');
   });
 
   test.each(['target', 'expiresAt'])(

@@ -1,8 +1,6 @@
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
 import {
-  LEARNING_FEATURE_NAMES,
-  LEARNING_FEATURE_VERSION,
-  LEARNING_AVAILABILITY_INDEXES,
+  getLearningFeatureSchema,
   getLearningPipeline,
   matchesLearningPipeline,
 } from './features.utils';
@@ -184,6 +182,7 @@ export function getDatasetFingerprint(rows) {
 
 /** A fit can adjust only horizons, target distances and feed states seen during training. */
 export function getModelApplicability(trainingCheckpoints, pipeline, outcomeDefinition) {
+  const schema = getLearningFeatureSchema(trainingCheckpoints[0]?.learningFeatures.schemaVersion);
   return {
     baselineModelVersion: pipeline.baselineModelVersion,
     featureInputSources: [pipeline.featureInputSource],
@@ -198,7 +197,7 @@ export function getModelApplicability(trainingCheckpoints, pipeline, outcomeDefi
     availabilityPatterns: [
       ...new Set(
         trainingCheckpoints.map((row) =>
-          LEARNING_AVAILABILITY_INDEXES.map((index) => row.features[index]).join(''),
+          schema.availabilityIndexes.map((index) => row.features[index]).join(''),
         ),
       ),
     ],
@@ -262,10 +261,12 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
     };
   }
   try {
+    const featureVersion = usable[0].learningFeatures.schemaVersion;
+    const schema = getLearningFeatureSchema(featureVersion);
     // Fit the classifier using training checkpoints only; later rows cannot change its scaling.
     const model = fitLogistic(
       split.trainingCheckpoints,
-      LEARNING_FEATURE_NAMES.map((_, index) => index),
+      schema.names.map((_, index) => index),
       { penalty: LEARNING_REQUIREMENTS.penalty, maximumIterations: 50 },
     );
     const applicability = getModelApplicability(
@@ -273,7 +274,7 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
       pipeline,
       outcomeDefinition,
     );
-    const modelDomain = { applicability, outcomeDefinition };
+    const modelDomain = { applicability, outcomeDefinition, featureVersion };
     const supportedCalibration = split.calibration.filter((row) =>
       isWithinOutcomeModelDomain(modelDomain, row.learningFeatures),
     );
@@ -320,7 +321,7 @@ export function trainOutcomeCandidate(events, { now = Date.now() } = {}) {
       version,
       status: 'shadow',
       trainedAt: now,
-      featureVersion: LEARNING_FEATURE_VERSION,
+      featureVersion,
       outcomeDefinition,
       trainingCutoffAt: split.trainingCutoffAt,
       calibrationCutoffAt: split.calibrationCutoffAt,

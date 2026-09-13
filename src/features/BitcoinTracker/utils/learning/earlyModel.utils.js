@@ -1,5 +1,9 @@
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
-import { LEARNING_FEATURE_VERSION, isLearningFeatureSnapshot } from './features.utils';
+import {
+  getLearningFeatureSchema,
+  isLearningSchemaCompatibleWithBaseline,
+  isLearningFeatureSnapshot,
+} from './features.utils';
 import { matchesOutcomeModelPipeline } from './model.utils';
 import { predictLogistic } from './statistics.utils';
 
@@ -27,6 +31,7 @@ const finiteArray = (value, length) =>
 export function isEarlyModelArtifact(artifact) {
   const domain = artifact?.applicability;
   const fit = artifact?.model;
+  const schema = getLearningFeatureSchema(artifact?.featureVersion);
   return Boolean(
     artifact &&
     typeof artifact.id === 'string' &&
@@ -34,7 +39,8 @@ export function isEarlyModelArtifact(artifact) {
     artifact.version === EARLY_MODEL_VERSION &&
     artifact.status === 'shadow' &&
     artifact.outcomeDefinition === KALSHI_OUTCOME_DEFINITION &&
-    artifact.featureVersion === LEARNING_FEATURE_VERSION &&
+    schema &&
+    isLearningSchemaCompatibleWithBaseline(artifact.featureVersion, domain?.baselineModelVersion) &&
     [
       artifact.trainedAt,
       artifact.trainingCutoffAt,
@@ -73,8 +79,13 @@ export function isEarlyModelArtifact(artifact) {
     domain.maximumBaselineProbability >= domain.minimumBaselineProbability &&
     Array.isArray(domain.availabilityPatterns) &&
     domain.availabilityPatterns.length > 0 &&
-    domain.availabilityPatterns.length <= 128 &&
-    domain.availabilityPatterns.every((pattern) => /^[01]{7}$/.test(pattern)) &&
+    domain.availabilityPatterns.length <= 2 ** schema.availabilityIndexes.length &&
+    domain.availabilityPatterns.every(
+      (pattern) =>
+        typeof pattern === 'string' &&
+        pattern.length === schema.availabilityIndexes.length &&
+        /^[01]+$/.test(pattern),
+    ) &&
     Array.isArray(fit?.indexes) &&
     fit.indexes.length === 1 &&
     fit.indexes[0] === 0 &&

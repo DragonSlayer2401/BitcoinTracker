@@ -19,7 +19,10 @@ import {
   isSnapshotModelVersion,
   hasValidLearningMetadata,
   hasValidKalshiMetadata,
+  hasValidDerivativesMetadata,
 } from './modelValidation.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../kalshi/forecast.utils';
+import { DERIVATIVES_LEARNING_FEATURE_VERSION } from '../learning/features.utils';
 import {
   isRecord,
   isTimestamp,
@@ -101,6 +104,7 @@ function getExpectedForecastFields(value) {
   if (usesLearnedModel) fields.push('learning');
   if (hasOutcomeDefinition) fields.push('outcomeDefinition');
   if (usesKalshi) fields.push('kalshiMarket', 'kalshi');
+  if (hasOwnField(value, 'derivatives')) fields.push('derivatives');
   if (value.status === 'withheld') fields.push('withholdingReason');
   if (value.status === 'resolved') fields.push(...resultFields);
   if (usesKalshi && value.status === 'resolved') fields.push('kalshiOutcome');
@@ -114,6 +118,9 @@ function hasCompatibleForecastModel(value, startsAt) {
   const usesSnapshotCapture = usesSnapshotPolicy(value.analysis?.policyVersion);
   const usesLearnedModel = isLearnedModelVersion(value.modelVersion);
   const hasNoFixedPrediction = ['analyzing', 'withheld'].includes(value.status);
+  const usesDerivatives =
+    value.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION ||
+    value.learning?.featureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION;
   if (
     usesSnapshotCapture !== isSnapshotModelVersion(value.modelVersion) ||
     (usesKalshi &&
@@ -131,6 +138,15 @@ function hasCompatibleForecastModel(value, startsAt) {
         value.analysis?.policyVersion === KALSHI_POLICY_VERSION)) ||
     (usesLearnedModel &&
       (hasNoFixedPrediction || !hasValidLearningMetadata(value.learning, value))) ||
+    (usesDerivatives &&
+      !hasNoFixedPrediction &&
+      !hasValidDerivativesMetadata(value.derivatives, value)) ||
+    (hasOwnField(value, 'derivatives') &&
+      (!usesKalshi ||
+        !usesDerivatives ||
+        (hasNoFixedPrediction
+          ? value.derivatives !== null
+          : !hasValidDerivativesMetadata(value.derivatives, value)))) ||
     (usesSnapshotCapture &&
       (hasNoFixedPrediction
         ? value.calculationMode !== null

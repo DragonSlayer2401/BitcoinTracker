@@ -1,5 +1,7 @@
 import { logit } from './statistics.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../kalshi/forecast.utils';
+import { isDerivativesForecastMetadata } from '../derivativesForecast.utils';
 
 export const LEARNING_FEATURE_VERSION = 'deadline-reversal-features-v2';
 // Persisted model coefficients address these positions. Reordering requires a new feature version.
@@ -32,6 +34,56 @@ export const LEARNING_FEATURE_NAMES = Object.freeze([
   'spreadAvailable',
 ]);
 export const LEARNING_AVAILABILITY_INDEXES = [19, 20, 21, 22, 23, 24, 25];
+export const DERIVATIVES_LEARNING_FEATURE_VERSION = 'deadline-reversal-features-v3';
+export const DERIVATIVES_LEARNING_FEATURE_NAMES = Object.freeze([
+  ...LEARNING_FEATURE_NAMES,
+  'futuresPressure15',
+  'futuresPressure60',
+  'futuresPressure180',
+  'futuresLargeTradePressure',
+  'futuresLargeTradeShare',
+  'futuresLiquidationPressure',
+  'futuresRelativeLiquidationVolume',
+  'futuresPriceResponse',
+  'futuresBasis',
+  'futuresFlow15Available',
+  'futuresFlow60Available',
+  'futuresFlow180Available',
+  'futuresLargeTradesAvailable',
+  'futuresLiquidationsAvailable',
+  'futuresPriceResponseAvailable',
+  'futuresBasisAvailable',
+]);
+const derivativesAvailabilityIndexes = [
+  ...LEARNING_AVAILABILITY_INDEXES,
+  35,
+  36,
+  37,
+  38,
+  39,
+  40,
+  41,
+];
+
+/** Historical coefficients keep their original positions and dimensions. */
+export function getLearningFeatureSchema(version) {
+  if (version === LEARNING_FEATURE_VERSION)
+    return { names: LEARNING_FEATURE_NAMES, availabilityIndexes: LEARNING_AVAILABILITY_INDEXES };
+  if (version === DERIVATIVES_LEARNING_FEATURE_VERSION)
+    return {
+      names: DERIVATIVES_LEARNING_FEATURE_NAMES,
+      availabilityIndexes: derivativesAvailabilityIndexes,
+    };
+  return null;
+}
+
+export function isLearningSchemaCompatibleWithBaseline(featureVersion, baselineModelVersion) {
+  return Boolean(
+    getLearningFeatureSchema(featureVersion) &&
+    (featureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION) ===
+      (baselineModelVersion === KALSHI_DERIVATIVES_MODEL_VERSION),
+  );
+}
 const getBoundedFeatureValue = (value, limit = 8) => Math.max(-limit, Math.min(limit, value));
 const isValidTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -48,6 +100,9 @@ export function getLearningPipeline(snapshot) {
     baselineModelVersion: snapshot.baselineModelVersion,
     referenceSource: snapshot.referenceSource,
     featureInputSource: snapshot.featureInputSource,
+    ...((snapshot.schemaVersion ?? snapshot.featureVersion) === DERIVATIVES_LEARNING_FEATURE_VERSION
+      ? { featureVersion: DERIVATIVES_LEARNING_FEATURE_VERSION }
+      : {}),
   };
 }
 
@@ -58,7 +113,10 @@ export function matchesLearningPipeline(snapshot, pipeline) {
     pipeline &&
     snapshotPipeline.baselineModelVersion === pipeline.baselineModelVersion &&
     snapshotPipeline.referenceSource === pipeline.referenceSource &&
-    snapshotPipeline.featureInputSource === pipeline.featureInputSource,
+    // The baseline identifies the information used; the feature version identifies its encoding.
+    snapshotPipeline.featureInputSource === pipeline.featureInputSource &&
+    (snapshotPipeline.featureVersion ?? LEARNING_FEATURE_VERSION) ===
+      (pipeline.featureVersion ?? LEARNING_FEATURE_VERSION),
   );
 }
 
@@ -74,8 +132,12 @@ export function getLearningFeatures({
   outcomeDefinition = forecast?.outcomeDefinition ?? KALSHI_OUTCOME_DEFINITION,
 } = {}) {
   const features = conditions?.features;
+  const schemaVersion =
+    forecast?.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION
+      ? DERIVATIVES_LEARNING_FEATURE_VERSION
+      : LEARNING_FEATURE_VERSION;
   const getUnavailableSnapshot = (reason) => ({
-    schemaVersion: LEARNING_FEATURE_VERSION,
+    schemaVersion,
     available: false,
     reason,
     values: null,
@@ -207,10 +269,63 @@ export function getLearningFeatures({
     Number(volumeAvailable),
     Number(spreadAvailable),
   ];
+  const missingDerivativesFeeds = [];
+  if (schemaVersion === DERIVATIVES_LEARNING_FEATURE_VERSION) {
+    const derivatives = forecast.derivatives;
+    if (
+      !isDerivativesForecastMetadata(derivatives) ||
+      (derivatives.available &&
+        (!isValidTimestamp(derivatives.asOf) ||
+          derivatives.asOf > now ||
+          now - derivatives.asOf > 5000))
+    )
+      return getUnavailableSnapshot(
+        'A contemporaneous futures snapshot or explicit fallback is required.',
+      );
+    const available = derivatives.available === true;
+    const flowAvailable = [15, 60, 180].map(
+      (seconds) => available && isFiniteNumber(derivatives[`imbalance${seconds}`]),
+    );
+    const liquidationsAvailable =
+      available &&
+      isFiniteNumber(derivatives.liquidationImbalance) &&
+      isFiniteNumber(derivatives.relativeLiquidationVolume);
+    const largeTradesAvailable =
+      available &&
+      isFiniteNumber(derivatives.largeTradeImbalance) &&
+      isFiniteNumber(derivatives.largeTradeShare);
+    const priceResponseAvailable = available && isFiniteNumber(derivatives.priceResponse);
+    const basisAvailable = available && isFiniteNumber(derivatives.basisLogReturn);
+    values.push(
+      ...[15, 60, 180].map((seconds, index) =>
+        flowAvailable[index] ? derivatives[`imbalance${seconds}`] : 0,
+      ),
+      largeTradesAvailable ? derivatives.largeTradeImbalance : 0,
+      largeTradesAvailable ? derivatives.largeTradeShare : 0,
+      liquidationsAvailable ? derivatives.liquidationImbalance : 0,
+      liquidationsAvailable ? getBoundedFeatureValue(derivatives.relativeLiquidationVolume) : 0,
+      priceResponseAvailable ? derivatives.priceResponse : 0,
+      basisAvailable ? getBoundedFeatureValue(derivatives.basisLogReturn / minuteVolatility) : 0,
+      ...flowAvailable.map(Number),
+      Number(largeTradesAvailable),
+      Number(liquidationsAvailable),
+      Number(priceResponseAvailable),
+      Number(basisAvailable),
+    );
+    missingDerivativesFeeds.push(
+      ...flowAvailable.flatMap((present, index) =>
+        present ? [] : [`futures-flow-${[15, 60, 180][index]}`],
+      ),
+      ...(liquidationsAvailable ? [] : ['futures-liquidations']),
+      ...(largeTradesAvailable ? [] : ['futures-large-trades']),
+      ...(priceResponseAvailable ? [] : ['futures-price-response']),
+      ...(basisAvailable ? [] : ['futures-basis']),
+    );
+  }
   if (!values.every(isFiniteNumber))
     return getUnavailableSnapshot('Learning features cannot be calculated safely.');
   return {
-    schemaVersion: LEARNING_FEATURE_VERSION,
+    schemaVersion,
     available: true,
     baselineAboveProbability: forecast.aboveProbability,
     targetDistance,
@@ -232,6 +347,7 @@ export function getLearningFeatures({
       ...(depthChangeAvailable ? [] : ['depth-change']),
       ...(volumeAvailable ? [] : ['volume']),
       ...(spreadAvailable ? [] : ['spread']),
+      ...missingDerivativesFeeds,
     ],
   };
 }
@@ -240,16 +356,36 @@ export function isLearningFeatureSnapshot(
   snapshot,
   { target, expiresAt, cutoffAt, outcomeDefinition } = {},
 ) {
+  const schema = getLearningFeatureSchema(snapshot?.schemaVersion);
   return Boolean(
     snapshot?.available === true &&
-    snapshot.schemaVersion === LEARNING_FEATURE_VERSION &&
+    schema &&
+    isLearningSchemaCompatibleWithBaseline(snapshot.schemaVersion, snapshot.baselineModelVersion) &&
     getLearningPipeline(snapshot) !== null &&
     Array.isArray(snapshot.values) &&
-    snapshot.values.length === LEARNING_FEATURE_NAMES.length &&
+    snapshot.values.length === schema.names.length &&
     snapshot.values.every((value) => isFiniteNumber(value) && Math.abs(value) <= 16) &&
-    LEARNING_AVAILABILITY_INDEXES.every(
+    schema.availabilityIndexes.every(
       (index) => snapshot.values[index] === 0 || snapshot.values[index] === 1,
     ) &&
+    (snapshot.schemaVersion !== DERIVATIVES_LEARNING_FEATURE_VERSION ||
+      ([26, 27, 28, 29, 31].every((index) => Math.abs(snapshot.values[index]) <= 1) &&
+        [30, 33].every((index) => snapshot.values[index] >= 0 && snapshot.values[index] <= 1) &&
+        snapshot.values[32] >= 0 &&
+        snapshot.values[32] <= 8 &&
+        Math.abs(snapshot.values[34]) <= 8 &&
+        [
+          [35, 26],
+          [36, 27],
+          [37, 28],
+          [38, 29, 30],
+          [39, 31, 32],
+          [40, 33],
+          [41, 34],
+        ].every(
+          ([flag, ...indexes]) =>
+            snapshot.values[flag] === 1 || indexes.every((index) => snapshot.values[index] === 0),
+        ))) &&
     isFiniteNumber(snapshot.baselineAboveProbability) &&
     snapshot.baselineAboveProbability >= 0 &&
     snapshot.baselineAboveProbability <= 1 &&

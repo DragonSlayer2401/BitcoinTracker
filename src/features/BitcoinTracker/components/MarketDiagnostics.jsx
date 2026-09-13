@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Button, Modal, Table } from 'react-bootstrap';
 import { formatPercent, formatPrice } from '../utils/format.utils';
+import DerivativesDiagnostics from './DerivativesDiagnostics';
 
 const number = (value, digits = 2) => (Number.isFinite(value) ? value.toFixed(digits) : '—');
 
-export default function MarketDiagnostics({ stream, conditions, forecast }) {
+export default function MarketDiagnostics({ stream, derivatives, conditions, forecast }) {
   const [show, setShow] = useState(false);
   const features = conditions?.features;
   const largeTrades = stream?.flow?.largeTrades;
@@ -30,6 +31,7 @@ export default function MarketDiagnostics({ stream, conditions, forecast }) {
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
+          <DerivativesDiagnostics snapshot={derivatives} adjustment={forecast?.derivatives} />
           <p className="small text-secondary">
             Coinbase stream: {stream?.status ?? 'connecting'}. {stream?.quality?.reason} Executed
             buying and selling can shift the probability calculation. New fixed calls do not require
@@ -38,7 +40,7 @@ export default function MarketDiagnostics({ stream, conditions, forecast }) {
           {forecast?.learning?.applied && (
             <p className="small text-secondary">
               Learned model {forecast.learning.modelId} uses the captured market features to
-              estimate the deadline outcome. Pressure-model Above:{' '}
+              estimate the deadline outcome. Before learning Above:{' '}
               {formatPercent(forecast.learning.baselineAboveProbability)} · Learned Above:{' '}
               {formatPercent(forecast.aboveProbability)}.
             </p>

@@ -29,14 +29,15 @@ Live estimates and live reversal risk may keep changing while the saved predicti
 
 ## Keep the data sources distinct
 
-| Input                                 | Owner                                         | Purpose                                               |
-| ------------------------------------- | --------------------------------------------- | ----------------------------------------------------- |
-| Contract details and official results | `src/services/kalshi/`                        | Define the event and verify settlement                |
-| BRTI benchmark readings               | `src/services/kalshi/`                        | Model the final-minute index average                  |
-| Coinbase ticker and candles           | `src/services/coinbase/`                      | Show spot prices and provide proxy inputs             |
-| Coinbase trades and order book        | `src/services/coinbase/stream/`               | Measure optional trade pressure and liquidity         |
-| Saved calls and schedules             | Feature `state/` and `utils/journal.utils.js` | Preserve the user's forecast lifecycle across reloads |
-| Research evidence and models          | `src/services/research/`                      | Store observations and evaluate candidate models      |
+| Input                                   | Owner                                         | Purpose                                                  |
+| --------------------------------------- | --------------------------------------------- | -------------------------------------------------------- |
+| Contract details and official results   | `src/services/kalshi/`                        | Define the event and verify settlement                   |
+| BRTI benchmark readings                 | `src/services/kalshi/`                        | Model the final-minute index average                     |
+| Coinbase ticker and candles             | `src/services/coinbase/`                      | Show spot prices and provide proxy inputs                |
+| Coinbase trades and order book          | `src/services/coinbase/stream/`               | Measure optional trade pressure and liquidity            |
+| Bybit perpetual trades and liquidations | `src/services/derivatives/`                   | Measure optional futures pressure and liquidation stress |
+| Saved calls and schedules               | Feature `state/` and `utils/journal.utils.js` | Preserve the user's forecast lifecycle across reloads    |
+| Research evidence and models            | `src/services/research/`                      | Store observations and evaluate candidate models         |
 
 The server route files in `src/app/api/` are HTTP boundaries. Service `.api.js` files define RTK Query endpoints; server and client service modules own their respective transport operations. Keep credentials and database access in server-only modules.
 
@@ -45,6 +46,8 @@ The server route files in `src/app/api/` are HTTP boundaries. Service `.api.js` 
 `utils/researchForecast.utils.js` coordinates the calculation. It obtains the pressure baseline, applies the Kalshi settlement model, builds learning features, and applies a compatible active model. A candidate can also produce a separate prospective prediction for evaluation.
 
 `utils/kalshi/forecast.utils.js` models the settlement average. `utils/kalshi/marketConditions.utils.js` keeps benchmark price behavior distinct from Coinbase volume and liquidity. A complete BRTI reference and history can support estimates through a Coinbase outage.
+
+`hooks/useDerivativesMarketData.js` owns the browser's public futures connection; the collector owns its own instance of the same service. `utils/derivativesForecast.utils.js` fits and bounds a futures adjustment that the settlement model applies only to future readings. `components/DerivativesDiagnostics.jsx` shows the recorded inputs and probability difference. See [derivatives.md](derivatives.md) for source semantics and versioning.
 
 The `utils/learning/` folder separates feature extraction, numerical helpers, model application, evidence evaluation, and training. Read the exported training flow before its private fitting helpers. Training, calibration, testing, and prospective evaluation have different time windows; overlapping observations from one event must not become independent samples.
 

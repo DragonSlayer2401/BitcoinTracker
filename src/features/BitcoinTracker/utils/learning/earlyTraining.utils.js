@@ -1,5 +1,5 @@
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
-import { LEARNING_FEATURE_VERSION, isLearningFeatureSnapshot } from './features.utils';
+import { isLearningFeatureSnapshot } from './features.utils';
 import {
   getVerifiedLearningRows,
   groupOverlappingWindows,
@@ -89,7 +89,7 @@ export function trainEarlyCandidate(events, { now = Date.now() } = {}) {
       version: EARLY_MODEL_VERSION,
       status: 'shadow',
       trainedAt: now,
-      featureVersion: LEARNING_FEATURE_VERSION,
+      featureVersion: checkpoints[0].learningFeatures.schemaVersion,
       outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
       trainingCutoffAt: cutoff,
       // Common storage fields describe this single fitting partition. No holdout/calibration

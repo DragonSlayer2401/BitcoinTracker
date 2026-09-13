@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createClient } from '@libsql/client';
 import { createCoinbaseStream } from '../src/services/coinbase/stream/coinbaseStream.service';
+import { createDerivativesStream } from '../src/services/derivatives/derivativesStream.service';
 import {
   fetchCoinbaseCandles,
   fetchCoinbaseTicker,
@@ -69,6 +70,7 @@ export async function runResearchCollector({
   learningService,
   signal,
   createStream = createCoinbaseStream,
+  createFuturesStream = createDerivativesStream,
   loadTicker = fetchCoinbaseTicker,
   loadCandles = fetchCoinbaseCandles,
   loadMarkets = fetchKalshiMarkets,
@@ -80,6 +82,7 @@ export async function runResearchCollector({
 }) {
   const releaseLock = await acquireCollectorLock(statePath);
   let stream;
+  let futuresStream;
   const tasks = new Map();
   const warnings = new Map();
   const warn = (key, message) => {
@@ -119,6 +122,8 @@ export async function runResearchCollector({
     });
     stream = createStream();
     stream.start();
+    futuresStream = createFuturesStream();
+    futuresStream.start();
     await Promise.all([
       refresh(
         'ticker',
@@ -187,6 +192,7 @@ export async function runResearchCollector({
         ticker,
         benchmark,
         stream: snapshot,
+        derivatives: futuresStream.getSnapshot(observedAt),
       };
       if (
         once &&
@@ -349,6 +355,7 @@ export async function runResearchCollector({
       await sleep(1000);
     }
   } finally {
+    futuresStream?.stop();
     stream?.stop();
     await Promise.allSettled([...tasks.values()]);
     await releaseLock();

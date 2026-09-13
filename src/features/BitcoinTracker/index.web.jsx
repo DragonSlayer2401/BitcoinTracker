@@ -20,6 +20,8 @@ import useClock from './hooks/useClock';
 import useForecastJournal from './hooks/useForecastJournal';
 import useFixedPrediction from './hooks/useFixedPrediction';
 import useCoinbaseMarketData from './hooks/useCoinbaseMarketData';
+import useDerivativesMarketData from './hooks/useDerivativesMarketData';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from './utils/kalshi/forecast.utils';
 import useLiveKalshiForecast from './hooks/useLiveKalshiForecast';
 import useForecastEvidence from './hooks/useForecastEvidence';
 import useResearchSync from './hooks/useResearchSync';
@@ -98,6 +100,7 @@ export default function BitcoinTracker() {
     feedStatusLabel,
     refreshMarketData,
   } = useCoinbaseMarketData(now);
+  const derivatives = useDerivativesMarketData();
   const forecasts = useSelector(selectForecasts);
   const activeForecast = useSelector(selectActiveForecast);
   // Keep the saved call on screen until the user starts preparing another event.
@@ -125,6 +128,7 @@ export default function BitcoinTracker() {
     ticker,
     candles,
     stream,
+    derivatives,
     models,
     benchmark,
     now,
@@ -146,6 +150,7 @@ export default function BitcoinTracker() {
           candles,
           ticker,
           stream,
+          derivatives,
           target: forecastTarget,
           now: evaluatedAt,
           expiresAt,
@@ -160,7 +165,7 @@ export default function BitcoinTracker() {
         ? { ...result, available: false, aboveProbability: null, belowProbability: null }
         : result;
     },
-    [candles, ticker, stream, models, hasRequestError, benchmark],
+    [candles, ticker, stream, derivatives, models, hasRequestError, benchmark],
   );
   const getResearchConditions = useCallback(
     ({ target: forecastTarget, now: evaluatedAt, expiresAt, forecast: estimate }) =>
@@ -193,6 +198,7 @@ export default function BitcoinTracker() {
     hasRequestError,
     forecastDeadline,
     stream,
+    derivatives,
     models,
     kalshiMarket,
     benchmark,
@@ -205,6 +211,7 @@ export default function BitcoinTracker() {
     now,
     hasRequestError,
     stream,
+    derivatives,
     models,
     benchmark,
   });
@@ -249,6 +256,7 @@ export default function BitcoinTracker() {
     candles,
     ticker,
     stream,
+    derivatives,
     now,
     progress: fixedProgress,
     isReady: isJournalReady,
@@ -294,6 +302,7 @@ export default function BitcoinTracker() {
           contract,
           createdAt,
           price: getKalshiReferenceQuote(estimate, ticker).price,
+          modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
         }),
       ),
     );
@@ -428,6 +437,7 @@ export default function BitcoinTracker() {
               historyAge={historyAge}
               forecast={forecast}
               stream={stream}
+              derivatives={derivatives}
               conditions={marketConditions}
             />
             <ForecastJournal

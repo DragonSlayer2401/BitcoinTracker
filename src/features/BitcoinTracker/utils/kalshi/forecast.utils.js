@@ -2,8 +2,15 @@ import jStat from 'jstat';
 import { getPressureForecast, PRESSURE_MODEL_PARAMETERS } from '../pressureForecast.utils';
 import { isKalshiContract, KALSHI_OUTCOME_DEFINITION } from './contract.utils';
 import { getBenchmarkConditions, getBenchmarkReadings } from './benchmarkConditions.utils';
+import {
+  DERIVATIVES_MODEL_PARAMETERS,
+  getDerivativesForecast,
+  getDerivativesLogShift,
+  getDerivativesVarianceTime,
+} from '../derivativesForecast.utils';
 
 export const KALSHI_MODEL_VERSION = 'kalshi-brti-average-v2';
+export const KALSHI_DERIVATIVES_MODEL_VERSION = 'kalshi-brti-derivatives-v1';
 export const KALSHI_MODEL_PARAMETERS = Object.freeze({
   sampleCount: 60,
   maximumBenchmarkAgeMs: 5000,
@@ -78,7 +85,7 @@ function getSampleDistribution(time, nodes, base, now) {
   };
 }
 
-function getLogCovariance(left, right, minuteVariance, basisVariance) {
+function getLogCovariance(left, right, minuteVariance, basisVariance, addedMinuteVariance = 0) {
   let timeCovariance = 0;
   if (left.group && left.group === right.group) {
     timeCovariance = Math.min(left.elapsed, right.elapsed);
@@ -86,13 +93,22 @@ function getLogCovariance(left, right, minuteVariance, basisVariance) {
   }
   return (
     Math.max(0, timeCovariance) * minuteVariance +
-    left.basisWeight * right.basisWeight * basisVariance
+    left.basisWeight * right.basisWeight * basisVariance +
+    Math.min(left.futureVarianceTime ?? 0, right.futureVarianceTime ?? 0) * addedMinuteVariance
   );
 }
 
-function getAverageDistribution(distributions, minuteVariance, basisVariance) {
+function getAverageDistribution(
+  distributions,
+  minuteVariance,
+  basisVariance,
+  addedMinuteVariance = 0,
+) {
   const expectedPrices = distributions.map((sample) =>
-    Math.exp(sample.logMean + getLogCovariance(sample, sample, minuteVariance, basisVariance) / 2),
+    Math.exp(
+      sample.logMean +
+        getLogCovariance(sample, sample, minuteVariance, basisVariance, addedMinuteVariance) / 2,
+    ),
   );
   const count = distributions.length;
   const expectedAverage = jStat.sum(expectedPrices) / count;
@@ -108,6 +124,7 @@ function getAverageDistribution(distributions, minuteVariance, basisVariance) {
             distributions[right],
             minuteVariance,
             basisVariance,
+            addedMinuteVariance,
           ),
         );
     }
@@ -144,6 +161,10 @@ function getAboveProbability(distribution, threshold) {
  */
 export function getKalshiForecast(input = {}, pressureBase = null) {
   const { kalshiMarket: market, benchmark, now, ticker } = input;
+  const hasDerivativesPolicy = input.derivatives !== undefined;
+  const modelVersion = hasDerivativesPolicy
+    ? KALSHI_DERIVATIVES_MODEL_VERSION
+    : KALSHI_MODEL_VERSION;
   const horizonMinutes = (market?.expiresAt - now) / MINUTE;
   const base =
     pressureBase ?? getPressureForecast({ ...input, target: market?.target, horizonMinutes });
@@ -157,7 +178,7 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
     lowerBound: null,
     upperBound: null,
     intervalAvailable: false,
-    modelVersion: KALSHI_MODEL_VERSION,
+    modelVersion,
     outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
   });
   if (!isKalshiContract(market)) return unavailable('Waiting for verified Kalshi contract rules.');
@@ -245,12 +266,58 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
       components: { ...base.pressure?.components, minuteVolatility },
     },
   };
-  const distributions = sampleTimes.map((time) =>
+  const baselineDistributions = sampleTimes.map((time) =>
     getSampleDistribution(time, nodes, modelBase, now),
   );
   const minuteVariance = minuteVolatility ** 2;
   const basisVariance = basisLogDeviation ** 2;
-  const distribution = getAverageDistribution(distributions, minuteVariance, basisVariance);
+  const derivatives = hasDerivativesPolicy
+    ? getDerivativesForecast({
+        snapshot: input.derivatives,
+        now,
+        minuteVolatility,
+        horizonMinutes,
+      })
+    : null;
+  const getIncrementalShift = (minutes, pressureShift) => {
+    if (!derivatives?.applied || minutes <= 0) return 0;
+    const maximumCombinedShift =
+      DERIVATIVES_MODEL_PARAMETERS.maximumCombinedMinuteVolatilities *
+      minuteVolatility *
+      Math.sqrt(Math.min(minutes, DERIVATIVES_MODEL_PARAMETERS.maximumDriftHorizonMinutes));
+    return (
+      bounded(
+        pressureShift + getDerivativesLogShift(derivatives, minutes, minuteVolatility),
+        -maximumCombinedShift,
+        maximumCombinedShift,
+      ) - pressureShift
+    );
+  };
+  // Only future samples receive futures pressure/risk. Official observations and missing
+  // elapsed Brownian bridges retain exactly their original values and covariance.
+  const distributions = derivatives?.applied
+    ? baselineDistributions.map((sample, index) => {
+        const minutes = (sampleTimes[index] - now) / MINUTE;
+        return minutes > 0
+          ? {
+              ...sample,
+              logMean: sample.logMean + getIncrementalShift(minutes, sample.pressureShift),
+              futureVarianceTime: getDerivativesVarianceTime(minutes),
+            }
+          : sample;
+      })
+    : baselineDistributions;
+  const addedMinuteVariance = derivatives?.applied
+    ? minuteVariance * (derivatives.futureVarianceMultiplier - 1)
+    : 0;
+  const baselineDistribution = getAverageDistribution(
+    baselineDistributions,
+    minuteVariance,
+    basisVariance,
+  );
+  const distribution = derivatives?.applied
+    ? getAverageDistribution(distributions, minuteVariance, basisVariance, addedMinuteVariance)
+    : baselineDistribution;
   const { expectedAverage, averageVariance, volatility, logMedian } = distribution;
   if (!positive(expectedAverage) || !positive(volatility)) {
     return unavailable('The remaining settlement uncertainty cannot be calculated safely.');
@@ -258,10 +325,11 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
   // YES includes equality after the settlement value is rounded to cents.
   const threshold = market.target - 0.005;
   const aboveProbability = getAboveProbability(distribution, threshold);
+  const baselineAboveProbability = getAboveProbability(baselineDistribution, threshold);
   const unshiftedAboveProbability = base.pressure?.applied
     ? getAboveProbability(
         getAverageDistribution(
-          distributions.map((sample) => ({
+          baselineDistributions.map((sample) => ({
             ...sample,
             logMean: sample.logMean - sample.pressureShift,
           })),
@@ -270,7 +338,7 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
         ),
         threshold,
       )
-    : aboveProbability;
+    : baselineAboveProbability;
   const lowerBound = Math.exp(logMedian - NORMAL_CENTRAL_80_QUANTILE * volatility);
   const upperBound = Math.exp(logMedian + NORMAL_CENTRAL_80_QUANTILE * volatility);
   if (![aboveProbability, lowerBound, upperBound].every(positive)) {
@@ -280,7 +348,7 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
     ...base,
     available: true,
     reason: null,
-    modelVersion: KALSHI_MODEL_VERSION,
+    modelVersion,
     outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
     target: market.target,
     expiresAt: market.expiresAt,
@@ -304,8 +372,22 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
       expectedLogReturn: getPressureShift(modelBase, horizonMinutes),
       baselineAboveProbability: unshiftedAboveProbability,
       unshiftedAboveProbability,
-      adjustmentPercentagePoints: (aboveProbability - unshiftedAboveProbability) * 100,
+      adjustmentPercentagePoints: (baselineAboveProbability - unshiftedAboveProbability) * 100,
     },
+    ...(derivatives
+      ? {
+          derivatives: {
+            ...derivatives,
+            expectedLogReturn: getIncrementalShift(
+              horizonMinutes,
+              getPressureShift(modelBase, horizonMinutes),
+            ),
+            baselineAboveProbability,
+            aboveProbability,
+            adjustmentPercentagePoints: (aboveProbability - baselineAboveProbability) * 100,
+          },
+        }
+      : {}),
     kalshi: {
       marketTicker: market.ticker,
       comparison: market.comparison,

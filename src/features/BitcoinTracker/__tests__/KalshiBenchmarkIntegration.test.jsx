@@ -8,7 +8,11 @@ import { selectActiveForecast } from '../state/selectors/trackerSelectors';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { getFixedForecastAnalysis, KALSHI_POLICY_VERSION } from '../utils/fixedPrediction.utils';
 import { getKalshiMarketConditions } from '../utils/kalshi/marketConditions.utils';
-import { KALSHI_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
+import {
+  KALSHI_MODEL_VERSION,
+  KALSHI_DERIVATIVES_MODEL_VERSION,
+} from '../utils/kalshi/forecast.utils';
+import { getValidatedForecast, saveJournal, loadJournal } from '../utils/journal.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { createResearchRecorder } from '../utils/researchRecorder.utils';
 import { getEvidenceRow } from '../utils/evidenceStorage.utils';
@@ -80,6 +84,50 @@ function analyzing() {
   };
 }
 
+function futuresAt(now) {
+  const completeSince = now - 240_000;
+  return {
+    version: 'bybit-linear-flow-v1',
+    source: 'bybit-linear',
+    symbol: 'BTCUSDT',
+    status: 'live',
+    asOf: now,
+    quality: { completeSince, lastTradeAt: now, lastMessageAt: now, subscribed: true },
+    windows: Object.fromEntries(
+      [15, 60, 180].map((seconds) => [
+        seconds,
+        {
+          available: true,
+          buyBtc: seconds * 2,
+          sellBtc: seconds,
+          totalBtc: seconds * 3,
+          signedBtc: seconds,
+          imbalance: 1 / 3,
+          tradeCount: seconds * 3,
+          logReturn: (0.0002 * seconds) / 60,
+          largeTradesAvailable: false,
+        },
+      ]),
+    ),
+    impact: {
+      available: true,
+      bucketSeconds: 15,
+      completeSince,
+      asOf: now,
+      samples: Array.from({ length: 8 }, (_, index) => ({
+        startAt: now - (8 - index) * 15000,
+        endAt: now - (7 - index) * 15000,
+        startPrice: 50_000,
+        endPrice: 50_000 * Math.exp(0.00005),
+        buyBtc: 30,
+        sellBtc: 15,
+        tradeCount: 45,
+      })),
+    },
+    liquidations: { available: false },
+  };
+}
+
 beforeEach(() => {
   jest.useFakeTimers();
   jest.setSystemTime(CAPTURE);
@@ -132,6 +180,46 @@ test('fixed publication uses BRTI freshness and price even when Coinbase request
   expect(fixed.aboveProbability).toBeGreaterThan(0);
   expect(fixed.belowProbability).toBeGreaterThan(0);
 });
+
+test.each([true, false])(
+  'new fixed calls capture futures math or its optional fallback and remain immutable: live feed %s',
+  (hasFutures) => {
+    window.localStorage.clear();
+    const store = configureStore({ reducer: { tracker: reducer } });
+    store.dispatch(
+      forecastRecorded({ ...analyzing(), modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION }),
+    );
+    const derivatives = hasFutures ? futuresAt(CAPTURE) : null;
+    const expected = getResearchForecast({ ...inputs(), derivatives });
+    const baseline = getResearchForecast(inputs());
+    const view = renderHook(
+      (props) =>
+        useFixedPrediction({
+          ...inputs(),
+          ...props,
+          forecast: useSelector(selectActiveForecast),
+          hasRequestError: true,
+        }),
+      {
+        initialProps: { derivatives },
+        wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,
+      },
+    );
+    const fixed = store.getState().tracker.forecasts[0];
+    expect(fixed.status).toBe('pending');
+    expect(fixed.modelVersion).toBe(KALSHI_DERIVATIVES_MODEL_VERSION);
+    expect(fixed.aboveProbability).toBe(expected.aboveProbability);
+    expect(fixed.derivatives).toEqual(expected.derivatives);
+    expect(fixed.derivatives.applied).toBe(hasFutures);
+    if (hasFutures) expect(fixed.aboveProbability).toBeGreaterThan(baseline.aboveProbability);
+    else expect(fixed.aboveProbability).toBe(baseline.aboveProbability);
+    expect(getValidatedForecast(fixed)).toEqual(fixed);
+    expect(saveJournal([fixed])).toBeNull();
+    expect(loadJournal().forecasts).toEqual([fixed]);
+    view.rerender({ derivatives: null });
+    expect(store.getState().tracker.forecasts[0]).toEqual(fixed);
+  },
+);
 
 test('a fresh benchmark price alone cannot replace missing history during a Coinbase outage', () => {
   const input = inputs();

@@ -1,8 +1,8 @@
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
 import {
-  LEARNING_FEATURE_NAMES,
   LEARNING_FEATURE_VERSION,
-  LEARNING_AVAILABILITY_INDEXES,
+  getLearningFeatureSchema,
+  isLearningSchemaCompatibleWithBaseline,
   isLearningFeatureSnapshot,
   matchesLearningPipeline,
 } from './features.utils';
@@ -22,19 +22,25 @@ const isFiniteNumberArray = (values, length) =>
 
 export function matchesOutcomeModelPipeline(model, snapshot) {
   const applicability = model?.applicability;
-  return matchesLearningPipeline(snapshot, {
-    baselineModelVersion: applicability?.baselineModelVersion,
-    referenceSource: applicability?.referenceSources?.[0],
-    featureInputSource: applicability?.featureInputSources?.[0],
-  });
+  return (
+    (model?.featureVersion ?? LEARNING_FEATURE_VERSION) ===
+      (snapshot?.schemaVersion ?? snapshot?.featureVersion ?? LEARNING_FEATURE_VERSION) &&
+    matchesLearningPipeline(snapshot, {
+      baselineModelVersion: applicability?.baselineModelVersion,
+      referenceSource: applicability?.referenceSources?.[0],
+      featureInputSource: applicability?.featureInputSources?.[0],
+      featureVersion: model?.featureVersion ?? LEARNING_FEATURE_VERSION,
+    })
+  );
 }
 
 export function isWithinOutcomeModelDomain(model, snapshot) {
   const horizonMinutes = (snapshot?.expiresAt - snapshot?.featureCutoffAt) / 60_000;
   const applicability = model?.applicability;
-  const availabilityPattern = LEARNING_AVAILABILITY_INDEXES.map(
-    (index) => snapshot?.values?.[index],
-  ).join('');
+  const schema = getLearningFeatureSchema(model?.featureVersion ?? LEARNING_FEATURE_VERSION);
+  const availabilityPattern = (schema?.availabilityIndexes ?? [])
+    .map((index) => snapshot?.values?.[index])
+    .join('');
   return Boolean(
     Number.isFinite(horizonMinutes) &&
     applicability &&
@@ -65,6 +71,7 @@ function isLogisticFit(model, indexes) {
 }
 
 export function isOutcomeModelArtifact(model) {
+  const schema = getLearningFeatureSchema(model?.featureVersion);
   return Boolean(
     model &&
     typeof model.id === 'string' &&
@@ -82,7 +89,11 @@ export function isOutcomeModelArtifact(model) {
     model.applicability.featureInputSources.length === 1 &&
     ['cf-brti-history', 'coinbase-candles'].includes(model.applicability.featureInputSources[0]) &&
     model.status === 'shadow' &&
-    model.featureVersion === LEARNING_FEATURE_VERSION &&
+    schema &&
+    isLearningSchemaCompatibleWithBaseline(
+      model.featureVersion,
+      model.applicability.baselineModelVersion,
+    ) &&
     [
       model.trainedAt,
       model.trainingCutoffAt,
@@ -104,11 +115,16 @@ export function isOutcomeModelArtifact(model) {
     model.applicability.maximumTargetDistance >= model.applicability.minimumTargetDistance &&
     Array.isArray(model.applicability.availabilityPatterns) &&
     model.applicability.availabilityPatterns.length > 0 &&
-    model.applicability.availabilityPatterns.length <= 128 &&
-    model.applicability.availabilityPatterns.every((pattern) => /^[01]{7}$/.test(pattern)) &&
+    model.applicability.availabilityPatterns.length <= 2 ** schema.availabilityIndexes.length &&
+    model.applicability.availabilityPatterns.every(
+      (pattern) =>
+        typeof pattern === 'string' &&
+        pattern.length === schema.availabilityIndexes.length &&
+        /^[01]+$/.test(pattern),
+    ) &&
     isLogisticFit(
       model.model,
-      LEARNING_FEATURE_NAMES.map((_, index) => index),
+      schema.names.map((_, index) => index),
     ) &&
     model.calibration?.version === CALIBRATION_VERSION &&
     isLogisticFit(model.calibration.model, [0]) &&

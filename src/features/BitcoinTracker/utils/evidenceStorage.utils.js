@@ -221,6 +221,8 @@ export function getEvidenceRow({
     modelAboveProbability: inputEstimate?.aboveProbability ?? null,
     modelBelowProbability: inputEstimate?.belowProbability ?? null,
     pressure: inputEstimate?.pressure ?? null,
+    // A restored or outcome-only row never recreates the derivatives observed at capture.
+    derivatives: inputEstimate?.derivatives ?? null,
     intervalLow: inputEstimate?.lowerBound ?? null,
     intervalHigh: inputEstimate?.upperBound ?? null,
     intervalCoverage:

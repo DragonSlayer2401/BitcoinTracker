@@ -26,6 +26,8 @@ import {
 } from '../utils/learning/model.utils';
 import { createLearningService } from '@/services/research/learning.service';
 import { fitLogistic } from '../utils/learning/statistics.utils';
+import { getDerivativesForecast } from '../utils/derivativesForecast.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 
 jest.mock('server-only', () => ({}), { virtual: true });
 jest.mock('@/services/research/research.repository', () => ({}));
@@ -190,6 +192,67 @@ test('restoring a checkpoint never changes its probability or repeats its eviden
   ).toEqual([]);
   expect(restored.getState().markets[0].checkpoints[0].aboveProbability).toBe(0.55);
 });
+
+test.each([true, false])(
+  'a checkpoint retains futures metadata and calculation mode across restarts: adjustment %s',
+  (applied) => {
+    const derivatives = {
+      ...getDerivativesForecast(),
+      baselineAboveProbability: 0.55,
+      aboveProbability: 0.55,
+      ...(applied
+        ? {
+            available: true,
+            applied: true,
+            asOf: START + 3 * MINUTE,
+            reason: null,
+            liquidationImbalance: -1,
+            relativeLiquidationVolume: 0.1,
+            liquidationStress: 0.4,
+            futureVarianceMultiplier: 1.2,
+          }
+        : {}),
+    };
+    const recorder = createResearchRecorder({ recorderId });
+    const result = recorder.advance(
+      input(START + 3 * MINUTE, {
+        getEstimate: () => ({
+          ...estimate(),
+          modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+          derivatives,
+        }),
+      }),
+    );
+    const captured = JSON.parse(JSON.stringify(derivatives));
+    expect(result.state.markets[0].checkpoints[0].derivatives).toEqual(captured);
+    expect(result.state.markets[0].checkpoints[0].calculationMode).toBe(
+      applied ? 'pressure-adjusted' : 'baseline-fallback',
+    );
+    expect(result.rows[0].derivatives).toEqual(captured);
+    derivatives.reason = 'Later data';
+    expect(recorder.getState().markets[0].checkpoints[0].derivatives).toEqual(captured);
+    const state = getValidatedResearchRecorderState(recorder.getState(), recorderId);
+    expect(state).not.toBeNull();
+    const restored = createResearchRecorder({ recorderId, state });
+    expect(
+      restored.advance(
+        input(START + 3 * MINUTE + 1000, {
+          getEstimate: () => ({ ...estimate(0.9), derivatives }),
+        }),
+      ).rows,
+    ).toEqual([]);
+    expect(restored.getState().markets[0].checkpoints[0].derivatives).toEqual(captured);
+    const invalid = recorder.getState();
+    invalid.markets[0].checkpoints[0].derivatives.aboveProbability = 0.9;
+    expect(getValidatedResearchRecorderState(invalid, recorderId)).toBeNull();
+    const historical = createResearchRecorder({ recorderId });
+    historical.advance(input(START + 3 * MINUTE));
+    expect(
+      getValidatedResearchRecorderState(historical.getState(), recorderId).markets[0]
+        .checkpoints[0],
+    ).not.toHaveProperty('derivatives');
+  },
+);
 
 test.each(['target', 'expiresAt'])(
   'rejects changed persisted %s rather than silently resetting',

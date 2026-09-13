@@ -11,10 +11,13 @@ import trackerReducer, {
 } from '../state/slices/trackerSlice';
 import { selectActiveForecast, selectForecasts } from '../state/selectors/trackerSelectors';
 import { getResearchForecast } from '../utils/researchForecast.utils';
-import { KALSHI_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
+import {
+  KALSHI_MODEL_VERSION,
+  KALSHI_DERIVATIVES_MODEL_VERSION,
+} from '../utils/kalshi/forecast.utils';
 import { getFixedForecastAnalysis, KALSHI_POLICY_VERSION } from '../utils/fixedPrediction.utils';
 import { getValidatedForecast, loadJournal, saveJournal } from '../utils/journal.utils';
-import { appendEvidenceRows } from '../utils/evidenceStorage.utils';
+import { appendEvidenceRows, getEvidenceRow } from '../utils/evidenceStorage.utils';
 import { OUTCOME_MODEL_VERSION, CALIBRATION_VERSION } from '../utils/learning/model.utils';
 import {
   EARLY_MODEL_VERSION,
@@ -22,7 +25,13 @@ import {
   EARLY_LEARNING_REQUIREMENTS,
   EARLY_FIT_PARAMETERS,
 } from '../utils/learning/earlyModel.utils';
-import { LEARNING_FEATURE_NAMES, LEARNING_FEATURE_VERSION } from '../utils/learning/features.utils';
+import {
+  LEARNING_FEATURE_NAMES,
+  LEARNING_FEATURE_VERSION,
+  DERIVATIVES_LEARNING_FEATURE_NAMES,
+  DERIVATIVES_LEARNING_FEATURE_VERSION,
+  getLearningFeatureSchema,
+} from '../utils/learning/features.utils';
 import { KALSHI_OUTCOME_DEFINITION, getKalshiOutcome } from '../utils/kalshi/contract.utils';
 
 jest.mock('../utils/evidenceStorage.utils', () => ({
@@ -222,6 +231,101 @@ async function flush() {
 }
 
 describe('learned forecast integration', () => {
+  test('futures baseline and learned calls restore immutable metadata while old candidates stay separate', () => {
+    const input = { ...market(CAPTURE), derivatives: null };
+    const baseline = getResearchForecast(
+      input,
+      {
+        active: artifact(),
+        candidate: artifact(),
+        earlyCandidate: earlyArtifact(),
+      },
+      START,
+    );
+    expect(baseline.modelVersion).toBe(KALSHI_DERIVATIVES_MODEL_VERSION);
+    expect(baseline.derivatives).toMatchObject({ available: false, applied: false });
+    expect(baseline.learningFeatures.schemaVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+    expect(baseline.learning).toBeUndefined();
+    expect(baseline.shadowPrediction).toBeNull();
+    expect(baseline.earlyShadowPrediction).toBeNull();
+    const size = DERIVATIVES_LEARNING_FEATURE_NAMES.length;
+    const pattern = getLearningFeatureSchema(DERIVATIVES_LEARNING_FEATURE_VERSION)
+      .availabilityIndexes.map((index) => baseline.learningFeatures.values[index])
+      .join('');
+    const full = artifact(0.2, {
+      featureVersion: DERIVATIVES_LEARNING_FEATURE_VERSION,
+      applicability: {
+        baselineModelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+        availabilityPatterns: [pattern],
+      },
+      model: {
+        indexes: Array.from({ length: size }, (_, index) => index),
+        means: Array(size).fill(0),
+        scales: Array(size).fill(1),
+        coefficients: [Math.log(0.2 / 0.8), ...Array(size).fill(0)],
+      },
+    });
+    const learned = getResearchForecast(input, { active: full });
+    expect(learned.learning?.featureVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+    const early = earlyArtifact({
+      featureVersion: DERIVATIVES_LEARNING_FEATURE_VERSION,
+      applicability: {
+        ...earlyArtifact().applicability,
+        baselineModelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+        availabilityPatterns: [pattern],
+      },
+    });
+    const earlyLearned = getResearchForecast(input, { active: early });
+    expect(earlyLearned.learning?.featureVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+    const capture = (forecast) => ({
+      ...analyzing(),
+      createdAt: CAPTURE,
+      status: 'pending',
+      modelVersion: forecast.modelVersion,
+      aboveProbability: forecast.aboveProbability,
+      belowProbability: forecast.belowProbability,
+      direction: forecast.direction,
+      kalshi: forecast.kalshi,
+      derivatives: forecast.derivatives,
+      calculationMode: forecast.learning ? 'outcome-trained' : 'baseline-fallback',
+      ...(forecast.learning ? { learning: forecast.learning } : {}),
+    });
+    for (const forecast of [baseline, learned, earlyLearned]) {
+      const fixed = capture(forecast);
+      expect(getValidatedForecast(fixed)).toEqual(fixed);
+      expect(saveJournal([fixed], window.localStorage)).toBeNull();
+      expect(loadJournal(window.localStorage).forecasts).toEqual([fixed]);
+      expect(getValidatedForecast({ ...fixed, derivatives: undefined })).toBeNull();
+      expect(
+        getValidatedForecast({
+          ...fixed,
+          derivatives: { ...fixed.derivatives, aboveProbability: 0.1234 },
+        }),
+      ).toBeNull();
+    }
+    const entry = capture(baseline);
+    const row = getEvidenceRow({
+      entry,
+      event: 'decision',
+      now: CAPTURE,
+      inputObservedAt: CAPTURE,
+      estimate: baseline,
+      ticker: input.ticker,
+    });
+    expect(row.derivatives).toEqual(baseline.derivatives);
+    expect(row.learningFeatures.schemaVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+    baseline.derivatives.reason = 'Later mutation';
+    expect(row.derivatives.reason).not.toBe('Later mutation');
+    expect(
+      getEvidenceRow({
+        entry,
+        event: 'restored',
+        now: CAPTURE + 1,
+        estimate: baseline,
+        ticker: input.ticker,
+      }).derivatives,
+    ).toBeNull();
+  });
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(START);

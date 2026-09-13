@@ -5,6 +5,7 @@ import { scheduledForecastStarted, scheduleStartMissed } from '../state/slices/t
 import { getKalshiContract, KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { createKalshiForecastRecord } from '../utils/kalshi/forecastRecord.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 import {
   getKalshiReferenceQuote,
   hasIndependentKalshiBenchmark,
@@ -17,6 +18,7 @@ export default function useKalshiSchedule({
   ticker,
   candles,
   stream,
+  derivatives,
   models,
   benchmark,
   now,
@@ -61,6 +63,7 @@ export default function useKalshiSchedule({
         candles,
         ticker,
         stream,
+        derivatives,
         now: capturedAt,
         target: contract.target,
         expiresAt: contract.expiresAt,
@@ -88,6 +91,7 @@ export default function useKalshiSchedule({
           contract,
           createdAt: capturedAt,
           price: reference.price,
+          ...(derivatives !== undefined ? { modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION } : {}),
         }),
       }),
     );
@@ -96,6 +100,7 @@ export default function useKalshiSchedule({
     ticker,
     candles,
     stream,
+    derivatives,
     models,
     benchmark,
     now,

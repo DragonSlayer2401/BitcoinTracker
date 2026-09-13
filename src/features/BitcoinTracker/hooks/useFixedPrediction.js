@@ -15,6 +15,7 @@ import {
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION } from '../utils/learning/model.utils';
 import { EARLY_MODEL_VERSION } from '../utils/learning/earlyModel.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 
 export default function useFixedPrediction({
   forecast,
@@ -23,6 +24,7 @@ export default function useFixedPrediction({
   now,
   hasRequestError,
   stream,
+  derivatives,
   models,
   benchmark,
 }) {
@@ -53,6 +55,9 @@ export default function useFixedPrediction({
         now: capturedAt,
         horizonMinutes: (forecast.expiresAt - capturedAt) / 60_000,
         stream,
+        // A restored observation retains the baseline policy selected when it began.
+        derivatives:
+          forecast.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION ? derivatives : undefined,
         kalshiMarket: forecast.kalshiMarket,
         benchmark,
         expiresAt: forecast.expiresAt,
@@ -130,13 +135,14 @@ export default function useFixedPrediction({
             direction: estimate.direction,
             status: 'pending',
             ...(forecast.kalshiMarket ? { kalshi: estimate.kalshi } : {}),
+            ...(estimate.derivatives ? { derivatives: estimate.derivatives } : {}),
             ...(estimate.learning?.applied
               ? { modelVersion: estimate.modelVersion, learning: estimate.learning }
               : {}),
 
             calculationMode: estimate.learning?.applied
               ? 'outcome-trained'
-              : estimate.pressure?.applied
+              : estimate.pressure?.applied || estimate.derivatives?.applied
                 ? 'pressure-adjusted'
                 : 'baseline-fallback',
           },
@@ -151,7 +157,18 @@ export default function useFixedPrediction({
         }),
       );
     }
-  }, [forecast, candles, ticker, now, hasRequestError, stream, models, dispatch, benchmark]);
+  }, [
+    forecast,
+    candles,
+    ticker,
+    now,
+    hasRequestError,
+    stream,
+    derivatives,
+    models,
+    dispatch,
+    benchmark,
+  ]);
 
   return progress;
 }

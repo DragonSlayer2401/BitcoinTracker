@@ -49,6 +49,7 @@ const immutablePredictionFields = [
   'learning',
   'modelVersion',
   'kalshi',
+  'derivatives',
 ];
 
 export function isResearchIdentifier(value) {

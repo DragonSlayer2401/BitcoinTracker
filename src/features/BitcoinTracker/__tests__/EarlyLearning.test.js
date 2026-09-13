@@ -1,6 +1,12 @@
 import { createResearchRecorder } from '../utils/researchRecorder.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
-import { LEARNING_FEATURE_NAMES, LEARNING_FEATURE_VERSION } from '../utils/learning/features.utils';
+import {
+  LEARNING_FEATURE_NAMES,
+  LEARNING_FEATURE_VERSION,
+  DERIVATIVES_LEARNING_FEATURE_NAMES,
+  DERIVATIVES_LEARNING_FEATURE_VERSION,
+} from '../utils/learning/features.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 import { logit } from '../utils/learning/statistics.utils';
 import {
   EARLY_MODEL_VERSION,
@@ -31,6 +37,7 @@ function recordedWindow(
     active = false,
     native = true,
     targetDistance = 0,
+    derivativesAware = false,
   } = {},
 ) {
   const contract = {
@@ -52,9 +59,13 @@ function recordedWindow(
   for (const minutes of [12, 9, 6, 3, 1]) {
     const now = contract.expiresAt - minutes * MINUTE;
     const learningFeatures = {
-      schemaVersion: LEARNING_FEATURE_VERSION,
+      schemaVersion: derivativesAware
+        ? DERIVATIVES_LEARNING_FEATURE_VERSION
+        : LEARNING_FEATURE_VERSION,
       available: true,
-      values: LEARNING_FEATURE_NAMES.map((_, feature) => (feature === 0 ? logit(probability) : 0)),
+      values: (derivativesAware ? DERIVATIVES_LEARNING_FEATURE_NAMES : LEARNING_FEATURE_NAMES).map(
+        (_, feature) => (feature === 0 ? logit(probability) : 0),
+      ),
       baselineAboveProbability: probability,
       targetDistance,
       target: contract.target,
@@ -63,7 +74,7 @@ function recordedWindow(
       outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
       referenceSource: native ? 'cf-brti' : 'coinbase-proxy',
       featureInputSource: native ? 'cf-brti-history' : 'coinbase-candles',
-      baselineModelVersion: BASELINE_VERSION,
+      baselineModelVersion: derivativesAware ? KALSHI_DERIVATIVES_MODEL_VERSION : BASELINE_VERSION,
       settlementKnownFraction: 0,
     };
     const candidate = model ? predictEarlyCandidate(model, learningFeatures) : null;
@@ -74,7 +85,7 @@ function recordedWindow(
       aboveProbability: adjusted,
       belowProbability: 1 - adjusted,
       direction: adjusted > 0.5 ? 'above' : adjusted < 0.5 ? 'below' : 'neutral',
-      modelVersion: hasCorrection ? EARLY_MODEL_VERSION : BASELINE_VERSION,
+      modelVersion: hasCorrection ? EARLY_MODEL_VERSION : learningFeatures.baselineModelVersion,
       outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
       learningFeatures,
       kalshi: {
@@ -89,7 +100,7 @@ function recordedWindow(
               modelId: model.id,
               aboveProbability: adjusted,
               baselineAboveProbability: probability,
-              featureVersion: LEARNING_FEATURE_VERSION,
+              featureVersion: learningFeatures.schemaVersion,
               calibrationVersion: EARLY_CALIBRATION_VERSION,
               trainingCutoffAt: model.trainingCutoffAt,
             },
@@ -147,6 +158,35 @@ function trained() {
   return trainEarlyCandidate(windowSet(40), { now: afterWindow(39) }).artifact;
 }
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+test('the early correction trains and validates on the new baseline without borrowing historical futures data', () => {
+  const older = windowSet(40);
+  const current = windowSet(40, 40, { derivativesAware: true });
+  const training = trainEarlyCandidate([...older, ...current], { now: afterWindow(79) });
+  expect(training.status).toBe('shadow');
+  expect(training.counts.independentWindows).toBe(40);
+  expect(training.artifact.featureVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+  expect(training.artifact.applicability.baselineModelVersion).toBe(
+    KALSHI_DERIVATIVES_MODEL_VERSION,
+  );
+  expect(isEarlyModelArtifact(training.artifact)).toBe(true);
+  expect(isEarlyModelArtifact(trained())).toBe(true);
+  const prospective = windowSet(40, 80, { derivativesAware: true, model: training.artifact });
+  const result = evaluateEarlyShadowCandidate(
+    training.artifact,
+    [...older, ...current, ...prospective],
+    {
+      now: afterWindow(119),
+    },
+  );
+  expect(result.independentWindows).toBe(40);
+  expect(result.eligibleForPromotion).toBe(true);
+  const oldSnapshot = recordedWindow(120)[0].learningFeatures;
+  expect(isWithinEarlyModelDomain(training.artifact, oldSnapshot)).toBe(false);
+  expect(predictEarlyCandidate(training.artifact, oldSnapshot)).toBe(
+    oldSnapshot.baselineAboveProbability,
+  );
+});
 
 test('40 independent windows create a shadow-only two-parameter correction without retrospective promotion', () => {
   const result = trainEarlyCandidate(windowSet(40), { now: afterWindow(39) });

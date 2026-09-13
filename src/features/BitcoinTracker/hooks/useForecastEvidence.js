@@ -3,12 +3,14 @@ import { appendEvidenceRows, getEvidenceRow } from '../utils/evidenceStorage.uti
 import { getKalshiMarketConditions } from '../utils/kalshi/marketConditions.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { KALSHI_OUTCOME_DEFINITION, isVerifiedKalshiOutcome } from '../utils/kalshi/contract.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 
 export default function useForecastEvidence({
   forecasts,
   candles,
   ticker,
   stream,
+  derivatives,
   now: clockTick,
   progress,
   isReady,
@@ -123,6 +125,8 @@ export default function useForecastEvidence({
           now,
           horizonMinutes,
           stream,
+          derivatives:
+            entry.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION ? derivatives : undefined,
           expiresAt: entry.expiresAt,
           kalshiMarket: entry.kalshiMarket,
           benchmark,
@@ -189,6 +193,7 @@ export default function useForecastEvidence({
     candles,
     ticker,
     stream,
+    derivatives,
     clockTick,
     progress,
     isReady,

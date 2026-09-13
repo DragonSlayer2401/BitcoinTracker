@@ -19,14 +19,31 @@ export default function KalshiModelRules() {
           With enough complete BRTI history, the model measures volatility and price movement from
           the same index Kalshi uses. Recent moves receive more weight, and a sudden jump widens
           uncertainty. Coinbase candles provide a fallback while index history is incomplete.
-          Executed buying and selling pressure shifts the projected prices. Larger trades contribute
-          by their BTC volume, without an extra large-trade bonus. Weak or missing pressure does not
-          prevent a valid estimate.
+          Executed Coinbase buying and selling pressure shifts the projected prices. Larger spot
+          trades contribute by their BTC volume. Weak or missing pressure does not prevent a valid
+          estimate.
         </p>
         <p>
           The model estimates the average of the 60 benchmark readings. Prices seconds apart are
           related, so it does not count them as 60 independent predictions. This is an unvalidated
           approximation of future market behavior.
+        </p>
+      </section>
+      <section className="col-md-6">
+        <h3 className="h6">Futures and liquidations</h3>
+        <p>
+          Bybit BTCUSDT futures executions contribute to the current probability calculation before
+          any learning model. Recent buying and selling, unusually large trades, and the observed
+          price response produce a small, decaying adjustment. Selling that prices absorb receives
+          less directional weight. The initial price-response fit needs six completed 15-second
+          intervals.
+        </p>
+        <p>
+          Reported long and short liquidations add directional context and temporary uncertainty.
+          Their volume is not counted again as additional executions. Effects apply only to future
+          settlement readings and stay bounded by BRTI volatility. A missing or warming futures feed
+          leaves the existing calculation available. These assumptions have not established
+          predictive accuracy.
         </p>
       </section>
       <section className="col-md-6">

@@ -3,7 +3,13 @@ import { KALSHI_MODEL_VERSION } from './forecast.utils';
 import { getFixedForecastAnalysis, KALSHI_POLICY_VERSION } from '../fixedPrediction.utils';
 
 /** Manual and scheduled starts capture the same contract before observation begins. */
-export function createKalshiForecastRecord({ id, contract, createdAt, price }) {
+export function createKalshiForecastRecord({
+  id,
+  contract,
+  createdAt,
+  price,
+  modelVersion = KALSHI_MODEL_VERSION,
+}) {
   return {
     id,
     startsAt: contract.startsAt,
@@ -15,7 +21,7 @@ export function createKalshiForecastRecord({ id, contract, createdAt, price }) {
     aboveProbability: null,
     belowProbability: null,
     direction: 'neutral',
-    modelVersion: KALSHI_MODEL_VERSION,
+    modelVersion,
     status: 'analyzing',
     calculationMode: null,
     analysis: getFixedForecastAnalysis({

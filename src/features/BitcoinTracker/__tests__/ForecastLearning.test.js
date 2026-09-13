@@ -3,6 +3,8 @@ import {
   isLearningFeatureSnapshot,
   LEARNING_FEATURE_NAMES,
   LEARNING_FEATURE_VERSION,
+  DERIVATIVES_LEARNING_FEATURE_VERSION,
+  DERIVATIVES_LEARNING_FEATURE_NAMES,
 } from '../utils/learning/features.utils';
 import {
   analyzeForecastEvidence as analyzeContractEvidence,
@@ -22,6 +24,8 @@ import {
   trainOutcomeCandidate as trainContractCandidate,
 } from '../utils/learning/training.utils';
 import { KALSHI_OUTCOME_DEFINITION as DEADLINE_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
+import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
+import { getDerivativesForecast } from '../utils/derivativesForecast.utils';
 import { createLearningService as createContractLearningService } from '@/services/research/learning.service';
 
 // All learning fixtures represent actual Kalshi contracts.
@@ -239,6 +243,73 @@ function liveInput() {
 }
 
 describe('deadline learning features', () => {
+  test('new futures fields preserve historical positions and distinguish missing feeds from zero flow', () => {
+    const input = liveInput();
+    const historical = getLearningFeatures(input);
+    const fallback = getDerivativesForecast();
+    const metadata = {
+      ...fallback,
+      available: true,
+      asOf: input.now,
+      imbalance15: -0.8,
+      imbalance60: -0.6,
+      imbalance180: -0.3,
+      largeTradeImbalance: -1,
+      largeTradeShare: 0.4,
+      liquidationImbalance: -0.9,
+      relativeLiquidationVolume: 0.2,
+      priceResponse: 0.7,
+      basisLogReturn: -0.0001,
+    };
+    const result = getLearningFeatures({
+      ...input,
+      forecast: { ...BASE, modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION, derivatives: metadata },
+    });
+    expect(result.schemaVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+    expect(result.values).toHaveLength(42);
+    expect(result.values.slice(0, 26)).toEqual(historical.values);
+    const value = (name) => result.values[DERIVATIVES_LEARNING_FEATURE_NAMES.indexOf(name)];
+    expect(value('futuresPressure15')).toBe(-0.8);
+    expect(value('futuresLargeTradePressure')).toBe(-1);
+    expect(value('futuresRelativeLiquidationVolume')).toBe(0.2);
+    expect(value('futuresPriceResponse')).toBe(0.7);
+    expect(value('futuresLiquidationsAvailable')).toBe(1);
+    expect(
+      isLearningFeatureSnapshot(result, {
+        target: input.target,
+        expiresAt: input.expiresAt,
+        cutoffAt: input.now,
+      }),
+    ).toBe(true);
+    const missing = getLearningFeatures({
+      ...input,
+      forecast: { ...BASE, modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION, derivatives: fallback },
+    });
+    expect(missing.available).toBe(true);
+    expect(missing.values.slice(26)).toEqual(Array(16).fill(0));
+    expect(missing.missingFeeds).toContain('futures-flow-60');
+    expect(historical.schemaVersion).toBe(LEARNING_FEATURE_VERSION);
+    expect(historical.values).toHaveLength(26);
+    const futureInput = getLearningFeatures({
+      ...input,
+      forecast: {
+        ...BASE,
+        modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+        derivatives: { ...metadata, asOf: input.now + 1 },
+      },
+    });
+    expect(futureInput.available).toBe(false);
+    expect(
+      isLearningFeatureSnapshot(
+        { ...historical, baselineModelVersion: KALSHI_DERIVATIVES_MODEL_VERSION },
+        {
+          target: input.target,
+          expiresAt: input.expiresAt,
+          cutoffAt: input.now,
+        },
+      ),
+    ).toBe(false);
+  });
   test('captures weakening buying pressure and shrinking bid liquidity as model inputs', () => {
     const inputs = liveInput();
     const result = getLearningFeatures(inputs);
@@ -690,6 +761,86 @@ describe('server learning workflow', () => {
 });
 
 describe('prospective shadow promotion', () => {
+  test('fits and scores the new futures input positions without mixing older evidence', () => {
+    const futuresEvents = (index, start = START) => {
+      const rows = eventsFor(index, { start, probability: 0.65 });
+      const decision = rows[0];
+      const values = Array(DERIVATIVES_LEARNING_FEATURE_NAMES.length).fill(0);
+      values[26] = index % 2 ? 1 : -1;
+      values[35] = 1;
+      decision.modelVersion = KALSHI_DERIVATIVES_MODEL_VERSION;
+      decision.learningFeatures = {
+        ...decision.learningFeatures,
+        schemaVersion: DERIVATIVES_LEARNING_FEATURE_VERSION,
+        baselineModelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+        values,
+      };
+      return rows;
+    };
+    const oldEvents = eventsFor(0, { start: START - 17 * MINUTE });
+    const events = [
+      ...oldEvents,
+      ...Array.from({ length: 320 }, (_, index) => futuresEvents(index)).flat(),
+    ];
+    const trainedAt = events.at(-1).recordedAt + MINUTE;
+    const result = trainOutcomeCandidate(events, { now: trainedAt });
+    expect(result.status).toBe('shadow');
+    expect(result.counts.independentWindows).toBe(320);
+    expect(getVerifiedLearningRows(events, trainedAt).counts.learningExamples).toBe(321);
+    const model = result.artifact;
+    expect(model.featureVersion).toBe(DERIVATIVES_LEARNING_FEATURE_VERSION);
+    expect(model.model.indexes).toHaveLength(42);
+    expect(model.model.coefficients[27]).toBeGreaterThan(0);
+    expect(isOutcomeModelArtifact(model)).toBe(true);
+    expect(isOutcomeModelArtifact({ ...model, featureVersion: LEARNING_FEATURE_VERSION })).toBe(
+      false,
+    );
+    expect(
+      isOutcomeModelArtifact({
+        ...model,
+        applicability: { ...model.applicability, baselineModelVersion: BASE.modelVersion },
+      }),
+    ).toBe(false);
+    expect(isOutcomeModelArtifact(artifact())).toBe(true);
+    const future = Array.from({ length: 120 }, (_, index) => {
+      const rows = futuresEvents(index, trainedAt + MINUTE);
+      rows[0].shadowPrediction = {
+        modelId: model.id,
+        featureCutoffAt: rows[0].capturedAt,
+        aboveProbability: predictOutcomeCandidate(model, rows[0].learningFeatures),
+      };
+      return rows;
+    }).flat();
+    const score = evaluateShadowCandidate(model, future, { now: future.at(-1).recordedAt });
+    expect(score.independentWindows).toBe(120);
+    expect(score.eligibleForPromotion).toBe(true);
+    expect(score.candidate.callAccuracy).toBe(1);
+    const oldModel = artifact();
+    oldModel.activation = {
+      modelId: oldModel.id,
+      activatedAt: START,
+      shadowEvaluation: { eligibleForPromotion: true },
+    };
+    const context = future[0].learningFeatures;
+    const baseline = {
+      ...BASE,
+      modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+      aboveProbability: context.baselineAboveProbability,
+      belowProbability: 1 - context.baselineAboveProbability,
+    };
+    expect(
+      applyOutcomeModel(
+        baseline,
+        {
+          learningFeatures: context,
+          target: context.target,
+          expiresAt: context.expiresAt,
+          now: context.featureCutoffAt,
+        },
+        oldModel,
+      ),
+    ).toBe(baseline);
+  });
   function shadowEvents(model, length = 130) {
     return Array.from({ length }, (_, index) => {
       const rows = eventsFor(index, { start: START + MINUTE });

@@ -8,6 +8,7 @@ export default function MarketData({
   historyAge,
   forecast,
   stream,
+  derivatives,
   conditions,
 }) {
   const flow = stream?.flow?.windows?.[60];
@@ -19,7 +20,12 @@ export default function MarketData({
         <h2 id="market-data-heading" className="section-title mb-0">
           Market data
         </h2>
-        <MarketDiagnostics stream={stream} conditions={conditions} forecast={forecast} />
+        <MarketDiagnostics
+          stream={stream}
+          derivatives={derivatives}
+          conditions={conditions}
+          forecast={forecast}
+        />
       </div>
       <dl className="market-data-grid mb-0">
         <div>
@@ -55,6 +61,22 @@ export default function MarketData({
         <div>
           <dt>Live window volatility</dt>
           <dd>{forecast.available ? formatPercent(forecast.volatility) : '—'}</dd>
+        </div>
+        <div>
+          <dt>Futures 60s buy / sell</dt>
+          <dd>
+            {forecast.derivatives?.available && derivatives?.windows?.[60]?.available
+              ? formatPercent(derivatives.windows[60].imbalance)
+              : 'Gathering'}
+          </dd>
+        </div>
+        <div>
+          <dt>Futures effect on Yes</dt>
+          <dd>
+            {forecast.available && forecast.derivatives?.applied
+              ? `${forecast.derivatives.adjustmentPercentagePoints >= 0 ? '+' : ''}${forecast.derivatives.adjustmentPercentagePoints.toFixed(2)} pp`
+              : 'No adjustment'}
+          </dd>
         </div>
       </dl>
       <p className="data-receipt small text-secondary mb-0">

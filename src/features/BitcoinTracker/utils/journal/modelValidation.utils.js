@@ -4,13 +4,21 @@ import {
   KALSHI_OUTCOME_MODEL_VERSION,
   CALIBRATION_VERSION,
 } from '../learning/model.utils';
-import { LEARNING_FEATURE_VERSION } from '../learning/features.utils';
+import {
+  LEARNING_FEATURE_VERSION,
+  DERIVATIVES_LEARNING_FEATURE_VERSION,
+} from '../learning/features.utils';
+import { isDerivativesForecastMetadata } from '../derivativesForecast.utils';
 import {
   EARLY_MODEL_VERSION,
   EARLY_CALIBRATION_VERSION,
   EARLY_LEARNING_REQUIREMENTS,
 } from '../learning/earlyModel.utils';
-import { KALSHI_MODEL_VERSION, KALSHI_MODEL_PARAMETERS } from '../kalshi/forecast.utils';
+import {
+  KALSHI_MODEL_VERSION,
+  KALSHI_DERIVATIVES_MODEL_VERSION,
+  KALSHI_MODEL_PARAMETERS,
+} from '../kalshi/forecast.utils';
 import {
   isRecord,
   isTimestamp,
@@ -27,7 +35,11 @@ const legacyKalshiModelParameters = Object.freeze({
   maximumBenchmarkAgeMs: 5000,
   minimumProxyBasisLogDeviation: 0.0005,
 });
-const kalshiBaselineVersions = ['kalshi-brti-average-v1', KALSHI_MODEL_VERSION];
+const kalshiBaselineVersions = [
+  'kalshi-brti-average-v1',
+  KALSHI_MODEL_VERSION,
+  KALSHI_DERIVATIVES_MODEL_VERSION,
+];
 const learnedModelVersions = [
   EARLY_MODEL_VERSION,
   'outcome-logistic-v1',
@@ -70,8 +82,14 @@ export function hasValidLearningMetadata(learning, forecast) {
       (forecast.modelVersion === EARLY_MODEL_VERSION
         ? EARLY_CALIBRATION_VERSION
         : CALIBRATION_VERSION) &&
-    learning.featureVersion ===
-      (usesLegacyModel ? 'deadline-reversal-features-v1' : LEARNING_FEATURE_VERSION) &&
+    (usesLegacyModel
+      ? learning.featureVersion === 'deadline-reversal-features-v1'
+      : [LEARNING_FEATURE_VERSION, DERIVATIVES_LEARNING_FEATURE_VERSION].includes(
+          learning.featureVersion,
+        )) &&
+    (learning.featureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION
+      ? hasValidDerivativesMetadata(forecast.derivatives, forecast)
+      : forecast.derivatives == null) &&
     isTimestamp(learning.trainingCutoffAt) &&
     learning.trainingCutoffAt < forecast.createdAt &&
     isProbability(learning.baselineAboveProbability) &&
@@ -79,6 +97,20 @@ export function hasValidLearningMetadata(learning, forecast) {
       Math.abs(learning.aboveProbability - learning.baselineAboveProbability) <=
         EARLY_LEARNING_REQUIREMENTS.maximumProbabilityAdjustment + 1e-9) &&
     learning.aboveProbability === forecast.aboveProbability
+  );
+}
+
+/** Validate captured futures math without replacing or recalculating historical calls. */
+export function hasValidDerivativesMetadata(metadata, forecast) {
+  if (!isDerivativesForecastMetadata(metadata)) return false;
+  return (
+    (metadata.asOf === null ||
+      (metadata.asOf <= forecast.createdAt && forecast.createdAt - metadata.asOf <= 5000)) &&
+    (!metadata.available || metadata.asOf !== null) &&
+    metadata.aboveProbability ===
+      (isLearnedModelVersion(forecast.modelVersion)
+        ? forecast.learning?.baselineAboveProbability
+        : forecast.aboveProbability)
   );
 }
 

@@ -1,6 +1,6 @@
 # Continuous Kalshi research collector
 
-The optional Node process records real KXBTC15M contracts while the browser is closed. It uses Coinbase trades, liquidity and candles as inputs, and official Kalshi results as outcomes. Public inputs need no API key. Entitled BRTI access is optional and configured through the same server environment as the app.
+The optional Node process records real KXBTC15M contracts while the browser is closed. It uses Coinbase trades, liquidity and candles, plus Bybit BTCUSDT perpetual executions and reported liquidations as inputs, and official Kalshi results as outcomes. Public inputs need no API key. Entitled BRTI access is optional and configured through the same server environment as the app.
 
 Use Node 24 and install project dependencies, including development dependencies:
 
@@ -10,6 +10,8 @@ pnpm research:collect
 ```
 
 The launcher loads `.env.local`, then `.env`; existing environment values take precedence. Local storage defaults to `data/bitcoin-research.db`; configured Turso credentials let the collector and hosted app share an archive.
+
+The collector and browser use the same [futures-aware calculation](derivatives.md). Futures data is optional: unavailable or warming inputs retain the existing price/spot-pressure calculation. After updating this code, stop an already-running collector with Ctrl+C and restart it to load the new calculation. Existing saved calls and pending outcomes remain intact.
 
 ## Kalshi API budget
 

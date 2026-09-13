@@ -15,30 +15,34 @@ export default function ForecastPrediction({
   const belowLabel = isKalshi ? 'No · below' : 'Below target';
   const inputCaption = forecast.learning?.applied
     ? `Outcome model ${forecast.learning.modelId}`
-    : forecast.calculationMode === 'baseline-fallback'
-      ? 'Captured without a usable pressure fit'
-      : forecast.calculationMode === 'pressure-adjusted'
-        ? 'Captured with trade pressure'
-        : forecast.pressure
-          ? forecast.pressure.applied
-            ? `Trade pressure ${forecast.pressure.direction === 'buy' ? 'toward Above' : forecast.pressure.direction === 'sell' ? 'toward Below' : 'balanced'}`
-            : 'Baseline estimate · pressure still gathering or unavailable'
-          : null;
+    : forecast.derivatives?.applied
+      ? 'Bybit futures activity changes the estimated Kalshi settlement probability'
+      : forecast.calculationMode === 'baseline-fallback'
+        ? 'Captured without a usable pressure fit'
+        : forecast.calculationMode === 'pressure-adjusted'
+          ? 'Captured with trade pressure'
+          : forecast.pressure
+            ? forecast.pressure.applied
+              ? `Trade pressure ${forecast.pressure.direction === 'buy' ? 'toward Above' : forecast.pressure.direction === 'sell' ? 'toward Below' : 'balanced'}`
+              : 'Baseline estimate · pressure still gathering or unavailable'
+            : null;
   const inputLabel = forecast.learning?.applied
     ? 'Learned model'
-    : forecast.calculationMode
-      ? forecast.calculationMode === 'pressure-adjusted'
-        ? 'Trade pressure'
-        : 'Price only'
-      : forecast.pressure?.applied
-        ? forecast.pressure.direction === 'buy'
-          ? 'Buying pressure'
-          : forecast.pressure.direction === 'sell'
-            ? 'Selling pressure'
-            : 'Balanced pressure'
-        : forecast.pressure
-          ? 'Price only'
-          : null;
+    : forecast.derivatives?.applied
+      ? 'Futures pressure'
+      : forecast.calculationMode
+        ? forecast.calculationMode === 'pressure-adjusted'
+          ? 'Trade pressure'
+          : 'Price only'
+        : forecast.pressure?.applied
+          ? forecast.pressure.direction === 'buy'
+            ? 'Buying pressure'
+            : forecast.pressure.direction === 'sell'
+              ? 'Selling pressure'
+              : 'Balanced pressure'
+          : forecast.pressure
+            ? 'Price only'
+            : null;
 
   return (
     <section aria-label={label} className={compact ? 'live-estimate mt-2' : undefined}>

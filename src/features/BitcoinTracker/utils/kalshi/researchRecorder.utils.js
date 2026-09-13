@@ -9,6 +9,7 @@ import {
 } from './contract.utils';
 import { getKalshiQuoteSnapshot } from './marketQuote.utils';
 import { getKalshiReferenceQuote } from './marketConditions.utils';
+import { hasValidDerivativesMetadata } from '../journal/modelValidation.utils';
 
 export const KALSHI_RESEARCH_COHORT = 'kalshi-background';
 export const KALSHI_RESEARCH_POLICY = 'kalshi-checkpoints-v1';
@@ -69,7 +70,9 @@ export function getValidatedKalshiRecorderState(state, recorderId) {
           typeof entry.modelVersion !== 'string' ||
           !entry.modelVersion ||
           !Number.isFinite(entry.price) ||
-          entry.price <= 0
+          entry.price <= 0 ||
+          (entry.derivatives !== undefined &&
+            !hasValidDerivativesMetadata(entry.derivatives, entry))
         )
           return null;
       } else if (
@@ -220,10 +223,13 @@ export function createKalshiResearchRecorder({ recorderId, state = null }) {
               kalshi: estimate.kalshi ?? null,
               calculationMode: estimate.learning?.applied
                 ? 'outcome-trained'
-                : estimate.pressure?.applied
+                : estimate.pressure?.applied || estimate.derivatives?.applied
                   ? 'pressure-adjusted'
                   : 'baseline-fallback',
               ...(estimate.learning ? { learning: estimate.learning } : {}),
+              // Keep the exact diagnostics with this checkpoint across collector restarts.
+              // Older checkpoints without the feed retain their original absent metadata.
+              ...(estimate.derivatives ? { derivatives: copy(estimate.derivatives) } : {}),
             };
             rows.push(
               evidence('decision', {

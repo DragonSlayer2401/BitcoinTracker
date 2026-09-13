@@ -207,6 +207,16 @@ test('rejects state paths outside the data directory and unknown arguments', () 
 });
 
 function getRuntime(time = start + 240_000) {
+  const futuresStream = {
+    start: jest.fn(),
+    stop: jest.fn(),
+    getSnapshot: jest.fn(() => ({
+      source: 'bybit-linear',
+      symbol: 'BTCUSDT',
+      status: 'warming',
+      asOf: time,
+    })),
+  };
   const stream = {
     start: jest.fn(),
     stop: jest.fn(),
@@ -219,6 +229,7 @@ function getRuntime(time = start + 240_000) {
   };
   return {
     stream,
+    futuresStream,
     arguments: {
       once: true,
       statePath,
@@ -233,6 +244,7 @@ function getRuntime(time = start + 240_000) {
         runLearningCycle: jest.fn().mockResolvedValue({}),
       },
       createStream: () => stream,
+      createFuturesStream: () => futuresStream,
       loadTicker: async () => quote(time),
       loadCandles: async () => [],
       loadMarkets: async () => ({ markets: [marketAt(time)] }),
@@ -261,8 +273,21 @@ test('once mode records only the missed Kalshi checkpoint and closes the stream 
   });
   expect(runtime.stream.start).toHaveBeenCalledTimes(1);
   expect(runtime.stream.stop).toHaveBeenCalledTimes(1);
+  expect(runtime.futuresStream.start).toHaveBeenCalledTimes(1);
+  expect(runtime.futuresStream.stop).toHaveBeenCalledTimes(1);
   expect(runtime.arguments.learningService.runLearningCycle).not.toHaveBeenCalled();
   expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
+});
+
+test('the collector supplies contemporaneous futures inputs to the shared current forecast math', async () => {
+  const runtime = getRuntime(start + 180_000);
+  await runResearchCollector(runtime.arguments);
+  expect(getResearchForecast).toHaveBeenCalledWith(
+    expect.objectContaining({ derivatives: runtime.futuresStream.getSnapshot() }),
+    expect.any(Object),
+    expect.anything(),
+  );
+  expect(runtime.futuresStream.stop).toHaveBeenCalledTimes(1);
 });
 
 test('once mode cannot pass with unavailable market inputs or create fabricated outcomes', async () => {
