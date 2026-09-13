@@ -734,8 +734,25 @@
   }
 
   @media (min-width: 1200px) {
+    .tracker-container {
+      display: flex;
+      flex-direction: column;
+      min-height: 100svh;
+    }
+
+    .tracker-container > .alert {
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+
     .tracker-workspace {
-      min-height: calc(100svh - 66px);
+      flex: 1;
+      min-height: 0;
+    }
+
+    .market-chart {
+      padding-top: 10px;
     }
   }
 
@@ -747,7 +764,6 @@
       margin-bottom: 8px;
     }
     .tracker-workspace {
-      min-height: calc(100svh - 54px);
       gap: 8px;
     }
     .forecast-form {

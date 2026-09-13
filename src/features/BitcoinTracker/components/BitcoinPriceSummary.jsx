@@ -21,7 +21,7 @@ export default function BitcoinPriceSummary({ benchmarkData }) {
         <span className="spot-chip ms-auto">INDEX</span>
       </div>
       <div
-        className={`d-flex align-items-baseline flex-wrap gap-3 ${!isFresh ? 'price-delayed' : ''}`}
+        className={`d-flex align-items-baseline flex-wrap gap-2 ${!isFresh ? 'price-delayed' : ''}`}
       >
         <span className="current-price">{formatPrice(current?.price)}</span>
         {hasPriceChange && (
@@ -30,12 +30,17 @@ export default function BitcoinPriceSummary({ benchmarkData }) {
             {formatPercent(priceChange)} <span className="text-secondary fw-normal">~15m</span>
           </span>
         )}
+        <span className="small text-secondary ms-auto">
+          {current
+            ? `Index reading ${formatTime(current.time)}${!isFresh ? ' · delayed' : ''}`
+            : null}
+        </span>
       </div>
-      <p className="small text-secondary mt-2 mb-0">
-        {current
-          ? `Index reading ${formatTime(current.time)}${!isFresh ? ' · delayed' : ''}`
-          : reason || 'Waiting for CF Benchmarks BRTI readings…'}
-      </p>
+      {!current && (
+        <p className="small text-secondary mt-1 mb-0">
+          {reason || 'Waiting for CF Benchmarks BRTI readings…'}
+        </p>
+      )}
     </section>
   );
 }

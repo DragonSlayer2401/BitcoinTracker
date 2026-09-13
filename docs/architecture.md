@@ -55,6 +55,8 @@ The chart highlights the selected contract's final minute and shows the cumulati
 
 Both views support wheel/pinch zoom, dragging to pan, and keyboard-accessible zoom, pan, and reset buttons. A zoomed window keeps its absolute timestamps as live readings arrive and retains at least one minute. Changing history duration resets zoom; changing line/candle view preserves it. The price scale follows visible observations, and the inspection slider maps only visible points back to their original chart indexes. Empty periods keep the chart and navigation controls available. Zoom operates on already-loaded readings and makes no additional requests.
 
+Zoom controls occupy reserved space inside the chart frame rather than an additional row. The compact readout shows time and price; full candle values and timestamps remain in hover titles, chart tooltips, and accessible descriptions. Desktop panels share the height remaining after the header and any status alerts, with a smaller chart for shorter windows. Mobile content can still scroll normally; no information is clipped to force a fixed page height.
+
 ## Read the calculation in layers
 
 `utils/researchForecast.utils.js` coordinates the calculation. It obtains the pressure baseline, applies the Kalshi settlement model, builds learning features, and applies a compatible active model. A candidate can also produce a separate prospective prediction for evaluation.

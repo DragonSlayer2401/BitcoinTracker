@@ -222,7 +222,7 @@ export function getPriceChartOption({
     option: {
       animation: false,
       backgroundColor: 'transparent',
-      grid: { top: 16, left: 4, right: 84, bottom: 28 },
+      grid: { top: 40, left: 4, right: 84, bottom: 28 },
       dataZoom: [
         {
           id: 'time-zoom',
@@ -236,8 +236,6 @@ export function getPriceChartOption({
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: false,
-          cursorGrab: 'var(--tracker-cursor-chart, grab)',
-          cursorGrabbing: 'grabbing',
           preventDefaultMouseMove: true,
           throttle: 80,
         },

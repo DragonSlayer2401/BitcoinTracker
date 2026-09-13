@@ -1,4 +1,20 @@
 .bitcoin-tracker .market-chart {
+  .chart-navigation {
+    position: absolute;
+    top: 2px;
+    right: 84px;
+    z-index: 1;
+    border: 1px solid var(--tracker-border);
+    border-radius: 5px;
+    background: var(--tracker-panel);
+
+    .btn-chart {
+      min-width: 28px;
+      min-height: 26px;
+      padding: 2px 6px;
+    }
+  }
+
   .price-chart-canvas {
     width: 100%;
     min-width: 0;
@@ -33,6 +49,16 @@
   .chart-point-readout {
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
+  }
+
+  @media (min-width: 1200px) {
+    .chart-empty {
+      min-height: 150px;
+    }
+
+    .price-chart-canvas {
+      height: clamp(150px, 24svh, 210px);
+    }
   }
 
   .legend-area.settlement {

@@ -225,6 +225,9 @@ describe('BRTI price chart', () => {
     expect(slider).toHaveAttribute('aria-valuetext', expect.stringContaining('Partial candle'));
     expect(slider).toHaveAttribute('aria-valuetext', expect.stringContaining('Open $50,200.00'));
     expect(slider).toHaveAttribute('aria-valuetext', expect.stringContaining('close $50,100.00'));
+    const readout = screen.getByRole('status', { name: /Open \$50,200\.00/ });
+    expect(readout).toHaveTextContent('$50,100.00 · Partial candle');
+    expect(readout).toHaveAttribute('title', expect.stringContaining('2/60 BRTI samples'));
     fireEvent.focus(slider);
     expect(mockDispatchAction).toHaveBeenLastCalledWith({
       type: 'showTip',

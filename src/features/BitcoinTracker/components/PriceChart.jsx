@@ -13,7 +13,7 @@ import {
   TooltipComponent,
 } from 'echarts/components';
 import { SVGRenderer } from 'echarts/renderers';
-import { formatCountdown, formatDateTime, formatPrice } from '../utils/format.utils';
+import { formatCountdown, formatDateTime, formatPrice, formatTime } from '../utils/format.utils';
 import { getBenchmarkSettlement } from '../utils/benchmarkChart.utils';
 import { getCandleDescription, getPriceChartOption } from '../utils/priceChart.utils';
 import useBenchmarkChartHistory from '../hooks/useBenchmarkChartHistory';
@@ -166,9 +166,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
             className={`small ${status === 'live' ? 'text-secondary' : 'text-warning'}`}
             title={history.chartData?.reason || undefined}
           >
-            CF Benchmarks ·{' '}
-            {view === 'candles' ? '1m candles from observed readings' : 'Observed index readings'} ·
-            USD ·{' '}
+            CF Benchmarks · {view === 'candles' ? '1m candles' : 'Index readings'} ·{' '}
             {status === 'live' ? 'Live' : status === 'stale' ? 'Stale history' : 'Unavailable'}
           </span>
         </div>
@@ -224,69 +222,70 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
       )}
       {hasData ? (
         <figure className="m-0">
-          <div
-            role="img"
-            aria-label={`Bitcoin BRTI ${view === 'candles' ? 'candles' : 'price'} over the last ${windowMinutes} minutes. Visible range ${formatDateTime(visibleRange.startTime)} to ${formatDateTime(visibleRange.endTime)}. ${description}`}
-            className="price-chart-canvas"
-          >
-            <ReactEChartsCore
-              ref={chartRef}
-              echarts={echarts}
-              option={option}
-              opts={CHART_OPTIONS}
-              className="price-chart-renderer"
-              replaceMerge={REPLACED_CHART_OPTIONS}
-              onEvents={chartEvents}
-            />
-          </div>
-          <div className="d-flex align-items-center justify-content-between flex-wrap gap-1 mb-1">
-            <span className="small text-secondary">Scroll or pinch to zoom · drag to pan</span>
-            <ButtonGroup size="sm" aria-label="Chart zoom and pan">
-              <Button
-                variant="chart"
-                aria-label="Pan earlier"
-                title="Pan earlier"
-                disabled={!isZoomed || visibleRange.startTime <= startTime}
-                onClick={() => changeZoom(1, -0.5)}
-              >
-                ←
-              </Button>
-              <Button
-                variant="chart"
-                aria-label="Zoom out"
-                title="Zoom out"
-                disabled={!isZoomed}
-                onClick={() => changeZoom(2)}
-              >
-                −
-              </Button>
-              <Button
-                variant="chart"
-                aria-label="Zoom in"
-                title="Zoom in"
-                disabled={visibleRange.endTime - visibleRange.startTime <= MINUTE}
-                onClick={() => changeZoom(0.5)}
-              >
-                +
-              </Button>
-              <Button
-                variant="chart"
-                aria-label="Pan later"
-                title="Pan later"
-                disabled={!isZoomed || visibleRange.endTime >= option.xAxis.max}
-                onClick={() => changeZoom(1, 0.5)}
-              >
-                →
-              </Button>
-              <Button
-                variant="chart"
-                aria-label="Reset zoom"
-                disabled={!isZoomed}
-                onClick={() => setZoomRange(null)}
-              >
-                Reset
-              </Button>
-            </ButtonGroup>
+          <div className="price-chart-frame position-relative">
+            <div
+              role="img"
+              aria-label={`Bitcoin BRTI ${view === 'candles' ? 'candles' : 'price'} over the last ${windowMinutes} minutes. Visible range ${formatDateTime(visibleRange.startTime)} to ${formatDateTime(visibleRange.endTime)}. ${description}`}
+              className="price-chart-canvas"
+            >
+              <ReactEChartsCore
+                ref={chartRef}
+                echarts={echarts}
+                option={option}
+                opts={CHART_OPTIONS}
+                className="price-chart-renderer"
+                replaceMerge={REPLACED_CHART_OPTIONS}
+                onEvents={chartEvents}
+              />
+            </div>
+            <div className="chart-navigation" title="Scroll or pinch to zoom · drag to pan">
+              <ButtonGroup size="sm" aria-label="Chart zoom and pan">
+                <Button
+                  variant="chart"
+                  aria-label="Pan earlier"
+                  title="Pan earlier"
+                  disabled={!isZoomed || visibleRange.startTime <= startTime}
+                  onClick={() => changeZoom(1, -0.5)}
+                >
+                  ←
+                </Button>
+                <Button
+                  variant="chart"
+                  aria-label="Zoom out"
+                  title="Zoom out"
+                  disabled={!isZoomed}
+                  onClick={() => changeZoom(2)}
+                >
+                  −
+                </Button>
+                <Button
+                  variant="chart"
+                  aria-label="Zoom in"
+                  title="Zoom in"
+                  disabled={visibleRange.endTime - visibleRange.startTime <= MINUTE}
+                  onClick={() => changeZoom(0.5)}
+                >
+                  +
+                </Button>
+                <Button
+                  variant="chart"
+                  aria-label="Pan later"
+                  title="Pan later"
+                  disabled={!isZoomed || visibleRange.endTime >= option.xAxis.max}
+                  onClick={() => changeZoom(1, 0.5)}
+                >
+                  →
+                </Button>
+                <Button
+                  variant="chart"
+                  aria-label="Reset zoom"
+                  disabled={!isZoomed}
+                  onClick={() => setZoomRange(null)}
+                >
+                  Reset
+                </Button>
+              </ButtonGroup>
+            </div>
           </div>
           {observations.length > 0 ? (
             <div className="chart-inspection d-flex align-items-center gap-2">
@@ -312,8 +311,15 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
                   chartRef.current?.getEchartsInstance()?.dispatchAction({ type: 'hideTip' })
                 }
               />
-              <output className="chart-point-readout" aria-live="off">
-                {pointDescription}
+              <output
+                className="chart-point-readout"
+                aria-live="off"
+                aria-label={pointDescription}
+                title={pointDescription}
+              >
+                {formatTime(inspectedPoint.time)} ·{' '}
+                {formatPrice(view === 'candles' ? inspectedPoint.close : inspectedPoint.price)}
+                {view === 'candles' && inspectedPoint.isPartial ? ' · Partial candle' : ''}
               </output>
             </div>
           ) : (
@@ -332,9 +338,8 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
               </span>
             )}
             {Number.isFinite(deadline) && deadline > startTime && (
-              <span>
-                <i className="legend-area settlement" /> Final minute · ends{' '}
-                {formatDateTime(deadline)}
+              <span title={formatDateTime(deadline)}>
+                <i className="legend-area settlement" /> Final minute · {formatTime(deadline)}
               </span>
             )}
             {hasModelInterval && (
@@ -356,7 +361,8 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
             Hover or tap the chart for exact observed values and timestamps. Use this slider's arrow
             keys to inspect each{' '}
             {view === 'candles' ? 'candle and its observed sample coverage' : 'BRTI reading'}.
-            Missing readings are not filled.
+            Scroll or pinch to zoom, drag to pan, or use the chart zoom and pan buttons. Missing
+            readings are not filled.
           </span>
         </figure>
       ) : (
