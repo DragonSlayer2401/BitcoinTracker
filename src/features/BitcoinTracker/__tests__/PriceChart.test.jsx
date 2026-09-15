@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PriceChart from '../components/PriceChart';
 import {
@@ -8,12 +8,19 @@ import {
   getChartZoomRange,
 } from '../utils/priceChart.utils';
 import { getBenchmarkChartData, getBenchmarkSettlement } from '../utils/benchmarkChart.utils';
-import { formatDateTime, formatPrice } from '../utils/format.utils';
+import { aggregateChartCandles, getChartIndicators } from '../utils/chartIndicators.utils';
+import {
+  DEFAULT_DRAWING_COLOR,
+  readChartDrawings,
+  writeChartDrawings,
+} from '../utils/chartDrawings.utils';
+import { formatDateTime, formatPrice, formatTime } from '../utils/format.utils';
 import { useGetBenchmarkHistoryQuery } from '../../../services/kalshi/benchmarkHistory/benchmarkHistory.api';
 
 let mockChartProps;
 const mockDispatchAction = jest.fn();
 const mockRefetchHistory = jest.fn();
+const mockChartInstance = { dispatchAction: mockDispatchAction };
 
 jest.mock('../../../services/kalshi/benchmarkHistory/benchmarkHistory.api', () => ({
   useGetBenchmarkHistoryQuery: jest.fn(),
@@ -24,14 +31,16 @@ jest.mock('echarts-for-react/lib/core', () => {
   return React.forwardRef(function ChartRenderer(props, ref) {
     mockChartProps = props;
     React.useImperativeHandle(ref, () => ({
-      getEchartsInstance: () => ({ dispatchAction: mockDispatchAction }),
+      getEchartsInstance: () => mockChartInstance,
     }));
+    React.useEffect(() => props.onChartReady?.(mockChartInstance), [props.onChartReady]);
     return <div data-testid="chart-renderer" />;
   });
 });
 jest.mock('echarts/core', () => ({ use: jest.fn() }));
-jest.mock('echarts/charts', () => ({ LineChart: {}, CandlestickChart: {} }));
+jest.mock('echarts/charts', () => ({ LineChart: {}, CandlestickChart: {}, BarChart: {} }));
 jest.mock('echarts/components', () => ({
+  AxisPointerComponent: {},
   DataZoomInsideComponent: {},
   GridComponent: {},
   MarkAreaComponent: {},
@@ -60,6 +69,26 @@ const forecast = {
 const defaults = { benchmarkData, forecast, target: 50_000, now: NOW, deadline: DEADLINE };
 const getSeries = (id) => mockChartProps.option.series.find((series) => series.id === id);
 const getZoom = () => mockChartProps.option.dataZoom.find((item) => item.id === 'time-zoom');
+function openChartTools() {
+  if (!screen.queryByRole('dialog', { name: 'Chart tools' })) {
+    fireEvent.click(screen.getByRole('button', { name: 'Chart tools' }));
+  }
+  return within(screen.getByRole('dialog', { name: 'Chart tools' }));
+}
+function closeChartTools() {
+  const dialog = screen.queryByRole('dialog', { name: 'Chart tools' });
+  if (dialog) fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+}
+function clickChartTool(name) {
+  fireEvent.click(openChartTools().getByRole('button', { name }));
+  closeChartTools();
+}
+function getChartToolState(name) {
+  const control = openChartTools().getByRole('button', { name });
+  const state = { disabled: control.disabled, pressed: control.getAttribute('aria-pressed') };
+  closeChartTools();
+  return state;
+}
 const applyChartGesture = (range) => {
   act(() => {
     mockChartProps.onEvents.datazoom(
@@ -89,6 +118,7 @@ const optionsFor = (overrides = {}) => ({
 });
 
 beforeEach(() => {
+  localStorage.clear();
   mockDispatchAction.mockClear();
   mockRefetchHistory.mockReset();
   useGetBenchmarkHistoryQuery.mockReset();
@@ -109,6 +139,7 @@ describe('BRTI price chart', () => {
         ticker={{ time: NOW, price: 1 }}
       />,
     );
+    clickChartTool('Line');
     expect(screen.getByRole('heading', { name: 'BRTI price activity' })).toBeInTheDocument();
     expect(screen.getByRole('img')).toHaveAccessibleName(/Bitcoin BRTI price/);
     const data = getSeries('observed-price').data;
@@ -129,7 +160,7 @@ describe('BRTI price chart', () => {
     expect(screen.getByRole('img')).toHaveAccessibleName(/12:00 remaining/);
     expect(screen.getByRole('img')).toHaveAccessibleName(/not the recorded prediction/);
     expect(screen.getByRole('img')).toHaveAccessibleName(/settlement-average range/);
-    expect(mockChartProps.option.xAxis.max).toBe(DEADLINE);
+    expect(mockChartProps.option.xAxis[0].max).toBe(DEADLINE);
   });
 
   test('uses a selected deadline more than fifteen minutes away without clamping it', () => {
@@ -141,10 +172,10 @@ describe('BRTI price chart', () => {
         forecast={{ ...forecast, expiresAt: deadline }}
       />,
     );
-    expect(mockChartProps.option.xAxis.max).toBe(deadline);
+    expect(mockChartProps.option.xAxis[0].max).toBe(deadline);
     expect(getSeries('model-range').data.every((point) => point.value[0] === deadline)).toBe(true);
     expect(screen.getByRole('img')).toHaveAccessibleName(/30:00 remaining/);
-    expect(getSeries('observed-price').markArea.data).toEqual([
+    expect(getSeries('observed-candles').markArea.data).toEqual([
       [{ xAxis: deadline - MINUTE }, { xAxis: deadline }],
     ]);
   });
@@ -187,24 +218,25 @@ describe('BRTI price chart', () => {
       { hours: 1, endingAt: 0 },
       expect.objectContaining({ skip: true }),
     );
-    await user.click(screen.getByRole('button', { name: '15m' }));
+    clickChartTool('15m');
     expect(useGetBenchmarkHistoryQuery).toHaveBeenLastCalledWith(
       { hours: 0.25, endingAt: 0 },
       expect.objectContaining({ skip: true }),
     );
-    expect(mockChartProps.option.xAxis.min).toBe(NOW - 15 * MINUTE);
-    expect(mockChartProps.option.xAxis.max).toBe(DEADLINE);
+    expect(mockChartProps.option.xAxis[0].min).toBe(NOW - 15 * MINUTE);
+    expect(mockChartProps.option.xAxis[0].max).toBe(DEADLINE);
     expect(screen.getByRole('img')).toHaveAccessibleName(/last 15 minutes/);
-    await user.click(screen.getByRole('button', { name: '30m' }));
+    clickChartTool('30m');
     expect(useGetBenchmarkHistoryQuery).toHaveBeenLastCalledWith(
       { hours: 0.5, endingAt: 0 },
       expect.objectContaining({ skip: true }),
     );
-    expect(mockChartProps.option.xAxis.min).toBe(NOW - 30 * MINUTE);
-    await user.click(screen.getByRole('button', { name: '1h' }));
-    expect(mockChartProps.option.xAxis.min).toBe(NOW - 60 * MINUTE);
-    expect(screen.getByRole('button', { name: '2h' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '4h' })).toBeInTheDocument();
+    expect(mockChartProps.option.xAxis[0].min).toBe(NOW - 30 * MINUTE);
+    clickChartTool('1h');
+    expect(mockChartProps.option.xAxis[0].min).toBe(NOW - 60 * MINUTE);
+    expect(openChartTools().getByRole('button', { name: '2h' })).toBeInTheDocument();
+    expect(openChartTools().getByRole('button', { name: '4h' })).toBeInTheDocument();
+    closeChartTools();
   });
 
   test('supports line and candle views with OHLC values and observed coverage', async () => {
@@ -214,8 +246,8 @@ describe('BRTI price chart', () => {
       NOW + 2000,
     );
     render(<PriceChart {...defaults} now={NOW + 2000} benchmarkData={partial} />);
-    await user.click(screen.getByRole('button', { name: 'Candles' }));
-    expect(screen.getByRole('button', { name: 'Candles' })).toHaveAttribute('aria-pressed', 'true');
+    clickChartTool('Candles');
+    expect(getChartToolState('Candles').pressed).toBe('true');
     const series = getSeries('observed-candles');
     const candle = partial.candles.at(-1);
     expect(series.data.at(-1).value).toEqual([candle.time, 50_200, 50_100, 50_100, 50_200]);
@@ -240,7 +272,7 @@ describe('BRTI price chart', () => {
       seriesIndex: 0,
       dataIndex: 0,
     });
-    await user.click(screen.getByRole('button', { name: 'Line' }));
+    clickChartTool('Line');
     expect(getSeries('observed-price')).toBeDefined();
     expect(getSeries('observed-candles')).toBeUndefined();
   });
@@ -248,6 +280,7 @@ describe('BRTI price chart', () => {
   test('keyboard inspection skips visual gap markers while opening the correct tooltip', () => {
     const samples = [readings.at(-6), readings.at(-5), readings.at(-1)];
     render(<PriceChart {...defaults} benchmarkData={makeData(samples)} />);
+    clickChartTool('Line');
     const slider = screen.getByRole('slider', { name: 'Inspect historical BRTI readings' });
     expect(slider.max).toBe('2');
     expect(getSeries('observed-price').data[2].value[1]).toBeNull();
@@ -277,6 +310,7 @@ describe('BRTI price chart', () => {
 
   test('preserves an inspected reading when the live index advances', () => {
     const { rerender } = render(<PriceChart {...defaults} />);
+    clickChartTool('Line');
     const slider = screen.getByRole('slider');
     fireEvent.change(slider, { target: { value: '20' } });
     const inspectedValue = slider.getAttribute('aria-valuetext');
@@ -300,6 +334,7 @@ describe('BRTI price chart', () => {
     );
     expect(screen.getByText(/Stale history/)).toBeInTheDocument();
     expect(screen.getByRole('img')).toHaveAccessibleName(/history is not a live quote/);
+    clickChartTool('Line');
     expect(getSeries('observed-price').data.at(-1).value).toEqual([NOW, readings.at(-1).price]);
   });
 
@@ -329,16 +364,401 @@ describe('BRTI price chart', () => {
     expect(screen.getByText(/Official settlement is confirmed separately/)).toHaveTextContent(
       '30/60 samples · Incomplete',
     );
-    expect(getSeries('observed-price').markArea.data).toEqual([
+    expect(getSeries('observed-candles').markArea.data).toEqual([
       [{ xAxis: deadline - MINUTE }, { xAxis: deadline }],
     ]);
   });
 });
 
-describe('BRTI chart zoom and pan', () => {
-  test('supports keyboard zoom, bounded pan, zoom out and reset controls', async () => {
+describe('trading chart inspection and controls', () => {
+  test('keeps display settings and placement in Tools while zoom and Drawings remain directly accessible', async () => {
     const user = userEvent.setup();
     render(<PriceChart {...defaults} />);
+    expect(screen.queryByRole('dialog', { name: 'Chart tools' })).not.toBeInTheDocument();
+    for (const name of ['Candles', 'MACD', 'RSI', 'EMA', '5 minute candles', 'Pin comparison']) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+    expect(screen.getByRole('group', { name: 'Chart zoom and pan' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Manage drawings' })).toHaveTextContent('Drawings');
+    const trigger = screen.getByRole('button', { name: 'Chart tools' });
+    expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await user.click(trigger);
+    const popup = screen.getByRole('dialog', { name: 'Chart tools' });
+    const tools = within(popup);
+    expect(tools.getByRole('group', { name: 'Chart view' })).toBeInTheDocument();
+    expect(tools.getByRole('group', { name: 'Candle interval' })).toBeInTheDocument();
+    expect(tools.getByRole('group', { name: 'Chart history' })).toBeInTheDocument();
+    expect(tools.getByRole('group', { name: 'Chart indicators' })).toBeInTheDocument();
+    expect(tools.queryByRole('group', { name: 'Chart zoom and pan' })).not.toBeInTheDocument();
+    expect(tools.getByRole('group', { name: 'Chart drawing tools' })).toBeInTheDocument();
+    expect(tools.queryByRole('list', { name: 'Saved chart drawings' })).not.toBeInTheDocument();
+    expect(tools.queryByRole('button', { name: /Clear all drawings/ })).not.toBeInTheDocument();
+    expect(tools.queryByRole('button', { name: 'Manage drawings' })).not.toBeInTheDocument();
+    await user.click(tools.getByRole('button', { name: '5 minute candles' }));
+    await user.click(tools.getByRole('button', { name: 'EMA' }));
+    expect(popup).toBeInTheDocument();
+    expect(tools.getByRole('button', { name: '5 minute candles' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await user.click(tools.getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('dialog', { name: 'Chart tools' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'EMA' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeEnabled();
+    expect(screen.getByRole('img')).toBeInTheDocument();
+    expect(screen.getByRole('slider', { name: 'Inspect BRTI candles' })).toBeInTheDocument();
+    expect(getSeries('ema9')).toBeDefined();
+    expect(getSeries('observed-candles').data.at(-1).candle.expectedSampleCount).toBe(300);
+    await user.click(screen.getByRole('button', { name: 'Chart tools' }));
+    const reopened = within(screen.getByRole('dialog', { name: 'Chart tools' }));
+    expect(reopened.getByRole('button', { name: '5 minute candles' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(reopened.getByRole('button', { name: 'EMA' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(reopened.getByRole('button', { name: 'Done' }));
+  });
+
+  test('the separate Drawings manager deletes one saved line and persists clear-all without affecting chart settings', async () => {
+    const user = userEvent.setup();
+    const support = {
+      id: 'chart-support',
+      type: 'horizontal',
+      label: 'Support',
+      color: DEFAULT_DRAWING_COLOR,
+      price: 50_020,
+    };
+    const deadline = {
+      id: 'chart-deadline',
+      type: 'vertical',
+      label: 'Deadline',
+      color: '#f4c56a',
+      time: DEADLINE,
+    };
+    expect(writeChartDrawings([support, deadline])).toBeNull();
+    const first = render(<PriceChart {...defaults} />);
+    clickChartTool('3 minute candles');
+    const selectedRange = { startValue: NOW - 20 * MINUTE, endValue: NOW - 5 * MINUTE };
+    applyChartGesture(selectedRange);
+    await user.click(screen.getByRole('button', { name: 'Manage drawings' }));
+    const manager = within(screen.getByRole('dialog', { name: 'Chart drawings' }));
+    expect(screen.queryByRole('dialog', { name: 'Chart tools' })).not.toBeInTheDocument();
+    expect(manager.queryByRole('group', { name: 'Chart drawing tools' })).not.toBeInTheDocument();
+    expect(manager.queryByRole('group', { name: 'Chart indicators' })).not.toBeInTheDocument();
+    expect(manager.getByRole('list', { name: 'Saved chart drawings' })).toBeInTheDocument();
+    await user.click(manager.getByRole('button', { name: 'Delete Support' }));
+    expect(manager.queryByRole('button', { name: 'Delete Support' })).not.toBeInTheDocument();
+    expect(manager.getByRole('button', { name: 'Delete Deadline' })).toBeInTheDocument();
+    expect(readChartDrawings().drawings).toEqual([deadline]);
+    await user.click(manager.getByRole('button', { name: 'Done' }));
+    expect(getZoom()).toMatchObject(selectedRange);
+    expect(getChartToolState('3 minute candles').pressed).toBe('true');
+    expect(
+      getSeries('observed-candles').markLine.data.some((mark) => mark.name === 'Support'),
+    ).toBe(false);
+    first.unmount();
+
+    const restored = render(<PriceChart {...defaults} />);
+    await user.click(screen.getByRole('button', { name: 'Manage drawings' }));
+    const reopened = within(screen.getByRole('dialog', { name: 'Chart drawings' }));
+    expect(reopened.queryByRole('button', { name: 'Delete Support' })).not.toBeInTheDocument();
+    expect(reopened.getByRole('button', { name: 'Delete Deadline' })).toBeInTheDocument();
+    await user.click(reopened.getByRole('button', { name: 'Clear all drawings' }));
+    expect(reopened.queryByRole('list', { name: 'Saved chart drawings' })).not.toBeInTheDocument();
+    expect(readChartDrawings().drawings).toEqual([]);
+    expect(reopened.getByRole('button', { name: 'Clear all drawings' })).toBeDisabled();
+    await user.click(reopened.getByRole('button', { name: 'Done' }));
+    restored.unmount();
+
+    render(<PriceChart {...defaults} />);
+    await user.click(screen.getByRole('button', { name: 'Manage drawings' }));
+    const cleared = within(screen.getByRole('dialog', { name: 'Chart drawings' }));
+    expect(cleared.queryByRole('list', { name: 'Saved chart drawings' })).not.toBeInTheDocument();
+    expect(cleared.getByRole('button', { name: 'Clear all drawings' })).toBeDisabled();
+    expect(readChartDrawings().drawings).toEqual([]);
+  });
+
+  test.each([
+    ['Draw horizontal price line', 'Click the price chart to place a horizontal line.'],
+    ['Draw vertical time line', 'Click the price chart to place a vertical line.'],
+    ['Draw trend line', 'Click two points for a trend line.'],
+  ])(
+    'choosing %s closes Tools so the chart is available for placement',
+    async (name, instruction) => {
+      const user = userEvent.setup();
+      render(<PriceChart {...defaults} />);
+      await user.click(screen.getByRole('button', { name: 'Chart tools' }));
+      const tools = within(screen.getByRole('dialog', { name: 'Chart tools' }));
+      await user.click(tools.getByRole('button', { name }));
+      expect(screen.queryByRole('dialog', { name: 'Chart tools' })).not.toBeInTheDocument();
+      expect(screen.getByText(instruction, { exact: false })).toBeInTheDocument();
+      expect(screen.getByRole('img')).toBeInTheDocument();
+      expect(mockChartProps.option.dataZoom[0].disabled).toBe(true);
+      await user.click(screen.getByRole('button', { name: 'Cancel drawing' }));
+      expect(screen.queryByRole('button', { name: 'Cancel drawing' })).not.toBeInTheDocument();
+      expect(mockChartProps.option.dataZoom[0].disabled).toBe(false);
+    },
+  );
+
+  test('Line inspection uses only indicator closes available by the inspected second', async () => {
+    const user = userEvent.setup();
+    const accelerating = readings.map((reading, index) => ({
+      ...reading,
+      price: 50_000 + Math.floor(index / 60) ** 2,
+    }));
+    const data = makeData(accelerating);
+    const completed = aggregateChartCandles(data.candles, 1, NOW);
+    const indicatorPoints = getChartIndicators(completed).points;
+    const closedAt = NOW - 20 * MINUTE;
+    const inspectedAt = closedAt + 10_000;
+    const previous = indicatorPoints.find((point) => point.time === closedAt - MINUTE);
+    const later = indicatorPoints.find((point) => point.time === closedAt);
+    const macdText = (point) =>
+      `MACD ${point.macd.toFixed(2)} / ${point.signal.toFixed(2)} / ${point.histogram.toFixed(2)}`;
+    expect(macdText(previous)).not.toBe(macdText(later));
+    render(<PriceChart {...defaults} benchmarkData={data} />);
+    clickChartTool('Line');
+    clickChartTool('EMA');
+    act(() =>
+      mockChartProps.onEvents.updateAxisPointer({
+        axesInfo: [{ axisDim: 'x', value: inspectedAt }],
+      }),
+    );
+    const readout = screen.getByLabelText('Indicator values at inspected candle');
+    expect(readout).toHaveTextContent(`Close ${formatTime(closedAt)}`);
+    expect(within(readout).getByText(`Close ${formatTime(closedAt)}`)).toHaveAttribute(
+      'title',
+      formatDateTime(closedAt),
+    );
+    const macdPanel = screen.getByRole('region', { name: 'MACD (12, 26, 9)' });
+    expect(macdPanel).toHaveTextContent(macdText(previous));
+    expect(macdPanel).not.toHaveTextContent(macdText(later));
+    expect(readout).toHaveTextContent(
+      `EMA 9/21 ${previous.ema9.toFixed(2)} / ${previous.ema21.toFixed(2)}`,
+    );
+    const observedPrice = accelerating.find((reading) => reading.time === inspectedAt).price;
+    expect(
+      screen.getByRole('status', {
+        name: `${formatDateTime(inspectedAt)} · ${formatPrice(observedPrice)} · CF Benchmarks BRTI`,
+      }),
+    ).toHaveTextContent(formatPrice(observedPrice));
+    act(() =>
+      mockChartProps.onEvents.updateAxisPointer({
+        axesInfo: [{ axisDim: 'x', value: closedAt + MINUTE }],
+      }),
+    );
+    expect(macdPanel).toHaveTextContent(macdText(later));
+    expect(readout).toHaveTextContent(`Close ${formatTime(closedAt + MINUTE)}`);
+  });
+
+  test('an interval with insufficient complete candles shows unavailable values and an explicit warm-up message', async () => {
+    const user = userEvent.setup();
+    render(<PriceChart {...defaults} />);
+    clickChartTool('15 minute candles');
+    const readout = screen.getByLabelText('Indicator values at inspected candle');
+    expect(getSeries('observed-candles').data).toHaveLength(4);
+    expect(getSeries('observed-candles').data.every((point) => point.candle.isComplete)).toBe(true);
+    expect(screen.getByRole('region', { name: 'MACD (12, 26, 9)' })).toHaveTextContent(
+      'MACD — / — / —',
+    );
+    expect(screen.getByRole('region', { name: 'RSI (14)' })).toHaveTextContent('RSI 14 —');
+    expect(readout).toHaveTextContent('Warming up · complete candles required');
+    expect(getSeries('macd').data.every((point) => point.value[1] === null)).toBe(true);
+    expect(getSeries('rsi').data.every((point) => point.value[1] === null)).toBe(true);
+    clickChartTool('MACD');
+    clickChartTool('RSI');
+    expect(screen.queryByText('Warming up · complete candles required')).not.toBeInTheDocument();
+  });
+
+  test('defaults to candles with MACD and RSI panes without a floating tooltip', () => {
+    render(<PriceChart {...defaults} />);
+    expect(getChartToolState('Candles').pressed).toBe('true');
+    expect(getChartToolState('MACD').pressed).toBe('true');
+    expect(getChartToolState('RSI').pressed).toBe('true');
+    expect(getChartToolState('EMA').pressed).toBe('false');
+    expect(getSeries('observed-candles')).toBeDefined();
+    expect(getSeries('macd-histogram')).toBeDefined();
+    expect(getSeries('rsi')).toBeDefined();
+    expect(getSeries('observed-price')).toBeUndefined();
+    expect(mockChartProps.option.grid).toHaveLength(3);
+    expect(mockChartProps.option.tooltip).toMatchObject({
+      showContent: false,
+      axisPointer: { type: 'cross' },
+    });
+    const macdPanel = screen.getByRole('region', { name: 'MACD (12, 26, 9)' });
+    const rsiPanel = screen.getByRole('region', { name: 'RSI (14)' });
+    expect(
+      within(macdPanel).getByRole('heading', { name: 'MACD (12, 26, 9)' }),
+    ).toBeInTheDocument();
+    expect(within(rsiPanel).getByRole('heading', { name: 'RSI (14)' })).toBeInTheDocument();
+    expect(macdPanel).toHaveTextContent('MACD 0.00 / 0.00 / 0.00');
+    expect(rsiPanel).toHaveTextContent('RSI 14 50.00');
+    expect(macdPanel).not.toHaveTextContent('RSI 14');
+    expect(rsiPanel).not.toHaveTextContent('MACD');
+  });
+
+  test('crosshair movement updates the docked OHLC readout from any pane and leaves future gaps empty', () => {
+    render(<PriceChart {...defaults} />);
+    const candle = getSeries('observed-candles').data[10].candle;
+    act(() =>
+      mockChartProps.onEvents.updateAxisPointer({
+        axesInfo: [
+          { axisDim: 'y', axisIndex: 1, value: 5 },
+          { axisDim: 'x', axisIndex: 1, value: candle.time },
+        ],
+      }),
+    );
+    const readout = screen.getByRole('status', { name: /Open/ });
+    expect(readout).toHaveAttribute('title', expect.stringContaining(formatDateTime(candle.time)));
+    expect(readout).toHaveTextContent(`O ${formatPrice(candle.open)}`);
+    expect(readout).toHaveTextContent(`H ${formatPrice(candle.high)}`);
+    expect(readout).toHaveTextContent(`L ${formatPrice(candle.low)}`);
+    expect(readout).toHaveTextContent(`C ${formatPrice(candle.close)}`);
+    expect(screen.getByRole('slider')).toHaveAttribute(
+      'aria-valuetext',
+      readout.getAttribute('title'),
+    );
+    act(() =>
+      mockChartProps.onEvents.updateAxisPointer({
+        axesInfo: [{ axisDim: 'x', value: NOW + 5 * MINUTE }],
+      }),
+    );
+    expect(
+      screen.getByRole('status', { name: 'No observed reading at the crosshair.' }),
+    ).toBeInTheDocument();
+    expect(getChartToolState('Pin comparison').disabled).toBe(true);
+    expect(mockChartProps.option.tooltip.showContent).toBe(false);
+  });
+
+  test('pins an observation for comparison while inspecting a different candle and clears the pin explicitly', async () => {
+    const user = userEvent.setup();
+    const rising = readings.map((point, index) => ({ ...point, price: 50_000 + index }));
+    render(<PriceChart {...defaults} benchmarkData={makeData(rising)} />);
+    const original = getSeries('observed-candles').data[10].candle;
+    const compared = getSeries('observed-candles').data[20].candle;
+    const slider = screen.getByRole('slider', { name: 'Inspect BRTI candles' });
+    fireEvent.change(slider, { target: { value: '10' } });
+    await user.click(screen.getByRole('button', { name: 'Chart tools' }));
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Chart tools' })).getByRole('button', {
+        name: 'Pin comparison',
+      }),
+    );
+    expect(screen.queryByRole('dialog', { name: 'Chart tools' })).not.toBeInTheDocument();
+    fireEvent.change(slider, { target: { value: '20' } });
+    const comparison = screen.getByRole('status', { name: 'Pinned candle comparison' });
+    expect(comparison).toHaveTextContent(formatPrice(original.close));
+    expect(comparison).toHaveTextContent(`Δ +${formatPrice(compared.close - original.close)}`);
+    for (const id of ['observed-candles', 'macd-histogram', 'rsi']) {
+      expect(getSeries(id).markLine.data).toContainEqual(
+        expect.objectContaining({ name: 'Comparison', xAxis: original.time }),
+      );
+    }
+    clickChartTool('Clear comparison');
+    expect(
+      screen.queryByRole('status', { name: 'Pinned candle comparison' }),
+    ).not.toBeInTheDocument();
+    expect(
+      getSeries('observed-candles').markLine.data.some((mark) => mark.name === 'Comparison'),
+    ).toBe(false);
+    expect(getChartToolState('Pin comparison').pressed).toBe('false');
+  });
+
+  test('changes the candle interval with actual aggregated sample coverage and retains the selected zoom', async () => {
+    const user = userEvent.setup();
+    render(<PriceChart {...defaults} />);
+    const originalCount = getSeries('observed-candles').data.length;
+    const selectedRange = { startValue: NOW - 20 * MINUTE, endValue: NOW - 5 * MINUTE };
+    applyChartGesture(selectedRange);
+    clickChartTool('5 minute candles');
+    expect(getChartToolState('5 minute candles').pressed).toBe('true');
+    const aggregated = getSeries('observed-candles').data;
+    expect(aggregated.length).toBeLessThan(originalCount);
+    expect(aggregated.at(-1).candle.expectedSampleCount).toBe(300);
+    expect(aggregated.at(-1).candle.endTime - aggregated.at(-1).candle.time).toBe(5 * MINUTE);
+    expect(getZoom()).toMatchObject(selectedRange);
+    expect(screen.getByRole('slider')).toHaveAttribute(
+      'aria-valuetext',
+      expect.stringContaining('/300 BRTI samples'),
+    );
+    clickChartTool('1 minute candles');
+    expect(getSeries('observed-candles').data).toHaveLength(originalCount);
+    expect(getZoom()).toMatchObject(selectedRange);
+  });
+
+  test('toggles each indicator without replacing observations, changing the deadline or resetting zoom', async () => {
+    const user = userEvent.setup();
+    render(<PriceChart {...defaults} />);
+    const original = getSeries('observed-candles').data;
+    const selectedRange = { startValue: NOW - 20 * MINUTE, endValue: NOW - 5 * MINUTE };
+    applyChartGesture(selectedRange);
+    clickChartTool('MACD');
+    expect(getSeries('macd')).toBeUndefined();
+    expect(screen.queryByRole('region', { name: 'MACD (12, 26, 9)' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'RSI (14)' })).toBeInTheDocument();
+    expect(getSeries('rsi').xAxisIndex).toBe(1);
+    expect(mockChartProps.option.grid).toHaveLength(2);
+    clickChartTool('RSI');
+    expect(getSeries('rsi')).toBeUndefined();
+    expect(screen.queryByRole('region', { name: 'RSI (14)' })).not.toBeInTheDocument();
+    expect(mockChartProps.option.grid).toHaveLength(1);
+    clickChartTool('EMA');
+    expect(getSeries('ema9')).toBeDefined();
+    expect(getSeries('ema21')).toBeDefined();
+    expect(getChartToolState('EMA').pressed).toBe('true');
+    expect(getSeries('observed-candles').data).toEqual(original);
+    expect(mockChartProps.option.xAxis[0].max).toBe(DEADLINE);
+    expect(getZoom()).toMatchObject(selectedRange);
+    clickChartTool('MACD');
+    expect(getSeries('macd')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'MACD (12, 26, 9)' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'RSI (14)' })).not.toBeInTheDocument();
+    expect(mockChartProps.option.grid).toHaveLength(2);
+  });
+
+  test('expanded view keeps the selected interval, indicators, zoom and pinned observation when restored', async () => {
+    const user = userEvent.setup();
+    render(<PriceChart {...defaults} />);
+    clickChartTool('3 minute candles');
+    clickChartTool('RSI');
+    clickChartTool('EMA');
+    const selectedRange = { startValue: NOW - 20 * MINUTE, endValue: NOW - 5 * MINUTE };
+    applyChartGesture(selectedRange);
+    clickChartTool('Pin comparison');
+    const pinned = screen.getByRole('status', { name: 'Pinned candle comparison' }).textContent;
+    await user.click(screen.getByRole('button', { name: 'Expand chart' }));
+    const dialog = screen.getByRole('dialog', { name: 'BRTI price activity' });
+    expect(within(dialog).getByRole('button', { name: 'Manage drawings' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('group', { name: 'Chart zoom and pan' })).toBeInTheDocument();
+    expect(getChartToolState('3 minute candles').pressed).toBe('true');
+    expect(getChartToolState('RSI').pressed).toBe('false');
+    expect(getChartToolState('EMA').pressed).toBe('true');
+    expect(getZoom()).toMatchObject(selectedRange);
+    expect(screen.getAllByTestId('chart-renderer')).toHaveLength(1);
+    expect(
+      within(dialog).getByRole('status', { name: 'Pinned candle comparison' }),
+    ).toHaveTextContent(pinned);
+    await user.click(within(dialog).getByRole('button', { name: 'Restore chart' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Expand chart' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Expand chart' })).toHaveFocus();
+    expect(getChartToolState('3 minute candles').pressed).toBe('true');
+    expect(getZoom()).toMatchObject(selectedRange);
+    expect(screen.getByRole('status', { name: 'Pinned candle comparison' })).toHaveTextContent(
+      pinned,
+    );
+    expect(getSeries('ema9')).toBeDefined();
+    expect(getSeries('rsi')).toBeUndefined();
+  });
+});
+
+describe('BRTI chart zoom and pan', () => {
+  test('supports keyboard zoom, bounded pan, zoom out and reset without opening Tools', async () => {
+    const user = userEvent.setup();
+    render(<PriceChart {...defaults} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     const zoomIn = screen.getByRole('button', { name: 'Zoom in' });
     const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
     const earlier = screen.getByRole('button', { name: 'Pan earlier' });
@@ -353,9 +773,6 @@ describe('BRTI chart zoom and pan', () => {
       startValue: NOW - 42 * MINUTE,
       endValue: NOW - 6 * MINUTE,
     });
-    expect(screen.getByRole('img')).toHaveAccessibleName(
-      expect.stringContaining(formatDateTime(NOW - 42 * MINUTE)),
-    );
     await user.click(earlier);
     expect(getZoom()).toMatchObject({
       startValue: NOW - 60 * MINUTE,
@@ -373,9 +790,14 @@ describe('BRTI chart zoom and pan', () => {
     expect(getZoom()).toMatchObject({ startValue: NOW - 60 * MINUTE, endValue: DEADLINE });
     expect(reset).toBeDisabled();
     await user.click(zoomIn);
+    expect(getZoom().endValue - getZoom().startValue).toBe(36 * MINUTE);
     await user.click(reset);
     expect(getZoom()).toMatchObject({ startValue: NOW - 60 * MINUTE, endValue: DEADLINE });
     expect(reset).toBeDisabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('img')).toHaveAccessibleName(
+      expect.stringContaining(formatDateTime(NOW - 60 * MINUTE)),
+    );
   });
 
   test('stops zooming in at a one-minute view', async () => {
@@ -388,10 +810,12 @@ describe('BRTI chart zoom and pan', () => {
     await user.click(screen.getByRole('button', { name: 'Zoom out' }));
     expect(getZoom().endValue - getZoom().startValue).toBe(2 * MINUTE);
     expect(zoomIn).toBeEnabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   test('uses gesture timestamps from the matching chart control and retains them during live updates', () => {
     const { rerender } = render(<PriceChart {...defaults} />);
+    clickChartTool('Line');
     const selectedRange = { startValue: NOW - 20 * MINUTE, endValue: NOW - 10 * MINUTE };
     applyChartGesture(selectedRange);
     expect(getZoom()).toMatchObject(selectedRange);
@@ -447,9 +871,10 @@ describe('BRTI chart zoom and pan', () => {
   test('preserves zoom across chart views and resets it for a different history duration', async () => {
     const user = userEvent.setup();
     render(<PriceChart {...defaults} />);
+    clickChartTool('Line');
     const selectedRange = { startValue: NOW - 20 * MINUTE, endValue: NOW - 10 * MINUTE };
     applyChartGesture(selectedRange);
-    await user.click(screen.getByRole('button', { name: 'Candles' }));
+    clickChartTool('Candles');
     expect(getZoom()).toMatchObject(selectedRange);
     const slider = screen.getByRole('slider', { name: 'Inspect BRTI candles' });
     expect(slider.max).toBe('10');
@@ -462,9 +887,9 @@ describe('BRTI chart zoom and pan', () => {
       seriesIndex: 0,
       dataIndex: firstVisibleCandleIndex,
     });
-    await user.click(screen.getByRole('button', { name: 'Line' }));
+    clickChartTool('Line');
     expect(getZoom()).toMatchObject(selectedRange);
-    await user.click(screen.getByRole('button', { name: '2h' }));
+    clickChartTool('2h');
     expect(getZoom()).toMatchObject({ startValue: NOW - 120 * MINUTE, endValue: DEADLINE });
     expect(screen.getByRole('button', { name: 'Reset zoom' })).toBeDisabled();
   });
@@ -478,6 +903,7 @@ describe('BRTI chart zoom and pan', () => {
       { time: NOW, price: 50_200 },
     ];
     render(<PriceChart {...defaults} benchmarkData={makeData(samples)} />);
+    clickChartTool('Line');
     applyChartGesture({ startValue: NOW - 2 * MINUTE, endValue: NOW - MINUTE });
     const slider = screen.getByRole('slider', { name: 'Inspect historical BRTI readings' });
     expect(slider.max).toBe('2');
@@ -570,12 +996,12 @@ describe('chart zoom ranges and price scale', () => {
       ...options,
       zoomRange: { startTime: NOW - 20 * MINUTE, endTime: NOW - 19 * MINUTE },
     }).option;
-    expect(full.yAxis.min).toBeLessThan(20_000);
-    expect(full.yAxis.max).toBeGreaterThan(150_000);
-    expect(zoomed.yAxis.min).toBeGreaterThan(49_900);
-    expect(zoomed.yAxis.min).toBeLessThan(49_990);
-    expect(zoomed.yAxis.max).toBeGreaterThan(50_010);
-    expect(zoomed.yAxis.max).toBeLessThan(50_100);
+    expect(full.yAxis[0].min).toBeLessThan(20_000);
+    expect(full.yAxis[0].max).toBeGreaterThan(150_000);
+    expect(zoomed.yAxis[0].min).toBeGreaterThan(49_900);
+    expect(zoomed.yAxis[0].min).toBeLessThan(49_990);
+    expect(zoomed.yAxis[0].max).toBeGreaterThan(50_010);
+    expect(zoomed.yAxis[0].max).toBeLessThan(50_100);
     expect(zoomed.series[0].data).toEqual(full.series[0].data);
   });
 
@@ -597,10 +1023,10 @@ describe('chart zoom ranges and price scale', () => {
         settlement: { points: [{ time: NOW, price: 53_000 }] },
       }),
     );
-    expect(result.option.yAxis.min).toBeLessThan(48_000);
-    expect(result.option.yAxis.min).toBeGreaterThan(40_000);
-    expect(result.option.yAxis.max).toBeGreaterThan(53_000);
-    expect(result.option.yAxis.max).toBeLessThan(60_000);
+    expect(result.option.yAxis[0].min).toBeLessThan(48_000);
+    expect(result.option.yAxis[0].min).toBeGreaterThan(40_000);
+    expect(result.option.yAxis[0].max).toBeGreaterThan(53_000);
+    expect(result.option.yAxis[0].max).toBeLessThan(60_000);
   });
 });
 
@@ -627,15 +1053,16 @@ describe('extended BRTI chart history', () => {
         historyResult([...historical, { time: NOW, price: 1 }]),
       );
       render(<PriceChart {...defaults} />);
+      clickChartTool('Line');
       expect(getSeries('observed-price').data[0].value[0]).toBe(readings[0].time);
 
-      await user.click(screen.getByRole('button', { name: `${hours}h` }));
+      clickChartTool(`${hours}h`);
       expect(useGetBenchmarkHistoryQuery).toHaveBeenLastCalledWith(
         { hours, endingAt: NOW },
         expect.objectContaining({ skip: false }),
       );
-      expect(mockChartProps.option.xAxis.min).toBe(NOW - hours * 60 * MINUTE);
-      expect(mockChartProps.option.xAxis.max).toBe(DEADLINE);
+      expect(mockChartProps.option.xAxis[0].min).toBe(NOW - hours * 60 * MINUTE);
+      expect(mockChartProps.option.xAxis[0].max).toBe(DEADLINE);
       expect(screen.getByRole('img')).toHaveAccessibleName(
         new RegExp(`last ${hours * 60} minutes`),
       );
@@ -654,7 +1081,7 @@ describe('extended BRTI chart history', () => {
         expect.stringContaining('$49,900.00'),
       );
 
-      await user.click(screen.getByRole('button', { name: 'Candles' }));
+      clickChartTool('Candles');
       const olderCandle = getSeries('observed-candles').data[0];
       expect(olderCandle.value).toEqual([minuteStart, 49_900, 49_800, 49_800, 50_050]);
       expect(olderCandle.candle).toMatchObject({
@@ -670,13 +1097,14 @@ describe('extended BRTI chart history', () => {
   test('preserves live readings while older history loads or partially fails and supports retry', async () => {
     const user = userEvent.setup();
     const { rerender } = render(<PriceChart {...defaults} />);
+    clickChartTool('Line');
     useGetBenchmarkHistoryQuery.mockReturnValue(
       historyResult([], {
         currentData: undefined,
         isFetching: true,
       }),
     );
-    await user.click(screen.getByRole('button', { name: '2h' }));
+    clickChartTool('2h');
     expect(screen.getByText('Loading older BRTI history…')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry history' })).not.toBeInTheDocument();
     expect(getSeries('observed-price').data.at(-1).value).toEqual([NOW, readings.at(-1).price]);
@@ -709,16 +1137,17 @@ describe('extended BRTI chart history', () => {
       }),
     );
     render(<PriceChart {...defaults} />);
+    clickChartTool('Line');
     expect(screen.queryByText(/Older BRTI history is unavailable/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '4h' }));
+    clickChartTool('4h');
     expect(
       screen.getByText('Older BRTI history is unavailable. Existing readings remain visible.'),
     ).toBeInTheDocument();
     expect(getSeries('observed-price').data.map((point) => point.value)).toEqual(
       readings.map((point) => [point.time, point.price]),
     );
-    expect(mockChartProps.option.xAxis.max).toBe(DEADLINE);
-    await user.click(screen.getByRole('button', { name: '1h' }));
+    expect(mockChartProps.option.xAxis[0].max).toBe(DEADLINE);
+    clickChartTool('1h');
     expect(screen.queryByRole('button', { name: 'Retry history' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Older BRTI history is unavailable/)).not.toBeInTheDocument();
   });
@@ -729,7 +1158,8 @@ describe('extended BRTI chart history', () => {
     const previousData = { samples: [older], status: 'available', reason: null };
     useGetBenchmarkHistoryQuery.mockReturnValue(historyResult([], { currentData: previousData }));
     render(<PriceChart {...defaults} />);
-    await user.click(screen.getByRole('button', { name: '2h' }));
+    clickChartTool('Line');
+    clickChartTool('2h');
     expect(getSeries('observed-price').data[0].value).toEqual([older.time, older.price]);
 
     useGetBenchmarkHistoryQuery.mockReturnValue(
@@ -739,7 +1169,7 @@ describe('extended BRTI chart history', () => {
         isFetching: true,
       }),
     );
-    await user.click(screen.getByRole('button', { name: '4h' }));
+    clickChartTool('4h');
     expect(useGetBenchmarkHistoryQuery).toHaveBeenLastCalledWith(
       { hours: 4, endingAt: NOW },
       expect.objectContaining({ skip: false }),
@@ -751,7 +1181,7 @@ describe('extended BRTI chart history', () => {
   test('requests the new completed hour only when the clock crosses its boundary', async () => {
     const user = userEvent.setup();
     const { rerender } = render(<PriceChart {...defaults} now={NOW + 1000} />);
-    await user.click(screen.getByRole('button', { name: '2h' }));
+    clickChartTool('2h');
     expect(useGetBenchmarkHistoryQuery).toHaveBeenLastCalledWith(
       { hours: 2, endingAt: NOW },
       expect.objectContaining({ skip: false }),
@@ -843,6 +1273,6 @@ describe('chart data and tooltips', () => {
     expect(second.option.series[0].markLine.data).toContainEqual(
       expect.objectContaining({ yAxis: 51_000 }),
     );
-    expect(second.option.yAxis.max).toBeGreaterThan(51_000);
+    expect(second.option.yAxis[0].max).toBeGreaterThan(51_000);
   });
 });

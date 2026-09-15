@@ -24,11 +24,15 @@ Open [localhost:3000](http://localhost:3000). On Windows, if Turbopack cannot sp
 - Shows the estimated chance that a fixed call loses, plus current buying/selling pressure and market conditions.
 - Models the final-minute average, including already observed benchmark readings and uncertainty in missing readings.
 - Uses the full hour of BRTI history for responsive index volatility and movement features when complete; Coinbase trades remain an optional pressure input. Healthy native BRTI estimates continue through Coinbase outages.
+- Provides a trading-style BRTI chart with line or 1/3/5/15-minute candles, separately headed MACD and RSI panels with their own readouts, optional EMA overlays, pinned price comparisons, and an expanded view. **Tools** opens display settings, comparisons, and drawing placement; zoom and pan stay directly accessible beside the chart.
+- Saves horizontal, vertical, and trend drawings in this browser. The separate **Drawings** button opens exact price/time editing, individual deletion, **Clear all drawings**, and undo. Drawings and chart indicators are visual tools; they do not change live estimates, fixed calls, or model training.
 - Scores forecasts only against the official finalized Kalshi result, retrying after reconnecting or reloading.
 - Records real contracts at 12/9/6/3/1 minutes remaining for chronological evaluation and guarded outcome learning.
 - Compares settlement-only, spot-only, futures-only and combined predictions on identical captured inputs; the continuous collector also checks replay and records future BRTI labels.
 
 Coinbase candles, executed trades and order-book data remain market inputs. Their source is explicitly labeled. The old Coinbase forecast mode, custom targets, custom scheduling controls, and legacy research recorder have been retired.
+
+Chart indicators need enough complete, consecutive candles to initialize. Gaps and partial candles reset that history; missing values remain blank. Periods count candles, so some indicators cannot initialize at longer intervals within the available four-hour history. See [chart behavior](docs/architecture.md#read-the-index-chart).
 
 ## Data access
 

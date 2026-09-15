@@ -1,81 +1,319 @@
-.bitcoin-tracker .market-chart {
-  .chart-navigation {
-    position: absolute;
-    top: 2px;
-    right: 84px;
-    z-index: 1;
-    border: 1px solid var(--tracker-border);
-    border-radius: 5px;
-    background: var(--tracker-panel);
+.bitcoin-tracker .market-chart.trading-chart {
+  min-height: 0;
 
-    .btn-chart {
-      min-width: 28px;
-      min-height: 26px;
-      padding: 2px 6px;
-    }
+  .chart-header .chart-expand-button {
+    font-size: 19px;
+    line-height: 1;
+  }
+  .chart-source,
+  .chart-tool-notice {
+    font-size: 11px;
   }
 
-  .price-chart-canvas {
-    width: 100%;
-    min-width: 0;
-    height: clamp(180px, 27vh, 250px);
+  .chart-header > div:last-child {
+    flex-shrink: 0;
   }
 
-  .price-chart-renderer {
-    // The library's default inline height is 300px; the panel owns the available height.
-    height: 100% !important;
-    width: 100%;
+  .chart-header .btn-outline-secondary {
+    min-height: 26px;
+    padding: 3px 6px;
+    font-size: 11px;
   }
 
-  .chart-inspection {
-    min-width: 0;
-    min-height: 24px;
+  .trading-chart-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2px 12px;
+    border-block: 1px solid var(--tracker-border);
+    padding-block: 3px;
+    margin-bottom: 3px;
+  }
+
+  .btn-chart,
+  .btn-chart-active,
+  .chart-drawing-controls .btn {
+    min-width: 26px;
+    min-height: 26px;
+    padding: 3px 6px;
+    font-size: 11px;
+  }
+
+  .chart-drawing-controls .btn {
+    border-color: transparent;
     color: var(--tracker-muted);
-    font-size: 10px;
-
-    .form-range {
-      flex: 0 0 56px;
-      width: 56px;
-      height: 24px;
+    &[aria-pressed='true'] {
+      background: #234832;
+      color: #7be9b2;
     }
+  }
 
-    .form-range:focus-visible {
-      outline: 2px solid var(--tracker-green);
-      outline-offset: 3px;
-      border-radius: 4px;
+  .btn:focus-visible,
+  .price-chart-canvas:focus-visible,
+  .form-range:focus-visible {
+    outline: 2px solid var(--tracker-green);
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+
+  figure {
+    justify-content: flex-start;
+    min-height: 0;
+  }
+
+  .trading-chart-readout {
+    flex: 0 0 auto;
+    padding-top: 4px;
+    min-height: 42px;
+    font-size: 10px;
+    line-height: 1.65;
+    font-variant-numeric: tabular-nums;
+    color: var(--tracker-muted);
+    .positive {
+      color: var(--tracker-green);
+    }
+    .negative {
+      color: var(--tracker-red);
     }
   }
 
   .chart-point-readout {
-    font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }
-
-  @media (min-width: 1200px) {
-    .chart-empty {
-      min-height: 150px;
+  .chart-readout-time {
+    color: #d4dfd8;
+    margin-right: 6px;
+  }
+  .chart-ohlc {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0 7px;
+    > span {
+      white-space: nowrap;
     }
+    b {
+      font-weight: 500;
+    }
+  }
+  .chart-indicator-readout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 10px;
+    min-height: 17px;
+  }
+  .macd-readout {
+    color: #a7c9ff;
+  }
+  .rsi-readout {
+    color: #d1a7ff;
+  }
+  .ema-readout {
+    color: #f4c56a;
+  }
 
-    .price-chart-canvas {
-      height: clamp(150px, 24svh, 210px);
+  .price-chart-frame,
+  .price-chart-canvas {
+    width: 100%;
+    min-width: 0;
+  }
+  .price-chart-canvas {
+    height: clamp(220px, 29svh, 260px);
+  }
+  .price-chart-renderer {
+    // ECharts defaults to a 300px inline height; the trading panel owns its height.
+    height: 100% !important;
+    width: 100%;
+  }
+
+  .chart-indicator-panel {
+    position: absolute;
+    inset-inline: 0;
+    z-index: 1;
+    pointer-events: none;
+    border-top: 1px solid #506879;
+    border-bottom: 1px solid #2a3944;
+
+    &.indicator-rsi {
+      border-top-color: #736383;
+      border-bottom-color: #3a3049;
     }
   }
 
+  .chart-indicator-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-inline: 8px;
+    background: #1a2932;
+    color: #bddcff;
+    line-height: 1;
+
+    h3 {
+      flex-shrink: 0;
+      margin: 0;
+      font-size: 11px;
+      font-weight: 600;
+      color: #e4eff8;
+    }
+
+    output {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+  }
+
+  .indicator-rsi .chart-indicator-heading {
+    background: #292233;
+    color: #d6b8ff;
+  }
+  .drawing-active .price-chart-renderer,
+  .drawing-active .price-chart-renderer * {
+    cursor: crosshair !important;
+  }
+
+  .chart-inspection {
+    min-width: 0;
+    min-height: 26px;
+    color: var(--tracker-muted);
+    font-size: 10px;
+    .form-range {
+      flex: 0 0 64px;
+      width: 64px;
+      height: 24px;
+    }
+  }
+  .chart-legend {
+    margin-top: 3px;
+    row-gap: 2px !important;
+  }
   .legend-area.settlement {
     background: rgba(128, 199, 255, 0.2);
   }
-
   .settlement-average-label {
     color: #80c7ff;
   }
-
   .chart-settlement-note {
-    font-size: 11px;
+    font-size: 10px;
+  }
+
+  &.expanded-chart {
+    height: 100%;
+    padding-top: 0;
+    .price-chart-frame {
+      flex: 1;
+      min-height: 180px;
+    }
+    .price-chart-canvas {
+      position: absolute;
+      inset: 0;
+      height: 100%;
+    }
+    .trading-chart-readout {
+      font-size: 12px;
+      min-height: 46px;
+    }
+    .btn-chart,
+    .btn-chart-active,
+    .chart-drawing-controls .btn {
+      min-height: 30px;
+      padding-inline: 9px;
+    }
   }
 
   @media (max-width: 767.98px) {
     .price-chart-canvas {
-      height: 200px;
+      height: 270px;
     }
+    .chart-inspection-hint {
+      display: none;
+    }
+    .chart-tools {
+      row-gap: 0 !important;
+    }
+  }
+
+  @media (min-width: 1200px) and (max-height: 850px) {
+    &:not(.expanded-chart) {
+      // Leave room for the existing price summary and bottom dashboard panels.
+      height: clamp(300px, calc(100svh - 415px), 425px);
+      flex: 0 0 auto;
+
+      .price-chart-frame {
+        flex: 1;
+        min-height: 130px;
+      }
+
+      .price-chart-canvas {
+        position: absolute;
+        inset: 0;
+        height: 100%;
+      }
+    }
+
+    &:not(.expanded-chart) .chart-legend {
+      font-size: 10px;
+      column-gap: 8px !important;
+    }
+
+    &:not(.expanded-chart) .trading-chart-readout {
+      min-height: 36px;
+    }
+  }
+}
+
+.chart-focus-modal.modal {
+  padding: 0 !important;
+}
+
+.chart-focus-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  height: 100svh;
+}
+
+.chart-tools-modal {
+  .btn-chart,
+  .btn-chart-active {
+    min-width: 38px;
+    min-height: 34px;
+    padding: 5px 10px;
+    border: 1px solid var(--tracker-border);
+    color: var(--tracker-muted);
+    font-size: 12px;
+  }
+
+  .btn-chart-active,
+  .btn-chart:hover {
+    background: #234832;
+    color: #7be9b2;
+  }
+
+  .btn:focus-visible {
+    outline: 2px solid var(--tracker-green);
+    outline-offset: 2px;
+  }
+
+  .trading-chart-toolbar {
+    display: grid;
+    gap: 12px;
+    padding-bottom: 18px;
+    margin-bottom: 18px;
+    border-bottom: 1px solid var(--tracker-border);
+  }
+
+  .chart-drawing-controls {
+    margin-block: 8px 12px;
+  }
+
+  .chart-option-label {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--tracker-muted);
+    font-size: 11px;
   }
 }
