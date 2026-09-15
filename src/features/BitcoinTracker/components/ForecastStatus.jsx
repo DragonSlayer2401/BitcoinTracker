@@ -10,6 +10,7 @@ export default function ForecastStatus({
   onCancelSchedule,
   previewEndsAt,
   showRecordedDetails = true,
+  canManageSchedule = true,
 }) {
   const isIdle = !activeForecast && !completedForecast && !schedule;
   const isMissed = schedule?.status === 'missed';
@@ -125,7 +126,12 @@ export default function ForecastStatus({
               )}
             </strong>
           </span>
-          <Button size="sm" variant="outline-secondary" onClick={onCancelSchedule}>
+          <Button
+            size="sm"
+            variant="outline-secondary"
+            onClick={onCancelSchedule}
+            disabled={!canManageSchedule}
+          >
             Cancel scheduled start
           </Button>
         </div>
@@ -194,7 +200,13 @@ export default function ForecastStatus({
         </p>
       )}
       {isMissed && !activeForecast && (
-        <Button size="sm" variant="outline-secondary" className="mt-2" onClick={onCancelSchedule}>
+        <Button
+          size="sm"
+          variant="outline-secondary"
+          className="mt-2"
+          onClick={onCancelSchedule}
+          disabled={!canManageSchedule}
+        >
           Dismiss missed start
         </Button>
       )}

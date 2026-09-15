@@ -21,6 +21,26 @@ The user selects a real Kalshi contract. That contract supplies the target, open
 
 Manual recording and `hooks/useKalshiSchedule.js` both use `utils/kalshi/forecastRecord.utils.js` to create the same initial record. It starts in `analyzing` with no fixed probabilities. The record retains the official closing time even when the user joins late.
 
+`utils/kalshi/forecastBatch.utils.js` creates one immutable record per selected checkpoint. The
+`kalshi-checkpoint-v5` policy fixes capture at closing time minus 12, 9, 6, 3, or 1 minute, with
+five seconds of grace. Actual observation start and capture timestamps remain distinct; late
+reopening never moves the checkpoint. The journal accepts multiple active records only for
+distinct checkpoints on the same verified contract. The active selector processes the earliest
+remaining analysis first, while published calls stay visible and settle independently.
+
+`hooks/useForecastPreferences.js` persists the nonempty checkpoint selection and opt-in Auto
+switch. `hooks/useAutomaticKalshiForecast.js` starts real open contracts through the same batch
+workflow, with a durable event watermark that prevents repeats after reloads or history clearing.
+Selections are copied when an event is armed; later preference changes affect the next event.
+Automatic and manual capture origins are saved explicitly and remain distinct from background
+research. No extra market polling or trading endpoint is added.
+
+`hooks/useForecastJournal.js` holds a Web Lock for the recording tab's lifetime, restores under
+that lock, and synchronously persists each Redux journal change. Other tabs synchronize through
+storage events without recording or uploading competing calls. Closing the writer transfers
+ownership to a waiting tab. Storage failures pause recording; old saved predictions never get
+recomputed. Journal retention preserves unfinished settlements before trimming completed calls.
+
 `useFixedPrediction` gathers observations under the policy in `utils/fixedPrediction.utils.js`. A usable estimate becomes a `pending` fixed prediction. If essential inputs remain unavailable through the observation cutoff, the record becomes `withheld`.
 
 After the contract closes, a pending call becomes `awaiting-settlement`. `hooks/useKalshiSettlement.js` retrieves the official finalized result, and the reducer changes a verified call to `resolved`. A later spot price cannot resolve a Kalshi forecast.
@@ -40,6 +60,14 @@ Live estimates and live reversal risk may keep changing while the saved predicti
 | Research evidence and models            | `src/services/research/`                      | Store observations and evaluate candidate models         |
 
 The server route files in `src/app/api/` are HTTP boundaries. Service `.api.js` files define RTK Query endpoints; server and client service modules own their respective transport operations. Keep credentials and database access in server-only modules.
+
+Research comparisons start at `utils/researchForecast.utils.js` and the optional variant output in
+`utils/kalshi/forecast.utils.js`. `utils/researchExperiments.utils.js` captures and replays complete
+calculation inputs. `utils/researchEvaluation.utils.js` compares prospective results, independently
+of learning activation. `scripts/collect-research.analysis.js` connects those reports and
+`utils/researchForwardLabels.utils.js` to the durable archive. The original input and later label
+have separate tables; labels never become inputs to an earlier snapshot. See
+[collector experiments](research-collector.md#paired-experiments-and-replay) for commands and limits.
 
 ## Read the index chart
 

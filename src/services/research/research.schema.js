@@ -18,6 +18,25 @@ const schemaStatements = [
     payload TEXT NOT NULL
   )`,
   'CREATE INDEX IF NOT EXISTS evidence_forecast ON evidence_events(forecast_id)',
+  `CREATE TABLE IF NOT EXISTS research_input_snapshots (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id TEXT NOT NULL UNIQUE,
+    forecast_id TEXT NOT NULL,
+    captured_at INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    FOREIGN KEY(snapshot_id) REFERENCES evidence_events(event_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS research_forward_labels (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    label_id TEXT NOT NULL UNIQUE,
+    snapshot_id TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    FOREIGN KEY(snapshot_id) REFERENCES research_input_snapshots(snapshot_id)
+  )`,
+  'CREATE INDEX IF NOT EXISTS research_labels_snapshot ON research_forward_labels(snapshot_id)',
   "CREATE INDEX IF NOT EXISTS evidence_event_kind ON evidence_events(json_extract(payload, '$.event'), sequence)",
   `CREATE TABLE IF NOT EXISTS forecast_snapshots (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,

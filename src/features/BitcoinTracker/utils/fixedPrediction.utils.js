@@ -2,8 +2,24 @@ export const FIXED_PREDICTION_POLICY_VERSION = 'observed-consensus-v1';
 export const MARKET_AWARE_POLICY_VERSION = 'market-aware-consensus-v2';
 export const PRESSURE_POLICY_VERSION = 'pressure-snapshot-v3';
 export const KALSHI_POLICY_VERSION = 'kalshi-snapshot-v4';
+export const KALSHI_CHECKPOINT_POLICY_VERSION = 'kalshi-checkpoint-v5';
+export const KALSHI_CHECKPOINT_MINUTES = Object.freeze([12, 9, 6, 3, 1]);
+export const KALSHI_CHECKPOINT_GRACE_MS = 5000;
+export const isKalshiCheckpointMinutes = (value) => KALSHI_CHECKPOINT_MINUTES.includes(value);
+export const isKalshiCheckpointSelection = (value) =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.length <= KALSHI_CHECKPOINT_MINUTES.length &&
+  value.every(isKalshiCheckpointMinutes) &&
+  new Set(value).size === value.length;
 export const usesSnapshotPolicy = (version) =>
-  [PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION].includes(version);
+  [PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION, KALSHI_CHECKPOINT_POLICY_VERSION].includes(
+    version,
+  );
+export const hasInsufficientFixedPredictionTime = (analysis) =>
+  analysis?.earliestAt > analysis?.deadline ||
+  (analysis?.policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION &&
+    analysis.startedAt > analysis.deadline);
 export const MINIMUM_OBSERVATION_MS = 3 * 60_000;
 export const MAXIMUM_OBSERVATION_MS = 5 * 60_000;
 export const MINIMUM_LEAD_MS = 60_000;
@@ -16,7 +32,22 @@ export function getFixedForecastAnalysis({
   startedAt,
   expiresAt,
   policyVersion = FIXED_PREDICTION_POLICY_VERSION,
+  checkpointMinutes,
 }) {
+  if (policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION) {
+    if (!isKalshiCheckpointMinutes(checkpointMinutes)) {
+      throw new RangeError(
+        'Choose a fixed prediction checkpoint with 12, 9, 6, 3, or 1 minutes remaining.',
+      );
+    }
+    const earliestAt = expiresAt - checkpointMinutes * 60_000;
+    return {
+      startedAt,
+      earliestAt,
+      deadline: earliestAt + KALSHI_CHECKPOINT_GRACE_MS,
+      policyVersion,
+    };
+  }
   if (policyVersion === KALSHI_POLICY_VERSION) {
     const remaining = expiresAt - startedAt;
     const observation = Math.min(
@@ -87,10 +118,12 @@ export function updateConfirmationSamples(samples, sample) {
 export function getFixedPredictionProgress({ analysis, samples, estimate, now }) {
   const direction = getQualifyingDirection(estimate, analysis.policyVersion);
   if (usesSnapshotPolicy(analysis.policyVersion)) {
+    const usesCheckpoint = analysis.policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION;
     const observationRemainingMs = Math.max(0, analysis.earliestAt - now);
-    const insufficientTime = analysis.earliestAt > analysis.deadline;
+    const insufficientTime = hasInsufficientFixedPredictionTime(analysis);
     const canPublish =
       !insufficientTime &&
+      (!usesCheckpoint || now >= analysis.startedAt) &&
       now >= analysis.earliestAt &&
       now <= analysis.deadline &&
       direction !== null;
@@ -104,11 +137,15 @@ export function getFixedPredictionProgress({ analysis, samples, estimate, now })
             ? 'observing'
             : 'confirming',
       reason:
-        direction === null
-          ? 'Waiting for a valid estimate from fresh market data.'
-          : observationRemainingMs > 0
-            ? 'Observing the market before capturing the fixed estimate.'
-            : 'The current estimate is ready to be fixed, including a weak or balanced signal.',
+        usesCheckpoint && mustWithhold
+          ? 'The selected fixed prediction checkpoint was missed.'
+          : usesCheckpoint && observationRemainingMs > 0
+            ? 'Waiting for the selected fixed prediction checkpoint.'
+            : direction === null
+              ? 'Waiting for a valid estimate from fresh market data.'
+              : observationRemainingMs > 0
+                ? 'Observing the market before capturing the fixed estimate.'
+                : 'The current estimate is ready to be fixed, including a weak or balanced signal.',
       withholdingReason: insufficientTime ? 'insufficient-time' : 'market-data-unavailable',
       observationRemainingMs,
       confirmationRemainingMs: 0,

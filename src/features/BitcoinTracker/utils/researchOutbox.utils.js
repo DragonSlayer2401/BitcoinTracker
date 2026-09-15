@@ -47,7 +47,28 @@ export async function readResearchOutbox(limit = 50) {
       snapshots = forecasts.result;
     };
     await done;
-    return { evidence, forecasts: snapshots.map((row) => row.forecast) };
+    // Full decision inputs can exceed the size of ordinary evidence. Keep uploads under
+    // the server's 4 MiB limit; excluded rows remain in the outbox for the next batch.
+    let bytes = 100;
+    const takeWithinBudget = (rows) => {
+      const selected = [];
+      for (const row of rows) {
+        const size = new Blob([JSON.stringify(row)]).size + 1;
+        if (bytes + size > 3 * 1024 * 1024) break;
+        bytes += size;
+        selected.push(row);
+      }
+      return selected;
+    };
+    const batch = {
+      evidence: takeWithinBudget(evidence),
+      forecasts: takeWithinBudget(snapshots.map((row) => row.forecast)),
+    };
+    if ((evidence.length || snapshots.length) && !batch.evidence.length && !batch.forecasts.length)
+      throw new Error(
+        'A research record exceeds the upload size limit. The original record is retained.',
+      );
+    return batch;
   } finally {
     database.close();
   }

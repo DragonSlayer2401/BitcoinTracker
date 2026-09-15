@@ -1,13 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch, useSelector, useStore } from 'react-redux';
 import { Alert, Button, Container } from 'react-bootstrap';
 import { useGetKalshiMarketsQuery, useGetKalshiBenchmarkQuery } from '@/services/kalshi/kalshi.api';
 import useKalshiSettlement from './hooks/useKalshiSettlement';
 import useKalshiSchedule from './hooks/useKalshiSchedule';
 import { getKalshiContract, KALSHI_OUTCOME_DEFINITION } from './utils/kalshi/contract.utils';
-import { createKalshiForecastRecord } from './utils/kalshi/forecastRecord.utils';
+import { createKalshiForecastBatch } from './utils/kalshi/forecastBatch.utils';
 import BitcoinPriceSummary from './components/BitcoinPriceSummary';
 import TrackerHeader from './components/TrackerHeader';
 import Icon from './components/Icon';
@@ -19,6 +19,8 @@ import ForecastJournal from './components/ForecastJournal';
 import Methodology from './components/Methodology';
 import useClock from './hooks/useClock';
 import useForecastJournal from './hooks/useForecastJournal';
+import useForecastPreferences from './hooks/useForecastPreferences';
+import useAutomaticKalshiForecast from './hooks/useAutomaticKalshiForecast';
 import useFixedPrediction from './hooks/useFixedPrediction';
 import useCoinbaseMarketData from './hooks/useCoinbaseMarketData';
 import useDerivativesMarketData from './hooks/useDerivativesMarketData';
@@ -30,14 +32,15 @@ import useResearchLearning from './hooks/useResearchLearning';
 import useBackgroundResearch from './hooks/useBackgroundResearch';
 import ForecastRisk from './components/ForecastRisk';
 import { getResearchForecast } from './utils/researchForecast.utils';
-import { KALSHI_POLICY_VERSION } from './utils/fixedPrediction.utils';
+import { createResearchInputSnapshot } from './utils/researchExperiments.utils';
+import { KALSHI_CHECKPOINT_POLICY_VERSION } from './utils/fixedPrediction.utils';
 import {
   getKalshiMarketConditions,
   getKalshiReferenceQuote,
   hasIndependentKalshiBenchmark,
 } from './utils/kalshi/marketConditions.utils';
 import {
-  forecastRecorded,
+  forecastBatchRecorded,
   forecastsObserved,
   historyCleared,
   scheduleCreated,
@@ -45,6 +48,7 @@ import {
 } from './state/slices/trackerSlice';
 import {
   selectActiveForecast,
+  selectLatestForecast,
   selectForecasts,
   selectJournalSummary,
   selectJournalOutcomeGroups,
@@ -58,7 +62,16 @@ const EMPTY_MARKETS = [];
 export default function BitcoinTracker() {
   const now = useClock();
   const dispatch = useDispatch();
-  const isJournalReady = useForecastJournal();
+  const store = useStore();
+  const journal = useForecastJournal();
+  const isJournalReady = journal.isReady;
+  const {
+    preferences,
+    setAutoEnabled,
+    setCheckpointMinutes,
+    isRestored: arePreferencesReady,
+    warning: preferencesWarning,
+  } = useForecastPreferences();
   const [isPreparingForecast, setIsPreparingForecast] = useState(false);
   const [selectedMarketTicker, setSelectedMarketTicker] = useState(null);
 
@@ -72,7 +85,10 @@ export default function BitcoinTracker() {
   const scheduledForecast = useSelector(selectScheduledForecast);
   const selectedMarket =
     kalshiMarkets.find(
-      (market) => market.ticker === (scheduledForecast?.marketTicker ?? selectedMarketTicker),
+      (market) =>
+        market.ticker ===
+          (scheduledForecast?.marketTicker ??
+            (preferences.autoEnabled ? null : selectedMarketTicker)) && market.expiresAt > now,
     ) ??
     kalshiMarkets.find((market) => market.expiresAt > now && market.startsAt <= now) ??
     kalshiMarkets.find((market) => market.expiresAt > now) ??
@@ -102,14 +118,25 @@ export default function BitcoinTracker() {
   const derivatives = useDerivativesMarketData();
   const forecasts = useSelector(selectForecasts);
   const activeForecast = useSelector(selectActiveForecast);
+  const latestForecast = useSelector(selectLatestForecast);
   // Keep the saved call on screen until the user starts preparing another event.
   const recordedForecast =
-    activeForecast ?? (!isPreparingForecast && !scheduledForecast ? (forecasts[0] ?? null) : null);
+    activeForecast ??
+    (!isPreparingForecast && !scheduledForecast && !preferences.autoEnabled
+      ? latestForecast
+      : null);
   const kalshiMarket = recordedForecast?.kalshiMarket
     ? (kalshiMarkets.find((market) => market.ticker === recordedForecast.kalshiMarket.ticker) ??
       recordedForecast.kalshiMarket)
     : selectedMarket;
   const forecastDeadline = kalshiMarket?.expiresAt ?? null;
+  const eventForecasts = forecasts.filter(
+    (entry) => entry.kalshiMarket?.ticker === kalshiMarket?.ticker,
+  );
+  const riskForecast =
+    [...eventForecasts]
+      .filter((entry) => Number.isFinite(entry.aboveProbability))
+      .sort((left, right) => right.createdAt - left.createdAt)[0] ?? recordedForecast;
   const horizonMinutes =
     forecastDeadline === null ? 15 : Math.min(15, (forecastDeadline - now) / 60_000);
   const summary = useSelector(selectJournalSummary);
@@ -120,7 +147,11 @@ export default function BitcoinTracker() {
 
   // Storage cleanup must finish before recording, syncing, or settling saved forecasts.
   const researchSync = useResearchSync({ forecasts, isReady: isJournalReady, now });
-  const researchLearning = useResearchLearning({ isReady: isJournalReady, now });
+  const researchLearning = useResearchLearning({
+    isReady: journal.isRestored,
+    canReview: isJournalReady,
+    now,
+  });
   const { models } = researchLearning;
   useKalshiSchedule({
     markets: kalshiMarkets,
@@ -143,23 +174,29 @@ export default function BitcoinTracker() {
       expiresAt,
       kalshiMarket: contract,
       benchmark: capturedBenchmark,
+      captureResearchInputs = false,
     }) => {
-      const result = getResearchForecast(
-        {
-          candles,
-          ticker,
-          stream,
-          derivatives,
-          target: forecastTarget,
-          now: evaluatedAt,
-          expiresAt,
-          horizonMinutes: (expiresAt - evaluatedAt) / 60_000,
-          kalshiMarket: contract,
-          benchmark: capturedBenchmark ?? benchmark,
-        },
-        models,
-        expiresAt - 900_000,
-      );
+      const input = {
+        candles,
+        ticker,
+        stream,
+        derivatives,
+        target: forecastTarget,
+        now: evaluatedAt,
+        expiresAt,
+        horizonMinutes: (expiresAt - evaluatedAt) / 60_000,
+        kalshiMarket: contract,
+        benchmark: capturedBenchmark ?? benchmark,
+      };
+      const result = getResearchForecast(input, models, expiresAt - 900_000);
+      if (captureResearchInputs) {
+        result.researchInputSnapshot = createResearchInputSnapshot(
+          input,
+          models,
+          expiresAt - 900_000,
+          result,
+        );
+      }
       return hasRequestError && !hasIndependentKalshiBenchmark(result)
         ? { ...result, available: false, aboveProbability: null, belowProbability: null }
         : result;
@@ -216,27 +253,27 @@ export default function BitcoinTracker() {
   });
   const savedRiskEstimate = useMemo(
     () =>
-      recordedForecast && now
+      riskForecast && now
         ? getResearchEstimate({
-            target: recordedForecast.target,
-            expiresAt: recordedForecast.expiresAt,
+            target: riskForecast.target,
+            expiresAt: riskForecast.expiresAt,
             now: Date.now(),
-            kalshiMarket: recordedForecast.kalshiMarket,
+            kalshiMarket: riskForecast.kalshiMarket,
           })
         : null,
-    [recordedForecast, now, getResearchEstimate],
+    [riskForecast, now, getResearchEstimate],
   );
   const savedRiskConditions = useMemo(
     () =>
-      recordedForecast && now
+      riskForecast && now
         ? getResearchConditions({
-            target: recordedForecast.target,
-            expiresAt: recordedForecast.expiresAt,
+            target: riskForecast.target,
+            expiresAt: riskForecast.expiresAt,
             now: Date.now(),
             forecast: savedRiskEstimate,
           })
         : null,
-    [recordedForecast, now, getResearchConditions, savedRiskEstimate],
+    [riskForecast, now, getResearchConditions, savedRiskEstimate],
   );
   const marketConditions = useMemo(
     () =>
@@ -273,40 +310,92 @@ export default function BitcoinTracker() {
   // User actions start observation now or arm a future event by its official identity.
   const prepareForecast = () => {
     setIsPreparingForecast(true);
-    setSelectedMarketTicker(null);
-  };
-  const recordForecast = () => {
-    const createdAt = Date.now();
-    if (activeForecast || !isJournalReady) return;
-    const contract = getKalshiContract(kalshiMarket);
-    if (
-      !contract ||
-      kalshiQuery.isError ||
-      contract.startsAt > createdAt ||
-      contract.expiresAt <= createdAt
-    ) {
-      return;
-    }
-    const estimate = getResearchEstimate({
-      target: contract.target,
-      now: createdAt,
-      expiresAt: contract.expiresAt,
-      kalshiMarket: contract,
-    });
-    if (!estimate.available) return;
-    dispatch(
-      forecastRecorded(
-        createKalshiForecastRecord({
-          id: crypto.randomUUID(),
-          contract,
-          createdAt,
-          price: getKalshiReferenceQuote(estimate, ticker).price,
-          modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
-        }),
-      ),
+    const next = kalshiMarkets.find(
+      (market) =>
+        market.expiresAt > now &&
+        !forecasts.some((entry) => entry.kalshiMarket?.ticker === market.ticker),
     );
-    setIsPreparingForecast(false);
+    setSelectedMarketTicker(next?.ticker ?? null);
   };
+  const startEvent = useCallback(
+    (contract, captureOrigin = 'manual') => {
+      const createdAt = Date.now();
+      if (
+        activeForecast ||
+        !isJournalReady ||
+        !arePreferencesReady ||
+        scheduledForecast?.status === 'scheduled'
+      )
+        return false;
+      if (
+        !contract ||
+        kalshiQuery.isError ||
+        contract.startsAt > createdAt ||
+        contract.expiresAt <= createdAt ||
+        store
+          .getState()
+          .tracker.forecasts.some((entry) => entry.kalshiMarket?.ticker === contract.ticker)
+      ) {
+        return false;
+      }
+      const estimate = getResearchEstimate({
+        target: contract.target,
+        now: createdAt,
+        expiresAt: contract.expiresAt,
+        kalshiMarket: contract,
+      });
+      const reference = getKalshiReferenceQuote(estimate, ticker);
+      if (
+        !estimate.available ||
+        !reference ||
+        reference.time < contract.startsAt ||
+        reference.receivedAt < contract.startsAt
+      )
+        return false;
+      const batch = createKalshiForecastBatch({
+        id: crypto.randomUUID(),
+        checkpointMinutes: preferences.checkpointMinutes,
+        captureOrigin,
+        contract,
+        createdAt,
+        price: reference.price,
+        modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION,
+      });
+      if (!batch) return false;
+      dispatch(forecastBatchRecorded(batch));
+      const saved = store.getState().tracker;
+      if (
+        saved.storageWarning ||
+        !batch.every((entry) => saved.forecasts.some((record) => record.id === entry.id))
+      )
+        return false;
+      setSelectedMarketTicker(contract.ticker);
+      setIsPreparingForecast(false);
+      return true;
+    },
+    [
+      activeForecast,
+      isJournalReady,
+      arePreferencesReady,
+      scheduledForecast,
+      kalshiQuery.isError,
+      getResearchEstimate,
+      ticker,
+      preferences.checkpointMinutes,
+      dispatch,
+      store,
+    ],
+  );
+  const automaticForecast = useAutomaticKalshiForecast({
+    enabled: preferences.autoEnabled,
+    isReady: isJournalReady && arePreferencesReady,
+    markets: kalshiMarkets,
+    forecasts,
+    scheduledForecast,
+    now,
+    onStartEvent: useCallback((contract) => startEvent(contract, 'automatic'), [startEvent]),
+  });
+  const recordForecast = () => startEvent(getKalshiContract(kalshiMarket));
 
   const scheduleForecast = () => {
     const createdAt = Date.now();
@@ -331,7 +420,9 @@ export default function BitcoinTracker() {
         marketTicker: kalshiMarket.ticker,
         eventTicker: kalshiMarket.eventTicker,
         outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
-        policyVersion: KALSHI_POLICY_VERSION,
+        policyVersion: KALSHI_CHECKPOINT_POLICY_VERSION,
+        checkpointMinutes: preferences.checkpointMinutes,
+        captureOrigin: 'manual',
       }),
     );
     setIsPreparingForecast(false);
@@ -394,20 +485,30 @@ export default function BitcoinTracker() {
               fixedProgress={fixedProgress}
               forecastDeadline={forecastDeadline}
               activeForecast={activeForecast}
+              eventForecasts={eventForecasts}
+              isPreparingForecast={isPreparingForecast}
+              autoEnabled={preferences.autoEnabled}
+              onAutoEnabledChange={setAutoEnabled}
+              checkpointMinutes={preferences.checkpointMinutes}
+              onCheckpointMinutesChange={setCheckpointMinutes}
+              isJournalOwner={journal.isOwner}
+              preferencesWarning={preferencesWarning ?? automaticForecast.warning}
               recordedForecast={recordedForecast}
               now={now}
               onRecord={recordForecast}
               onNewForecast={prepareForecast}
               scheduledForecast={scheduledForecast}
               onSchedule={scheduleForecast}
-              onCancelSchedule={() => dispatch(scheduleCancelled())}
+              onCancelSchedule={() => {
+                if (isJournalReady) dispatch(scheduleCancelled());
+              }}
               isJournalReady={isJournalReady}
               isLoading={isLoading && !forecast.available}
               riskControl={
-                recordedForecast ? (
+                riskForecast ? (
                   <ForecastRisk
                     forecast={savedRiskEstimate}
-                    fixedForecast={recordedForecast}
+                    fixedForecast={riskForecast}
                     ticker={ticker}
                     now={now}
                     stream={stream}
@@ -438,7 +539,9 @@ export default function BitcoinTracker() {
               summary={summary}
               outcomeGroups={outcomeGroups}
               now={now}
-              onClear={() => dispatch(historyCleared())}
+              onClear={() => {
+                if (isJournalReady) dispatch(historyCleared());
+              }}
             />
             <Methodology
               evidenceWarning={

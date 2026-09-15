@@ -20,11 +20,15 @@ export default function ForecastRisk({ forecast, fixedForecast, ticker, now, str
     now,
   });
   const hasFixedRisk = Number.isFinite(risk.fixedFailureProbability);
-  const buttonLabel = hasFixedRisk
+  const baseLabel = hasFixedRisk
     ? `Fixed-call risk · ${formatPercent(risk.fixedFailureProbability)}`
     : risk.available && Number.isFinite(risk.currentSideFlipProbability)
       ? `Reversal risk · ${formatPercent(risk.currentSideFlipProbability)}`
       : 'Forecast risk';
+  const buttonLabel =
+    hasFixedRisk && fixedForecast?.checkpointMinutes
+      ? `${fixedForecast.checkpointMinutes}m call · ${baseLabel}`
+      : baseLabel;
 
   return (
     <>

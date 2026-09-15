@@ -13,6 +13,7 @@ export class ResearchDataError extends Error {
 
 export const MAXIMUM_RESEARCH_BATCH = 100;
 export const MAXIMUM_RESEARCH_BODY_BYTES = 4 * 1024 * 1024;
+export const MAXIMUM_RESEARCH_INPUT_BYTES = 2 * 1024 * 1024;
 const maximumRowBytes = 128 * 1024;
 const timestampFields = [
   'recordedAt',
@@ -37,6 +38,8 @@ const immutableContractFields = [
   'startsAt',
   'outcomeDefinition',
   'analysis',
+  'checkpointMinutes',
+  'captureOrigin',
   'kalshiMarket',
 ];
 const immutablePredictionFields = [
@@ -157,7 +160,52 @@ export function validateEvidenceRow(row) {
   ) {
     throw new ResearchDataError('Research inputs cannot come from after the recording time.');
   }
+  if (row.researchInputSnapshot != null) {
+    validateResearchInputSnapshot(row);
+    const { researchInputSnapshot, ...evidence } = row;
+    return getCanonicalResearchJson(evidence);
+  }
   return getCanonicalResearchJson(row);
+}
+
+/** Full replay inputs have their own bounded, immutable table, outside the compact journal. */
+export function validateResearchInputSnapshot(row) {
+  const snapshot = row.researchInputSnapshot;
+  const hasPublishedPrediction = row.decision === 'pending' || row.aboveProbability != null;
+  if (
+    row.event !== 'decision' ||
+    snapshot?.version !== 'kalshi-input-replay-v1' ||
+    row.inputStatus !== 'captured' ||
+    !isResearchTimestamp(snapshot.capturedAt) ||
+    ((hasPublishedPrediction || row.capturedAt != null) &&
+      snapshot.capturedAt !== row.capturedAt) ||
+    snapshot.capturedAt !== row.featureCutoffAt ||
+    snapshot.capturedAt !== row.inputObservedAt ||
+    snapshot.capturedAt > row.recordedAt ||
+    snapshot.capturedAt >= row.expiresAt ||
+    snapshot.input?.now !== snapshot.capturedAt ||
+    !isKalshiContract(snapshot.input?.kalshiMarket) ||
+    snapshot.input?.kalshiMarket?.ticker !== row.kalshiMarket?.ticker ||
+    snapshot.input.kalshiMarket.eventTicker !== row.kalshiMarket.eventTicker ||
+    snapshot.input.kalshiMarket.startsAt !== row.kalshiMarket.startsAt ||
+    snapshot.input?.kalshiMarket?.target !== row.target ||
+    snapshot.input?.kalshiMarket?.expiresAt !== row.expiresAt ||
+    !row.researchExperiment ||
+    row.researchExperiment.version !== 'kalshi-ablation-v1' ||
+    row.researchExperiment.capturedAt !== snapshot.capturedAt ||
+    row.researchExperiment.marketTicker !== row.kalshiMarket.ticker ||
+    row.researchExperiment.target !== row.target ||
+    row.researchExperiment.expiresAt !== row.expiresAt ||
+    (hasPublishedPrediction &&
+      (row.researchExperiment.production?.aboveProbability !== row.aboveProbability ||
+        row.researchExperiment.production?.belowProbability !== row.belowProbability ||
+        row.researchExperiment.production?.modelVersion !== row.modelVersion)) ||
+    getCanonicalResearchJson(snapshot.expectedExperiment) !==
+      getCanonicalResearchJson(row.researchExperiment)
+  ) {
+    throw new ResearchDataError('Replay inputs must match the original captured Kalshi decision.');
+  }
+  return getCanonicalResearchJson(snapshot, MAXIMUM_RESEARCH_INPUT_BYTES);
 }
 
 export function validateForecastSnapshot(row) {

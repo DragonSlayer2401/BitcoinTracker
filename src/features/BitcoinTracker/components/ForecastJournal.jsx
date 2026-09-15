@@ -44,6 +44,8 @@ function ForecastTable({ forecasts, now, compact = false }) {
               {!compact && (
                 <span className="d-block small text-secondary fw-normal">
                   {`Kalshi · ${entry.kalshiMarket?.ticker ?? 'Bitcoin 15m'}`}
+                  {entry.checkpointMinutes ? ` · ${entry.checkpointMinutes} min left` : ''}
+                  {entry.captureOrigin === 'automatic' ? ' · Auto' : ''}
                 </span>
               )}
             </th>
@@ -52,7 +54,9 @@ function ForecastTable({ forecasts, now, compact = false }) {
                 {entry.status === 'analyzing'
                   ? 'Observing'
                   : entry.status === 'withheld'
-                    ? 'No clear signal'
+                    ? entry.checkpointMinutes
+                      ? 'No fixed call'
+                      : 'No clear signal'
                     : getPredictionLabel(entry)}
               </span>
             </td>

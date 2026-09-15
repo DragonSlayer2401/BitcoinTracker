@@ -14,6 +14,7 @@ import {
   isResearchIdentifier,
   isResearchTimestamp,
   validateEvidenceRow,
+  validateResearchInputSnapshot,
   validateForecastSnapshot,
   validateForecastSnapshotConsistency,
   validateModelArtifact,
@@ -133,6 +134,24 @@ async function insertEvidenceEvent(transaction, entry) {
     sql: 'INSERT INTO evidence_events(event_id, forecast_id, recorded_at, content_hash, payload) VALUES (?, ?, ?, ?, ?)',
     args: [entry.id, entry.row.forecastId, entry.row.recordedAt, entry.hash, entry.json],
   });
+  if (entry.inputSnapshotJson) {
+    // A retired-ID trigger can ignore the evidence insert. Never create an orphan replay.
+    const accepted = await transaction.execute({
+      sql: 'SELECT event_id FROM evidence_events WHERE event_id = ?',
+      args: [entry.id],
+    });
+    if (accepted.rows.length)
+      await transaction.execute({
+        sql: 'INSERT INTO research_input_snapshots(snapshot_id, forecast_id, captured_at, content_hash, payload) VALUES (?, ?, ?, ?, ?)',
+        args: [
+          entry.id,
+          entry.row.forecastId,
+          entry.row.featureCutoffAt,
+          entry.inputSnapshotHash,
+          entry.inputSnapshotJson,
+        ],
+      });
+  }
 }
 
 export function createResearchRepository({ client, mode = 'local-database' }) {
@@ -221,9 +240,202 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
   const repository = {
     persistEvidenceRows(rows) {
       return appendEvents('evidence_events', rows, (row) => {
-        const json = validateEvidenceRow(row);
-        return { row, id: row.eventId, json, hash: getContentHash(json) };
+        const evidenceJson = validateEvidenceRow(row);
+        const inputSnapshotJson =
+          row.researchInputSnapshot == null ? null : validateResearchInputSnapshot(row);
+        const inputSnapshotHash = inputSnapshotJson ? getContentHash(inputSnapshotJson) : null;
+        const json = inputSnapshotJson
+          ? getCanonicalResearchJson({
+              ...JSON.parse(evidenceJson),
+              researchReplay: {
+                status: 'stored',
+                snapshotId: row.eventId,
+                contentHash: inputSnapshotHash,
+                replayable: row.researchInputSnapshot.timing?.replayable === true,
+              },
+            })
+          : evidenceJson;
+        return {
+          row,
+          id: row.eventId,
+          json,
+          hash: getContentHash(json),
+          inputSnapshotJson,
+          inputSnapshotHash,
+        };
       });
+    },
+    async readResearchInputSnapshot(snapshotId) {
+      if (!isResearchIdentifier(snapshotId))
+        throw new ResearchDataError('Invalid replay identity.');
+      await initialize();
+      const result = await client.execute({
+        sql: 'SELECT snapshot_id, content_hash, payload FROM research_input_snapshots WHERE snapshot_id = ?',
+        args: [snapshotId],
+      });
+      const row = result.rows[0];
+      if (!row) return null;
+      if (getContentHash(row.payload) !== row.content_hash)
+        throw new ResearchDataError('Stored replay input hash does not match its contents.', 409);
+      return {
+        snapshotId: row.snapshot_id,
+        contentHash: row.content_hash,
+        snapshot: JSON.parse(row.payload),
+      };
+    },
+    async getPendingForwardCaptures({ now, limit = 100 } = {}) {
+      if (!isResearchTimestamp(now) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+        throw new ResearchDataError('Invalid forward-label query.');
+      await initialize();
+      const result = await client.execute({
+        sql: `SELECT e.payload, s.snapshot_id FROM research_input_snapshots s
+          JOIN evidence_events e ON e.event_id = s.snapshot_id
+          WHERE s.captured_at <= ? AND
+          (SELECT COUNT(*) FROM research_forward_labels l WHERE l.snapshot_id = s.snapshot_id) < 3
+          ORDER BY s.captured_at LIMIT ?`,
+        args: [now - 15_000, limit],
+      });
+      const captures = [];
+      for (const row of result.rows) {
+        const labels = await client.execute({
+          sql: 'SELECT payload FROM research_forward_labels WHERE snapshot_id = ?',
+          args: [row.snapshot_id],
+        });
+        captures.push({
+          decision: JSON.parse(row.payload),
+          completedHorizons: labels.rows.map((label) => JSON.parse(label.payload).horizonSeconds),
+        });
+      }
+      return captures;
+    },
+    async persistForwardLabels(labels) {
+      return runWriteOperation(async () => {
+        validateResearchBatch(labels);
+        const prepared = labels.map((label) => {
+          if (
+            label?.version !== 'brti-forward-label-v1' ||
+            !isResearchIdentifier(label.snapshotId) ||
+            !isResearchIdentifier(label.labelId) ||
+            !isResearchIdentifier(label.forecastId) ||
+            label.labelId !== `${label.snapshotId}:forward:${label.horizonSeconds}` ||
+            ![15, 60, 180].includes(label.horizonSeconds) ||
+            !['observed', 'missing'].includes(label.status) ||
+            !isResearchTimestamp(label.recordedAt) ||
+            !isResearchTimestamp(label.capturedAt) ||
+            !isResearchTimestamp(label.dueAt) ||
+            label.dueAt !==
+              Math.ceil((label.capturedAt + label.horizonSeconds * 1000) / 1000) * 1000 ||
+            label.recordedAt < label.dueAt ||
+            !label.reference ||
+            typeof label.reference !== 'object' ||
+            Array.isArray(label.reference) ||
+            (label.status === 'missing' &&
+              (label.reading !== null ||
+                label.logReturn !== null ||
+                ![
+                  'capture-reference-is-not-observed-brti',
+                  'exact-forward-brti-reading-unavailable',
+                ].includes(label.reason))) ||
+            (label.status === 'observed' &&
+              (label.reason !== null ||
+                label.reference.source !== 'cf-brti' ||
+                !isResearchTimestamp(label.reference.time) ||
+                label.reference.time % 1000 !== 0 ||
+                label.reference.time > label.capturedAt ||
+                !isResearchTimestamp(label.reference.receivedAt) ||
+                label.reference.receivedAt < label.reference.time ||
+                label.reference.receivedAt > label.capturedAt ||
+                label.reading?.time !== label.dueAt ||
+                !isResearchTimestamp(label.reading.receivedAt) ||
+                label.reading.receivedAt < label.reading.time ||
+                label.reading.receivedAt > label.recordedAt ||
+                !Number.isFinite(label.reference.price) ||
+                label.reference.price <= 0 ||
+                label.reference.price > 1e9 ||
+                !Number.isFinite(label.reading.price) ||
+                label.reading.price <= 0 ||
+                label.reading.price > 1e9 ||
+                !Number.isFinite(label.logReturn) ||
+                Math.abs(label.logReturn - Math.log(label.reading.price / label.reference.price)) >
+                  1e-12))
+          )
+            throw new ResearchDataError('Invalid forward BRTI label.');
+          const json = getCanonicalResearchJson(label);
+          return { label, json, hash: getContentHash(json) };
+        });
+        await initialize();
+        const transaction = await getResearchWriteTransaction(client);
+        try {
+          let inserted = 0;
+          for (const { label, json, hash } of prepared) {
+            const capture = await transaction.execute({
+              sql: `SELECT s.captured_at, s.forecast_id, e.payload, e.content_hash
+                FROM research_input_snapshots s JOIN evidence_events e ON e.event_id = s.snapshot_id
+                WHERE s.snapshot_id = ?`,
+              args: [label.snapshotId],
+            });
+            const original = capture.rows[0];
+            if (Number(original?.captured_at) !== label.capturedAt)
+              throw new ResearchDataError('A forward label requires its original captured input.');
+            const decision = JSON.parse(original.payload);
+            const referenceFields = {
+              time: 'quoteTime',
+              price: 'spot',
+              receivedAt: 'receivedAt',
+              source: 'referenceSource',
+            };
+            if (
+              getContentHash(original.payload) !== original.content_hash ||
+              original.forecast_id !== label.forecastId ||
+              decision.forecastId !== label.forecastId ||
+              decision.featureCutoffAt !== label.capturedAt ||
+              Object.entries(referenceFields).some(
+                ([field, originalField]) =>
+                  (label.reference[field] ?? null) !== (decision[originalField] ?? null),
+              )
+            )
+              throw new ResearchDataError(
+                'A forward label must retain the original forecast and BRTI reference.',
+                409,
+              );
+            const exists = await transaction.execute({
+              sql: 'SELECT content_hash FROM research_forward_labels WHERE label_id = ?',
+              args: [label.labelId],
+            });
+            if (exists.rows.length) {
+              if (exists.rows[0].content_hash !== hash)
+                throw new ResearchDataError(
+                  'A forward label cannot overwrite its original observation.',
+                  409,
+                );
+              continue;
+            }
+            await transaction.execute({
+              sql: 'INSERT INTO research_forward_labels(label_id, snapshot_id, recorded_at, content_hash, payload) VALUES (?, ?, ?, ?, ?)',
+              args: [label.labelId, label.snapshotId, label.recordedAt, hash, json],
+            });
+            inserted++;
+          }
+          await transaction.commit();
+          return { inserted, duplicates: labels.length - inserted };
+        } finally {
+          transaction.close();
+        }
+      });
+    },
+    async getForwardResearchLabels({ maximumRows = 250_000 } = {}) {
+      await initialize();
+      return readAllResearchPages(
+        async ({ after, limit }) =>
+          getPageResult(
+            await client.execute({
+              sql: 'SELECT sequence, payload FROM research_forward_labels WHERE sequence > ? ORDER BY sequence LIMIT ?',
+              args: [after, limit + 1],
+            }),
+            limit,
+          ),
+        maximumRows,
+      );
     },
     persistForecastSnapshots(rows) {
       return appendEvents('forecast_snapshots', rows, (row) => {

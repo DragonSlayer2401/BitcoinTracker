@@ -1,5 +1,8 @@
-import { PRESSURE_POLICY_VERSION } from '../fixedPrediction.utils';
-import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
+import {
+  PRESSURE_POLICY_VERSION,
+  KALSHI_CHECKPOINT_POLICY_VERSION,
+} from '../fixedPrediction.utils';
+import { KALSHI_OUTCOME_DEFINITION, isSameKalshiContract } from '../kalshi/contract.utils';
 import { getValidatedForecast } from './forecastValidation.utils';
 import { getValidatedScheduledForecast } from './scheduleValidation.utils';
 import { isLearnedModelVersion } from './modelValidation.utils';
@@ -12,10 +15,20 @@ export function getValidatedJournal(value) {
   if (!Array.isArray(value) || value.length > MAXIMUM_FORECASTS) return null;
 
   const forecasts = value.map(getValidatedForecast);
+  const active = forecasts.filter((forecast) =>
+    ['analyzing', 'pending'].includes(forecast?.status),
+  );
+  const hasValidActiveCheckpoints =
+    active.every(
+      (forecast) =>
+        forecast.outcomeDefinition === KALSHI_OUTCOME_DEFINITION &&
+        forecast.analysis.policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION &&
+        isSameKalshiContract(active[0].kalshiMarket, forecast.kalshiMarket),
+    ) && new Set(active.map((forecast) => forecast.checkpointMinutes)).size === active.length;
   if (
     forecasts.some((forecast) => forecast === null) ||
     new Set(forecasts.map((forecast) => forecast.id)).size !== forecasts.length ||
-    forecasts.filter((forecast) => ['analyzing', 'pending'].includes(forecast.status)).length > 1
+    (active.length > 1 && !hasValidActiveCheckpoints)
   ) {
     return null;
   }

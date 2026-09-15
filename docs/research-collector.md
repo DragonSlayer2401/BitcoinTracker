@@ -7,11 +7,79 @@ Use Node 24 and install project dependencies, including development dependencies
 ```sh
 pnpm research:collect --once
 pnpm research:collect
+pnpm research:collect --report
 ```
 
 The launcher loads `.env.local`, then `.env`; existing environment values take precedence. Local storage defaults to `data/bitcoin-research.db`; configured Turso credentials let the collector and hosted app share an archive.
 
 The collector and browser use the same [futures-aware calculation](derivatives.md). Futures data is optional: unavailable or warming inputs retain the existing price/spot-pressure calculation. After updating this code, stop an already-running collector with Ctrl+C and restart it to load the new calculation. Existing saved calls and pending outcomes remain intact.
+
+## Paired experiments and replay
+
+Collection also tests the research changes. Each new checkpoint records four probabilities from
+the exact same input snapshot: settlement dynamics alone, spot pressure only, futures pressure
+only, and the combined model. The actual production probability is recorded separately, including
+any approved learned adjustment. Disabling an effect does not remove its feed or accidentally
+change the common reference price, volatility, or known settlement readings.
+
+New manual Fixed decisions and browser background checkpoints use the same snapshot and comparison
+helpers. Full calculation inputs and frozen model artifacts are saved in `research_input_snapshots`;
+compact comparison results and a SHA-256 snapshot reference remain in `evidence_events`. Both
+commit in the same database transaction. Retries cannot rewrite the original inputs. Old records
+without these inputs cannot be reconstructed into prospective experiments.
+
+Every five minutes, away from the first capture period, continuous collection evaluates the saved
+comparisons and replays the latest ten snapshots. It writes
+`data/kalshi-collector-state.json.comparison.json` (or the corresponding selected state-file path).
+Run `npm run research:collect -- --report` to print a fresh JSON report and replay the latest 100
+snapshots without opening market feeds, taking the collector lock, training, or activating models.
+The report includes:
+
+- Separate 12/9/6/3/1-minute results and manual Fixed results by remaining time.
+- Brier score, log loss, directional accuracy, probability calibration, settlement interval coverage,
+  call coverage, and outcome coverage.
+- Paired differences from the settlement-only and combined models, with exploratory consecutive-event
+  block resampling. Repeated checkpoint rows do not become independent events.
+- Missing experiments, unavailable variants, optional-feed fallbacks, conflicting records, and pending outcomes.
+- Snapshot replay matches, failures, and captures whose timing evidence prevents safe replay.
+
+Replay reproduces the saved calculation boundary under its original clock. It is **not a complete
+exchange-message replay engine**: spot/futures inputs retain aggregated flow, and older REST
+histories have batch receipt provenance. Each snapshot records those limitations. Later feed data,
+model artifacts, amendments, and official outcomes never replace a saved input. A mismatch is
+reported; `--report` exits unsuccessfully when a replay fails.
+
+The collector also stores future BRTI prices after 15, 60, and 180 seconds in
+`research_forward_labels`. Each label uses the first canonical second at or after its due time,
+explicitly recorded in `dueAt`; it never substitutes the next available tick for a missing due tick.
+The return is `log(future BRTI / BRTI observed at capture)`. The exact reading can arrive later as
+history; its actual receipt/provenance is saved separately. Missing readings wait up to ten minutes
+before being marked missing. Coinbase proxy captures cannot produce BRTI return labels.
+Unacknowledged labels are preserved in the selected state's `.forward-labels.json` outbox.
+
+These labels support later tests of **forward** price response to trade pressure. They do not yet
+replace the current pressure coefficients. Experiment rankings do not activate a model; existing
+learning validation and promotion rules remain in force. Implementation/replay tests establish
+correctness, not improved market accuracy.
+
+## Benchmark streaming
+
+The persistent collector now opens the authenticated standard Kalshi `cfbenchmarks_value`
+WebSocket for BRTI. A subscription acknowledgment alone is insufficient: the index list must
+confirm BRTI and a fresh whole-second reading must arrive. Only canonical one-second observations
+enter the existing settlement grid; subsecond values and upstream trailing averages are not
+substituted into it. Local receipt times are retained with streamed and seeded readings.
+
+REST supplies initial history and refreshes it once a minute while the stream is live. If streaming
+is unavailable or stale, the collector returns to its existing two-second REST schedule through
+the shared limiter. Reconnect attempts use at least five seconds of delay and exponential backoff
+up to one minute; each connection sends one subscription and one entitlement/index-list request.
+These are local connection controls, not a promise about unrelated clients on the same account.
+The browser continues using the existing benchmark API; this change does not make the worker the
+authoritative publisher of all browser forecasts. No 5 Hz feed or new paid provider is required.
+
+Protocol references: [BRTI WebSocket](https://docs.kalshi.com/websockets/cfbenchmarks-value) and
+[WebSocket connection](https://docs.kalshi.com/getting_started/quick_start_websockets).
 
 ## Kalshi API budget
 
@@ -54,7 +122,9 @@ continued outcome checks can suspend it. Full model training keeps its larger, s
 training/calibration/test and future-validation requirements. Neither model activates merely
 because it has enough records. See [outcome learning](forecast-learning.md) for the requirements.
 
-`--once` waits briefly for market inputs, performs one recorder step, checks storage and exits. It is a connectivity/storage check, not verification of a complete event. A continuous collector needs an awake, connected machine.
+`--once` waits briefly for market inputs, performs one recorder step, collects due forward labels,
+checks storage and saved experiment replays, writes the comparison report, and exits. It is not
+verification of a complete event. A continuous collector needs an awake, connected machine.
 
 ## Durable state
 

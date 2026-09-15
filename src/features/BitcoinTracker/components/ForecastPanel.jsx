@@ -1,8 +1,9 @@
-import { Button, Form, InputGroup } from 'react-bootstrap';
+import { Button, Form, InputGroup, Table } from 'react-bootstrap';
 import Icon from './Icon';
 import ForecastStatus from './ForecastStatus';
 import ForecastPrediction from './ForecastPrediction';
 import KalshiEventControl from './KalshiEventControl';
+import ForecastModeControl from './ForecastModeControl';
 import { formatCountdown, formatPercent, formatPrice, formatTime } from '../utils/format.utils';
 
 const WITHHELD_REASONS = {
@@ -10,6 +11,13 @@ const WITHHELD_REASONS = {
   'market-data-unavailable': 'Fresh, uninterrupted market data was unavailable during observation.',
   'model-unavailable': 'The saved model version is unavailable; no replacement call was issued.',
 };
+
+const isMissedCheckpoint = (entry) =>
+  Number.isFinite(entry.checkpointMinutes) && entry.withholdingReason === 'insufficient-time';
+const getWithheldReason = (entry) =>
+  isMissedCheckpoint(entry)
+    ? 'The selected checkpoint passed before a fixed call could be captured.'
+    : WITHHELD_REASONS[entry.withholdingReason] || 'No fixed prediction was issued.';
 
 function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
   const isWithheld = entry.status === 'withheld';
@@ -26,7 +34,9 @@ function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
         <span className="small text-secondary">Fixed prediction</span>
         <h3 className="result-heading mt-1 mb-1" aria-live="polite">
           {isWithheld
-            ? 'No clear signal'
+            ? isMissedCheckpoint(entry)
+              ? 'Checkpoint missed'
+              : 'No fixed call'
             : progress?.phase === 'ready'
               ? 'Recording fixed call…'
               : isObserving
@@ -35,7 +45,7 @@ function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
         </h3>
         <p className="small text-secondary mb-0">
           {isWithheld
-            ? WITHHELD_REASONS[entry.withholdingReason] || 'No fixed prediction was issued.'
+            ? getWithheldReason(entry)
             : progress?.reason ||
               'The fixed call is saved after observation, including a small edge. Joining late shortens the observation period.'}
         </p>
@@ -61,6 +71,98 @@ function FixedPredictionStatus({ entry, progress, now, hasDifferentTarget }) {
   );
 }
 
+function getCheckpointStatus(entry, now) {
+  if (entry.status === 'withheld') return isMissedCheckpoint(entry) ? 'Missed' : 'Not captured';
+  if (entry.status === 'analyzing') {
+    const captureAt =
+      entry.analysis?.earliestAt ?? entry.expiresAt - entry.checkpointMinutes * 60_000;
+    if (now > (entry.analysis?.deadline ?? captureAt + 5000)) return 'Missed';
+    return now < captureAt ? `In ${formatCountdown(captureAt - now)}` : 'Waiting for data';
+  }
+  if (entry.status === 'resolved')
+    return typeof entry.correct === 'boolean'
+      ? entry.correct
+        ? 'Correct'
+        : 'Incorrect'
+      : `Settled ${entry.outcome === 'above' ? 'Yes' : 'No'}`;
+  if (entry.status === 'unobserved') return 'Result unavailable';
+  if (entry.status === 'awaiting-settlement' || now >= entry.expiresAt) return 'Awaiting result';
+  return 'Saved';
+}
+
+function FixedCheckpointPredictions({ entries, now }) {
+  const sorted = [...entries].sort(
+    (left, right) => (right.checkpointMinutes ?? 0) - (left.checkpointMinutes ?? 0),
+  );
+  return (
+    <section className="fixed-checkpoint-predictions" aria-labelledby="fixed-checkpoints-heading">
+      <h3 id="fixed-checkpoints-heading" className="h6 small fw-semibold mb-1">
+        Fixed predictions
+      </h3>
+      <div
+        className="fixed-checkpoint-scroll"
+        role="region"
+        aria-label="Saved and upcoming fixed checkpoints"
+        tabIndex={0}
+      >
+        <Table size="sm" className="fixed-checkpoint-table small mb-0">
+          <caption className="visually-hidden">
+            Fixed calls for the selected Kalshi event. Checkpoint times show minutes remaining
+            before close. Saved probabilities do not change.
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Checkpoint</th>
+              <th scope="col">Fixed call</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((entry) => {
+              const isPublished =
+                !['analyzing', 'withheld'].includes(entry.status) &&
+                Number.isFinite(entry.aboveProbability);
+              const probability =
+                entry.direction === 'below' ? entry.belowProbability : entry.aboveProbability;
+              return (
+                <tr key={entry.id}>
+                  <th scope="row">
+                    {Number.isFinite(entry.checkpointMinutes)
+                      ? `${entry.checkpointMinutes} min left`
+                      : 'Original call'}
+                  </th>
+                  <td
+                    className={
+                      isPublished ? `checkpoint-call ${entry.direction}` : 'text-secondary'
+                    }
+                  >
+                    {isPublished
+                      ? entry.direction === 'neutral'
+                        ? 'Neutral · 50/50'
+                        : `${entry.direction === 'above' ? 'Yes' : 'No'} · ${formatPercent(probability)}`
+                      : '—'}
+                  </td>
+                  <td
+                    title={
+                      entry.status === 'withheld'
+                        ? getWithheldReason(entry)
+                        : isPublished
+                          ? `Captured ${formatTime(entry.createdAt)}`
+                          : undefined
+                    }
+                  >
+                    {getCheckpointStatus(entry, now)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
 export default function ForecastPanel({
   targetInput,
   forecast,
@@ -78,6 +180,14 @@ export default function ForecastPanel({
   kalshi,
   onSchedule,
   onCancelSchedule,
+  autoEnabled = false,
+  onAutoEnabledChange,
+  checkpointMinutes = [9, 6],
+  onCheckpointMinutesChange,
+  eventForecasts = [],
+  isPreparingForecast = false,
+  isJournalOwner = true,
+  preferencesWarning = null,
 }) {
   const isAnalyzing = recordedForecast?.status === 'analyzing';
   const isWithheld = recordedForecast?.status === 'withheld';
@@ -87,7 +197,9 @@ export default function ForecastPanel({
   const isFuture = kalshi.market?.startsAt > now;
   const isScheduled = scheduledForecast?.status === 'scheduled';
   const canRecord =
+    isJournalOwner &&
     isJournalReady &&
+    !eventForecasts.length &&
     !activeForecast &&
     !recordedForecast &&
     !isScheduled &&
@@ -95,7 +207,9 @@ export default function ForecastPanel({
     forecast.available &&
     !isFuture;
   const canSchedule =
+    isJournalOwner &&
     isJournalReady &&
+    !eventForecasts.length &&
     !activeForecast &&
     !recordedForecast &&
     !isScheduled &&
@@ -132,9 +246,12 @@ export default function ForecastPanel({
             now={now}
             previewEndsAt={forecastDeadline ?? undefined}
             onCancelSchedule={onCancelSchedule}
+            canManageSchedule={isJournalOwner}
             showRecordedDetails={false}
           />
-          {recordedForecast && (isAnalyzing || isWithheld) ? (
+          {eventForecasts.length ? (
+            <FixedCheckpointPredictions entries={eventForecasts} now={now} />
+          ) : recordedForecast && (isAnalyzing || isWithheld) ? (
             <FixedPredictionStatus
               entry={recordedForecast}
               progress={fixedProgress}
@@ -156,7 +273,7 @@ export default function ForecastPanel({
             unavailableLabel={
               hasWindowEnded ? 'Window ended' : isLoading ? 'Connecting…' : 'Estimate paused'
             }
-            compact={Boolean(recordedForecast)}
+            compact={Boolean(recordedForecast || eventForecasts.length)}
           />
           <div className="d-flex justify-content-between align-items-center flex-wrap gap-1 mt-2 small text-secondary">
             {riskControl ?? 'Model estimates · not yet validated'}
@@ -184,7 +301,13 @@ export default function ForecastPanel({
             onChange={kalshi.onSelect}
             now={now}
             error={kalshi.error}
-            disabled={Boolean(recordedForecast || isScheduled)}
+            disabled={Boolean(
+              activeForecast ||
+              (!isPreparingForecast && (recordedForecast || eventForecasts.length)) ||
+              isScheduled ||
+              !isJournalOwner ||
+              autoEnabled,
+            )}
           />
           <div className="target-control mb-2">
             <Form.Label htmlFor="target-price" className="small fw-medium">
@@ -202,10 +325,20 @@ export default function ForecastPanel({
               />
               <InputGroup.Text>USD</InputGroup.Text>
             </InputGroup>
-            <p id="target-help" className="small text-secondary mt-1 mb-0">
+            <p id="target-help" className="visually-hidden">
               Official target · locked to this contract
             </p>
           </div>
+          <ForecastModeControl
+            autoEnabled={autoEnabled}
+            onAutoEnabledChange={onAutoEnabledChange}
+            checkpointMinutes={checkpointMinutes}
+            onCheckpointMinutesChange={onCheckpointMinutesChange}
+            hasRecordedEvent={Boolean(recordedForecast || eventForecasts.length || isScheduled)}
+            isJournalOwner={isJournalOwner}
+            disabled={!isJournalReady}
+            preferencesWarning={preferencesWarning}
+          />
           {forecast.available && forecast.kalshi && (
             <details className="small mb-2">
               <summary>Settlement estimate details</summary>
@@ -258,12 +391,12 @@ export default function ForecastPanel({
             <Button
               type={isCompleted ? 'button' : 'submit'}
               className="w-100 track-button d-flex justify-content-center align-items-center gap-2"
-              disabled={!isCompleted && !canRecord && !canSchedule}
+              disabled={!isJournalOwner || (!isCompleted && !canRecord && !canSchedule)}
               onClick={
                 isCompleted
                   ? (event) => {
                       event.preventDefault();
-                      onNewForecast();
+                      if (isJournalOwner) onNewForecast();
                     }
                   : undefined
               }
@@ -272,21 +405,27 @@ export default function ForecastPanel({
                 ? 'New forecast'
                 : activeForecast
                   ? isAnalyzing
-                    ? 'Observing market'
+                    ? eventForecasts.length
+                      ? 'Checkpoints armed'
+                      : 'Observing market'
                     : 'Forecast in progress'
                   : isScheduled
                     ? 'Start scheduled'
                     : isFuture
                       ? 'Schedule forecast'
-                      : 'Start forecast'}
+                      : isPreparingForecast && eventForecasts.length
+                        ? 'Event already recorded'
+                        : 'Start forecast'}
               <Icon name={activeForecast || isScheduled ? 'clock' : 'arrow'} />
             </Button>
             <p className="small text-secondary mt-2 mb-0">
               {isScheduled
-                ? 'Waiting for the official target at the event start. Keep this tab open.'
+                ? 'Waiting for the official target. Fixed calls use the selected times remaining.'
                 : isCompleted
                   ? 'Start another event. The original call stays saved.'
-                  : 'Official target and close stay fixed. Observe up to 3 minutes, or less for a late entry.'}
+                  : isPreparingForecast && eventForecasts.length
+                    ? 'Choose another Kalshi event to record new checkpoints.'
+                    : 'Official target and close stay fixed. Each captured call stays saved.'}
             </p>
           </div>
         </section>

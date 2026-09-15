@@ -5,10 +5,27 @@ export const selectTrackerState = (state) => state.tracker;
 export const selectForecasts = (state) => selectTrackerState(state).forecasts;
 export const selectScheduledForecast = (state) =>
   selectTrackerState(state).scheduledForecast ?? null;
+export const selectLatestForecast = createSelector(
+  [selectForecasts],
+  (forecasts) =>
+    [...forecasts].sort(
+      (left, right) =>
+        right.startsAt - left.startsAt ||
+        Number(Number.isFinite(right.aboveProbability)) -
+          Number(Number.isFinite(left.aboveProbability)) ||
+        right.createdAt - left.createdAt,
+    )[0] ?? null,
+);
 export const selectActiveForecast = createSelector(
   [selectForecasts],
   (forecasts) =>
-    forecasts.find((forecast) => ['analyzing', 'pending'].includes(forecast.status)) ?? null,
+    [...forecasts]
+      .filter((forecast) => forecast.status === 'analyzing')
+      .sort((first, second) => first.analysis.earliestAt - second.analysis.earliestAt)[0] ??
+    [...forecasts]
+      .filter((forecast) => forecast.status === 'pending')
+      .sort((first, second) => second.createdAt - first.createdAt)[0] ??
+    null,
 );
 export const selectHasForecastInProgress = createSelector(
   [selectActiveForecast, selectScheduledForecast],

@@ -3,6 +3,9 @@ import {
   MARKET_AWARE_POLICY_VERSION,
   PRESSURE_POLICY_VERSION,
   KALSHI_POLICY_VERSION,
+  KALSHI_CHECKPOINT_POLICY_VERSION,
+  isKalshiCheckpointMinutes,
+  hasInsufficientFixedPredictionTime,
   usesSnapshotPolicy,
   getFixedForecastAnalysis,
   getQualifyingDirection,
@@ -36,6 +39,7 @@ import {
 
 const SCHEDULE_START_GRACE_MS = 15 * 1000;
 const OBSERVATION_WINDOW_MS = 15 * 1000;
+const kalshiPolicyVersions = [KALSHI_POLICY_VERSION, KALSHI_CHECKPOINT_POLICY_VERSION];
 
 const snapshotFields = [
   'id',
@@ -100,6 +104,9 @@ function getExpectedForecastFields(value) {
   if (hasStartsAt) fields.push('startsAt');
   if (hasTimingMode) fields.push('timingMode');
   if (hasAnalysis) fields.push('analysis');
+  if (hasOwnField(value, 'captureOrigin')) fields.push('captureOrigin');
+  if (value.analysis?.policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION)
+    fields.push('checkpointMinutes');
   if (usesSnapshotCapture) fields.push('calculationMode');
   if (usesLearnedModel) fields.push('learning');
   if (hasOutcomeDefinition) fields.push('outcomeDefinition');
@@ -128,14 +135,14 @@ function hasCompatibleForecastModel(value, startsAt) {
         value.kalshiMarket.target !== value.target ||
         value.kalshiMarket.expiresAt !== value.expiresAt ||
         value.kalshiMarket.startsAt !== startsAt ||
-        value.analysis?.policyVersion !== KALSHI_POLICY_VERSION ||
+        !kalshiPolicyVersions.includes(value.analysis?.policyVersion) ||
         !isKalshiModelVersion(value.modelVersion) ||
         (hasNoFixedPrediction
           ? value.kalshi !== null
           : !hasValidKalshiMetadata(value.kalshi, value)))) ||
     (!usesKalshi &&
       (isKalshiModelVersion(value.modelVersion) ||
-        value.analysis?.policyVersion === KALSHI_POLICY_VERSION)) ||
+        kalshiPolicyVersions.includes(value.analysis?.policyVersion))) ||
     (usesLearnedModel &&
       (hasNoFixedPrediction || !hasValidLearningMetadata(value.learning, value))) ||
     (usesDerivatives &&
@@ -168,11 +175,13 @@ function hasValidForecastTiming(value, startsAt) {
     !isTimestamp(value.createdAt) ||
     !isTimestamp(startsAt) ||
     !isTimestamp(value.expiresAt) ||
+    (hasOwnField(value, 'captureOrigin') &&
+      !['automatic', 'manual'].includes(value.captureOrigin)) ||
     (hasOutcomeDefinition &&
       (![DEADLINE_OUTCOME_DEFINITION, KALSHI_OUTCOME_DEFINITION].includes(
         value.outcomeDefinition,
       ) ||
-        ![MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION].includes(
+        ![MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION, ...kalshiPolicyVersions].includes(
           value.analysis?.policyVersion,
         ))) ||
     (hasTimingMode && (!isEndTimeCapture || !hasStartsAt)) ||
@@ -224,6 +233,7 @@ function hasValidForecastAnalysis(value, startsAt) {
   const isEndTimeCapture = hasOwnField(value, 'timingMode') && value.timingMode === 'end';
   const hasNoFixedPrediction = ['analyzing', 'withheld'].includes(value.status);
   const analysis = value.analysis;
+  const usesCheckpoint = analysis?.policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION;
   if (
     !isEndTimeCapture ||
     !hasExactFields(analysis, analysisFields) ||
@@ -231,7 +241,8 @@ function hasValidForecastAnalysis(value, startsAt) {
     !isTimestamp(analysis.earliestAt) ||
     !isTimestamp(analysis.deadline) ||
     analysis.startedAt < startsAt ||
-    analysis.startedAt >= value.expiresAt
+    analysis.startedAt >= value.expiresAt ||
+    (usesCheckpoint && !isKalshiCheckpointMinutes(value.checkpointMinutes))
   ) {
     return false;
   }
@@ -239,15 +250,16 @@ function hasValidForecastAnalysis(value, startsAt) {
     startedAt: analysis.startedAt,
     expiresAt: value.expiresAt,
     policyVersion: analysis.policyVersion,
+    checkpointMinutes: value.checkpointMinutes,
   });
   if (
     ![
       FIXED_PREDICTION_POLICY_VERSION,
       MARKET_AWARE_POLICY_VERSION,
       PRESSURE_POLICY_VERSION,
-      KALSHI_POLICY_VERSION,
+      ...kalshiPolicyVersions,
     ].includes(analysis.policyVersion) ||
-    ([MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION, KALSHI_POLICY_VERSION].includes(
+    ([MARKET_AWARE_POLICY_VERSION, PRESSURE_POLICY_VERSION, ...kalshiPolicyVersions].includes(
       analysis.policyVersion,
     ) &&
       !hasOutcomeDefinition) ||
@@ -256,6 +268,7 @@ function hasValidForecastAnalysis(value, startsAt) {
       ? value.createdAt !== analysis.startedAt
       : value.createdAt < analysis.earliestAt ||
         value.createdAt > analysis.deadline ||
+        (usesCheckpoint && value.createdAt < analysis.startedAt) ||
         value.direction !==
           getQualifyingDirection({ ...value, available: true }, analysis.policyVersion))
   ) {
@@ -273,7 +286,7 @@ function hasValidWithholdingReason(value) {
       (usesSnapshotCapture &&
         ['no-consensus', 'market-conditions'].includes(value.withholdingReason)) ||
       (value.withholdingReason === 'insufficient-time') !==
-        value.analysis.earliestAt > value.analysis.deadline)
+        hasInsufficientFixedPredictionTime(value.analysis))
   ) {
     return false;
   }

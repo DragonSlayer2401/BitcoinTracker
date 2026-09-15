@@ -40,6 +40,7 @@ const getEstimate = () => ({
   aboveProbability: 0.51,
   belowProbability: 0.49,
   modelVersion: 'test-model',
+  researchExperiment: { version: 'kalshi-ablation-v1', capturedAt: start + 180_000, variants: {} },
 });
 const marketAt = (time, target = 100_000) => ({
   ticker: 'KXBTC15M-TEST',
@@ -207,6 +208,12 @@ test('rejects state paths outside the data directory and unknown arguments', () 
 });
 
 function getRuntime(time = start + 240_000) {
+  const benchmarkStream = {
+    start: jest.fn(),
+    stop: jest.fn(),
+    seed: jest.fn(),
+    getSnapshot: jest.fn(() => ({ available: false, status: 'warming' })),
+  };
   const futuresStream = {
     start: jest.fn(),
     stop: jest.fn(),
@@ -230,11 +237,15 @@ function getRuntime(time = start + 240_000) {
   return {
     stream,
     futuresStream,
+    benchmarkStream,
     arguments: {
       once: true,
       statePath,
       repository: {
         persistEvidenceRows: jest.fn().mockResolvedValue(undefined),
+        getPendingForwardCaptures: jest.fn().mockResolvedValue([]),
+        getLearningEvidenceRows: jest.fn().mockResolvedValue([]),
+        getForwardResearchLabels: jest.fn().mockResolvedValue([]),
         getResearchStatus: jest
           .fn()
           .mockResolvedValue({ mode: 'local-database', evidenceCount: 1 }),
@@ -245,6 +256,7 @@ function getRuntime(time = start + 240_000) {
       },
       createStream: () => stream,
       createFuturesStream: () => futuresStream,
+      createBenchmarkStream: () => benchmarkStream,
       loadTicker: async () => quote(time),
       loadCandles: async () => [],
       loadMarkets: async () => ({ markets: [marketAt(time)] }),
@@ -322,6 +334,33 @@ test('a termination signal exits a continuous loop and releases owned resources'
   });
   expect(runtime.stream.stop).toHaveBeenCalledTimes(1);
   expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
+});
+
+test('healthy BRTI streaming reduces REST polling and preserves startup history seeding', async () => {
+  const runtime = getRuntime();
+  let time = start + 240_000;
+  const controller = new AbortController();
+  runtime.benchmarkStream.getSnapshot.mockImplementation(() => ({
+    available: true,
+    transport: 'kalshi-websocket',
+    samples: [],
+    receivedAt: time,
+  }));
+  const loadBenchmark = jest.fn().mockResolvedValue({ samples: [], receivedAt: time });
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    loadBenchmark,
+    now: () => time,
+    sleep: async () => {
+      time += 10_000;
+      if (time >= start + 295_000) controller.abort();
+    },
+  });
+  expect(loadBenchmark).toHaveBeenCalledTimes(1);
+  expect(runtime.benchmarkStream.seed).toHaveBeenCalledTimes(1);
+  expect(runtime.benchmarkStream.stop).toHaveBeenCalledTimes(1);
 });
 
 test('a stale stream ticker falls back to fresh REST for fixed publication and keeps REST refreshing', async () => {

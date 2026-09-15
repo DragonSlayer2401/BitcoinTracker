@@ -19,7 +19,9 @@ export function getResearchForecast(input, models = {}, windowStartAt = null) {
     horizonMinutes: (input.kalshiMarket?.expiresAt - input.now) / 60_000,
   };
   const pressureBase = getPressureForecast(effectiveInput);
-  const base = getKalshiForecast(effectiveInput, pressureBase);
+  const { researchVariants, ...base } = getKalshiForecast(effectiveInput, pressureBase, {
+    includeResearchVariants: true,
+  });
   const outcomeDefinition = KALSHI_OUTCOME_DEFINITION;
   const expiresAt =
     effectiveInput.expiresAt ??
@@ -70,6 +72,47 @@ export function getResearchForecast(input, models = {}, windowStartAt = null) {
     expiresAt,
     outcomeDefinition,
     learningFeatures,
+    researchExperiment: {
+      version: 'kalshi-ablation-v1',
+      capturedAt: input.now,
+      marketTicker: input.kalshiMarket?.ticker ?? null,
+      target: effectiveInput.target ?? null,
+      expiresAt: expiresAt ?? null,
+      variants:
+        researchVariants ??
+        Object.fromEntries(
+          ['settlement-only', 'spot-only', 'futures-only', 'combined'].map((name) => [
+            name,
+            {
+              available: false,
+              reason: base.reason ?? 'The settlement estimate is unavailable.',
+              modelVersion: base.modelVersion,
+              aboveProbability: null,
+              belowProbability: null,
+              appliedSpot: false,
+              appliedFutures: false,
+              fallbacks: [],
+              referenceSource: null,
+              referencePrice: null,
+              referenceAt: null,
+              minuteVolatility: null,
+              basisLogDeviation: null,
+              expectedSettlementAverage: null,
+              settlementStandardDeviation: null,
+              settlementLowerBound: null,
+              settlementUpperBound: null,
+            },
+          ]),
+        ),
+      production: {
+        available: estimate.available,
+        reason: estimate.reason ?? null,
+        aboveProbability: estimate.aboveProbability,
+        belowProbability: estimate.belowProbability,
+        modelVersion: estimate.modelVersion,
+        modelId: estimate.learning?.modelId ?? null,
+      },
+    },
     shadowPrediction: Number.isFinite(shadowProbability)
       ? {
           modelId: candidate.id,

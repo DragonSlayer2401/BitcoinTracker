@@ -533,6 +533,78 @@
     }
   }
 
+  .forecast-mode-control {
+    .checkpoint-select-values {
+      gap: 4px;
+      padding: 3px 6px;
+    }
+    .checkpoint-select-chip {
+      display: flex;
+      align-items: center;
+      border-radius: 4px;
+      background: #203d2c;
+      color: #e7f0e9;
+    }
+    .checkpoint-select-chip-label {
+      padding: 3px 2px 3px 6px;
+    }
+    .checkpoint-select-chip-remove {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 24px;
+      min-height: 24px;
+      border-radius: 3px;
+
+      &:hover {
+        background: #31543f;
+      }
+    }
+  }
+
+  .fixed-checkpoint-scroll {
+    max-height: 136px;
+    overflow: auto;
+    scrollbar-width: thin;
+    border: 1px solid var(--tracker-border);
+    border-radius: 6px;
+  }
+
+  .fixed-checkpoint-table {
+    --bs-table-bg: transparent;
+    --bs-table-color: #e7f0e9;
+    --bs-table-border-color: var(--tracker-border);
+
+    th,
+    td {
+      padding: 5px 6px;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--tracker-surface);
+      color: var(--tracker-muted);
+      font-size: 11px;
+      font-weight: 500;
+    }
+    tbody th {
+      font-weight: 500;
+    }
+    .checkpoint-call {
+      font-variant-numeric: tabular-nums;
+
+      &.above {
+        color: var(--tracker-green);
+      }
+      &.below {
+        color: var(--tracker-red);
+      }
+    }
+  }
+
   .forecast-action {
     padding-top: 4px;
   }
@@ -791,6 +863,9 @@
       }
     }
     .estimate-panel {
+      .fixed-checkpoint-scroll {
+        max-height: 116px;
+      }
       .forecast-status {
         margin-bottom: 8px;
         padding: 6px 8px;

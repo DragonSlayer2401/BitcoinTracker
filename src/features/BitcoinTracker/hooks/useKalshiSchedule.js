@@ -1,9 +1,15 @@
 import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { selectScheduledForecast } from '../state/selectors/trackerSelectors';
-import { scheduledForecastStarted, scheduleStartMissed } from '../state/slices/trackerSlice';
+import {
+  scheduledForecastStarted,
+  scheduledForecastBatchStarted,
+  scheduleStartMissed,
+} from '../state/slices/trackerSlice';
 import { getKalshiContract, KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { createKalshiForecastRecord } from '../utils/kalshi/forecastRecord.utils';
+import { createKalshiForecastBatch } from '../utils/kalshi/forecastBatch.utils';
+import { KALSHI_CHECKPOINT_POLICY_VERSION } from '../utils/fixedPrediction.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 import {
@@ -83,6 +89,27 @@ export default function useKalshiSchedule({
       reference.receivedAt < schedule.startsAt
     )
       return;
+    if (schedule.policyVersion === KALSHI_CHECKPOINT_POLICY_VERSION) {
+      dispatch(
+        scheduledForecastBatchStarted({
+          now: capturedAt,
+          forecasts: createKalshiForecastBatch({
+            id: schedule.id,
+            checkpointMinutes: Array.isArray(schedule.checkpointMinutes)
+              ? schedule.checkpointMinutes
+              : [schedule.checkpointMinutes],
+            contract,
+            createdAt: capturedAt,
+            price: reference.price,
+            ...(schedule.captureOrigin ? { captureOrigin: schedule.captureOrigin } : {}),
+            ...(derivatives !== undefined
+              ? { modelVersion: KALSHI_DERIVATIVES_MODEL_VERSION }
+              : {}),
+          }),
+        }),
+      );
+      return;
+    }
     dispatch(
       scheduledForecastStarted({
         now: capturedAt,

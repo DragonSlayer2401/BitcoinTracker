@@ -16,17 +16,15 @@ export function getKalshiCredentialFingerprint(environment = process.env) {
     .digest('hex');
 }
 
-export function createKalshiReadHeaders(path, environment = process.env, now = Date.now()) {
-  const resource = getKalshiReadResource(path);
+function createSignedGetHeaders(path, environment, now) {
   if (!hasKalshiCredentials(environment)) {
     throw new KalshiDataError('Configure server-side Kalshi credentials for BRTI access.', 503);
   }
-  // Only the explicit data/limit allowlist can be signed. The method is always GET.
   try {
     const key = createPrivateKey(environment.KALSHI_PRIVATE_KEY.replace(/\\n/g, '\n'));
     if (key.asymmetricKeyType !== 'rsa') throw new Error('Invalid key type.');
     const timestamp = String(now);
-    const signature = sign('sha256', Buffer.from(`${timestamp}GET/trade-api/v2${resource.path}`), {
+    const signature = sign('sha256', Buffer.from(`${timestamp}GET${path}`), {
       key,
       padding: constants.RSA_PKCS1_PSS_PADDING,
       saltLength: constants.RSA_PSS_SALTLEN_DIGEST,
@@ -39,4 +37,15 @@ export function createKalshiReadHeaders(path, environment = process.env, now = D
   } catch {
     throw new KalshiDataError('The server-side Kalshi signing key is invalid.', 503);
   }
+}
+
+export function createKalshiReadHeaders(path, environment = process.env, now = Date.now()) {
+  // Only the explicit data/limit allowlist can be signed. The method is always GET.
+  const resource = getKalshiReadResource(path);
+  return createSignedGetHeaders(`/trade-api/v2${resource.path}`, environment, now);
+}
+
+/** The fixed socket handshake is the only additional signing surface; no arbitrary path/method. */
+export function createKalshiBenchmarkStreamHeaders(environment = process.env, now = Date.now()) {
+  return createSignedGetHeaders('/trade-api/ws/v2', environment, now);
 }

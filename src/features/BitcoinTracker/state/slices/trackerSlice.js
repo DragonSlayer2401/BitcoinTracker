@@ -13,6 +13,8 @@ import {
 import {
   MARKET_AWARE_POLICY_VERSION,
   PRESSURE_POLICY_VERSION,
+  KALSHI_CHECKPOINT_POLICY_VERSION,
+  hasInsufficientFixedPredictionTime,
   usesSnapshotPolicy,
 } from '../../utils/fixedPrediction.utils';
 
@@ -25,6 +27,60 @@ const scheduleStartGrace = 15 * 1000;
 const initialState = { forecasts: [], scheduledForecast: null, storageWarning: null };
 const isTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
 const isActiveForecast = (forecast) => ['analyzing', 'pending'].includes(forecast.status);
+
+function getForecastBatch(state, snapshots, schedule = null, now = null) {
+  if (!Array.isArray(snapshots) || snapshots.length < 1 || snapshots.length > 5) return null;
+  const forecasts = snapshots.map(getValidatedForecast);
+  if (
+    forecasts.some(
+      (forecast) =>
+        !forecast ||
+        forecast.status !== 'analyzing' ||
+        forecast.analysis.policyVersion !== KALSHI_CHECKPOINT_POLICY_VERSION,
+    ) ||
+    state.forecasts.some(isActiveForecast) ||
+    forecasts.some((forecast) => state.forecasts.some((existing) => existing.id === forecast.id))
+  )
+    return null;
+  if (schedule) {
+    const checkpoints = Array.isArray(schedule.checkpointMinutes)
+      ? schedule.checkpointMinutes
+      : [schedule.checkpointMinutes];
+    if (
+      !isTimestamp(now) ||
+      schedule.status !== 'scheduled' ||
+      now < schedule.startsAt ||
+      now >= schedule.expiresAt ||
+      forecasts.length !== checkpoints.length ||
+      forecasts.some(
+        (forecast) =>
+          forecast.id !== `${schedule.id}:${forecast.checkpointMinutes}` ||
+          !checkpoints.includes(forecast.checkpointMinutes) ||
+          forecast.createdAt !== now ||
+          forecast.startsAt !== schedule.startsAt ||
+          forecast.expiresAt !== schedule.expiresAt ||
+          forecast.kalshiMarket.ticker !== schedule.marketTicker ||
+          forecast.kalshiMarket.eventTicker !== schedule.eventTicker ||
+          forecast.captureOrigin !== schedule.captureOrigin ||
+          forecast.analysis.policyVersion !== schedule.policyVersion,
+      )
+    )
+      return null;
+  } else if (state.scheduledForecast?.status === 'scheduled') return null;
+  const unfinished = state.forecasts.filter(
+    (forecast) => forecast.status === 'awaiting-settlement',
+  );
+  if (forecasts.length + unfinished.length > maximumForecasts) return null;
+  const completed = state.forecasts.filter((forecast) => forecast.status !== 'awaiting-settlement');
+  return getValidatedJournalState({
+    forecasts: [
+      ...forecasts,
+      ...unfinished,
+      ...completed.slice(0, maximumForecasts - forecasts.length - unfinished.length),
+    ],
+    scheduledForecast: null,
+  });
+}
 
 function canObserveForecast(forecast, ticker, now) {
   return (
@@ -49,6 +105,20 @@ const trackerSlice = createSlice({
   name: 'tracker',
   initialState,
   reducers: {
+    forecastBatchRecorded(state, action) {
+      const journal = getForecastBatch(state, action.payload);
+      if (journal) Object.assign(state, journal);
+    },
+    scheduledForecastBatchStarted(state, action) {
+      if (!state.scheduledForecast) return;
+      const journal = getForecastBatch(
+        state,
+        action.payload?.forecasts,
+        state.scheduledForecast,
+        action.payload?.now,
+      );
+      if (journal) Object.assign(state, journal);
+    },
     forecastRecorded(state, action) {
       const forecast = getValidatedForecast(action.payload);
       if (
@@ -149,9 +219,16 @@ const trackerSlice = createSlice({
         forecast === null ||
         forecast.status !== 'pending' ||
         forecast.createdAt !== now ||
-        !['id', 'target', 'startsAt', 'expiresAt', 'timingMode', 'outcomeDefinition'].every(
-          (field) => forecast[field] === existing[field],
-        ) ||
+        ![
+          'id',
+          'target',
+          'startsAt',
+          'expiresAt',
+          'timingMode',
+          'outcomeDefinition',
+          'checkpointMinutes',
+          'captureOrigin',
+        ].every((field) => forecast[field] === existing[field]) ||
         (existing.outcomeDefinition === KALSHI_OUTCOME_DEFINITION &&
           !isSameKalshiContract(existing.kalshiMarket, forecast.kalshiMarket)) ||
         (forecast.modelVersion !== existing.modelVersion &&
@@ -173,7 +250,7 @@ const trackerSlice = createSlice({
       const { id, now, reason } = action.payload ?? {};
       const forecast = state.forecasts.find((entry) => entry.id === id);
       if (forecast?.status !== 'analyzing' || !isTimestamp(now)) return;
-      const hasInsufficientTime = forecast.analysis.earliestAt > forecast.analysis.deadline;
+      const hasInsufficientTime = hasInsufficientFixedPredictionTime(forecast.analysis);
       if (
         now < forecast.analysis.startedAt ||
         (!hasInsufficientTime && now < forecast.analysis.deadline)
@@ -263,11 +340,17 @@ const trackerSlice = createSlice({
         state.scheduledForecast = journal.scheduledForecast;
       }
     },
+    journalSynchronized(state, action) {
+      const journal = getValidatedJournalState(action.payload);
+      if (journal) Object.assign(state, journal);
+    },
   },
 });
 
 export const {
   forecastRecorded,
+  forecastBatchRecorded,
+  scheduledForecastBatchStarted,
   scheduleCreated,
   scheduleCancelled,
   scheduleStartMissed,
@@ -278,6 +361,7 @@ export const {
   historyCleared,
   storageWarningChanged,
   historyRestored,
+  journalSynchronized,
 } = trackerSlice.actions;
 
 export default trackerSlice.reducer;

@@ -56,6 +56,17 @@ describe('research offline outbox', () => {
     globalThis.indexedDB = originalFactory;
   });
 
+  test('large replay captures upload in bounded batches without dropping the remainder', async () => {
+    const first = { ...event(1), researchInputSnapshot: { history: 'x'.repeat(1_600_000) } };
+    const second = { ...event(2), researchInputSnapshot: { history: 'x'.repeat(1_600_000) } };
+    await appendEvidenceRows([first, second]);
+    const batch = await readResearchOutbox();
+    expect(batch.evidence).toEqual([first]);
+    expect(new Blob([JSON.stringify(batch)]).size).toBeLessThan(4 * 1024 * 1024);
+    await acknowledgeResearchBatch(batch);
+    expect((await readResearchOutbox()).evidence).toEqual([second]);
+  });
+
   test('upgrades v1 evidence to the v2 outbox without discarding historical inputs', async () => {
     const rows = [event(2), event(1)];
     await createLegacyDatabase(rows);

@@ -139,6 +139,7 @@ export function getEvidenceRow({
   learningFeatures,
   shadowPrediction,
   earlyShadowPrediction,
+  researchInputSnapshot,
 }) {
   const timestamp = event === 'observation' ? Math.floor(now / 5000) * 5000 : now;
   const canHaveInputs =
@@ -160,6 +161,7 @@ export function getEvidenceRow({
     recordedAt: now,
     sessionOrigin,
     cohort,
+    ...(entry.captureOrigin ? { captureOrigin: entry.captureOrigin } : {}),
     inputObservedAt: canHaveInputs ? inputObservedAt : null,
     featureCutoffAt: canHaveInputs ? inputObservedAt : null,
     inputStatus: canHaveInputs
@@ -201,6 +203,13 @@ export function getEvidenceRow({
     earlyShadowPrediction: canHaveInputs
       ? (earlyShadowPrediction ?? inputEstimate?.earlyShadowPrediction ?? null)
       : null,
+    researchExperiment: canHaveInputs ? (inputEstimate?.researchExperiment ?? null) : null,
+    // The server stores full inputs separately; outcome/restored rows never recreate a snapshot.
+    ...(event === 'decision' &&
+    canHaveInputs &&
+    (researchInputSnapshot ?? inputEstimate?.researchInputSnapshot)
+      ? { researchInputSnapshot: researchInputSnapshot ?? inputEstimate.researchInputSnapshot }
+      : {}),
     learning: inputEstimate?.learning ?? entry.learning ?? null,
     calculationMode: entry.calculationMode ?? null,
     quoteTime: reference?.time ?? null,

@@ -4,7 +4,7 @@ import { runResearchLearning } from '@/services/research/research.client.service
 
 const EMPTY_MODELS = Object.freeze({ active: null, candidate: null });
 
-export default function useResearchLearning({ isReady, now }) {
+export default function useResearchLearning({ isReady, canReview = isReady, now }) {
   const query = useGetResearchModelsQuery(undefined, {
     skip: !isReady,
     pollingInterval: 60_000,
@@ -23,6 +23,7 @@ export default function useResearchLearning({ isReady, now }) {
   useEffect(() => {
     if (
       !isReady ||
+      !canReview ||
       !now ||
       query.isError ||
       !query.data ||
@@ -45,6 +46,6 @@ export default function useResearchLearning({ isReady, now }) {
       .finally(() => {
         busy.current = false;
       });
-  }, [isReady, now, query.data, query.isError, query.refetch]);
+  }, [isReady, canReview, now, query.data, query.isError, query.refetch]);
   return { models: query.data ?? EMPTY_MODELS, warning };
 }

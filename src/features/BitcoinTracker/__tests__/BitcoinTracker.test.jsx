@@ -6,7 +6,11 @@ import { useGetCandlesQuery, useGetTickerQuery } from '@/services/coinbase/coinb
 import { useGetKalshiMarketsQuery, useGetKalshiBenchmarkQuery } from '@/services/kalshi/kalshi.api';
 import BitcoinTracker from '../index.web';
 import trackerReducer from '../state/slices/trackerSlice';
-import { formatPercent, getPredictionLabel } from '../utils/format.utils';
+import { formatPercent } from '../utils/format.utils';
+import {
+  FORECAST_PREFERENCES_STORAGE_KEY,
+  writeForecastPreferences,
+} from '../utils/forecastAutomation.utils';
 
 jest.mock('@/services/coinbase/coinbase.api', () => ({
   useGetCandlesQuery: jest.fn(),
@@ -174,17 +178,19 @@ async function renderTracker() {
 }
 
 function expectFixedPrediction(snapshot) {
-  const prediction = within(screen.getByRole('region', { name: 'Fixed prediction' }));
-  const directionLabel = getPredictionLabel(snapshot);
-
-  expect(prediction.getByRole('heading', { name: directionLabel })).toBeInTheDocument();
-  expect(
-    prediction.getByRole('img', {
-      name: snapshot.kalshiMarket
-        ? `Yes · at or above ${formatPercent(snapshot.aboveProbability)}, No · below ${formatPercent(snapshot.belowProbability)}`
-        : `Above target ${formatPercent(snapshot.aboveProbability)}, Below target ${formatPercent(snapshot.belowProbability)}`,
-    }),
-  ).toBeInTheDocument();
+  const checkpoints = within(
+    screen.getByRole('region', { name: 'Saved and upcoming fixed checkpoints' }),
+  );
+  const row = within(
+    checkpoints.getByRole('row', { name: new RegExp(`${snapshot.checkpointMinutes} min left`) }),
+  );
+  const label =
+    snapshot.direction === 'neutral'
+      ? 'Neutral · 50/50'
+      : snapshot.direction === 'above'
+        ? `Yes · ${formatPercent(snapshot.aboveProbability)}`
+        : `No · ${formatPercent(snapshot.belowProbability)}`;
+  expect(row.getByText(label)).toBeInTheDocument();
 }
 
 describe('BitcoinTracker interactions', () => {
@@ -192,6 +198,7 @@ describe('BitcoinTracker interactions', () => {
   let market;
   let quoteQuery;
   let candleQuery;
+  let originalLocks;
 
   function advanceWithFreshMarket(rerenderTracker, duration, price = 50_000) {
     for (let elapsed = 0; elapsed < duration; elapsed += 5000) {
@@ -203,10 +210,31 @@ describe('BitcoinTracker interactions', () => {
     }
   }
 
+  function arriveAtCheckpoint(rerenderTracker, captureAt, price = 50_000) {
+    // Checkpoint publication uses the deadline and the fresh quote, without needing hundreds of
+    // intermediate renders. A timer tick then refreshes the visible remaining time.
+    jest.setSystemTime(captureAt);
+    market = createMarket(captureAt, price);
+    quoteQuery = createQuery(market.ticker);
+    candleQuery = createQuery(market.candles);
+    rerenderTracker();
+    act(() => jest.advanceTimersByTime(1000));
+  }
+
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(NOW);
     window.localStorage.clear();
+    writeForecastPreferences({ autoEnabled: false, checkpointMinutes: [9] });
+    originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: jest.fn((name, options, callback) =>
+          Promise.resolve().then(() => callback({ name })),
+        ),
+      },
+    });
     mockStream.getDeadlineOutcome.mockReset().mockReturnValue({ status: 'waiting' });
     jest.spyOn(window.crypto, 'randomUUID').mockReturnValue('recorded-forecast-1');
     user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
@@ -233,6 +261,8 @@ describe('BitcoinTracker interactions', () => {
     jest.clearAllTimers();
     jest.useRealTimers();
     jest.restoreAllMocks();
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
+    else delete navigator.locks;
   });
 
   test('keeps the headline on BRTI when Coinbase prices change independently', async () => {
@@ -259,6 +289,7 @@ describe('BitcoinTracker interactions', () => {
   });
 
   test('defaults to the actual Kalshi target and close time instead of a new fifteen-minute window', async () => {
+    localStorage.removeItem(FORECAST_PREFERENCES_STORAGE_KEY);
     const contract = createKalshiContract();
     useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [contract], receivedAt: NOW }));
     const { store } = await renderTracker();
@@ -271,6 +302,10 @@ describe('BitcoinTracker interactions', () => {
     expect(screen.queryByRole('button', { name: 'Use current' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Custom forecast' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start forecast' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Fixed checkpoints' })).toBeInTheDocument();
+    expect(screen.getByText('9 min left')).toBeInTheDocument();
+    expect(screen.getByText('6 min left')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Auto record' })).not.toBeChecked();
     expect(screen.getByText(/A tie counts as Yes/)).toBeInTheDocument();
     expect(screen.getByText(/Coinbase proxy · BRTI access needed/)).toBeInTheDocument();
     expect(useGetKalshiBenchmarkQuery).toHaveBeenLastCalledWith(
@@ -281,11 +316,12 @@ describe('BitcoinTracker interactions', () => {
   });
 
   test.each([
-    { elapsedMinutes: 3, countdown: '12:00', observationSeconds: 180 },
-    { elapsedMinutes: 13, countdown: '02:00', observationSeconds: 30 },
+    { elapsedMinutes: 3, countdown: '12:00', checkpointMinutes: 9, observationSeconds: 180 },
+    { elapsedMinutes: 13, countdown: '02:00', checkpointMinutes: 1, observationSeconds: 60 },
   ])(
     'joins Kalshi with $countdown remaining and captures a fixed call without moving its deadline',
-    async ({ elapsedMinutes, countdown, observationSeconds }) => {
+    async ({ elapsedMinutes, countdown, checkpointMinutes, observationSeconds }) => {
+      writeForecastPreferences({ autoEnabled: false, checkpointMinutes: [checkpointMinutes] });
       const contract = createKalshiContract();
       const joinedAt = contract.startsAt + elapsedMinutes * MINUTE;
       jest.setSystemTime(joinedAt);
@@ -305,10 +341,12 @@ describe('BitcoinTracker interactions', () => {
         createdAt: joinedAt,
         status: 'analyzing',
         aboveProbability: null,
+        checkpointMinutes,
+        captureOrigin: 'manual',
         kalshiMarket: { ticker: contract.ticker },
         analysis: {
-          earliestAt: joinedAt + observationSeconds * 1000,
-          policyVersion: 'kalshi-snapshot-v4',
+          earliestAt: contract.expiresAt - checkpointMinutes * MINUTE,
+          policyVersion: 'kalshi-checkpoint-v5',
         },
       });
       advanceWithFreshMarket(rerenderTracker, observationSeconds * 1000 - 5000);
@@ -361,6 +399,87 @@ describe('BitcoinTracker interactions', () => {
       screen.getByText('The official target is published when this event starts.'),
     ).toBeInTheDocument();
     expect(store.getState().tracker.forecasts).toEqual([]);
+  });
+
+  test('Auto saves both selected checkpoints and moves to the next official event while the old result is pending', async () => {
+    localStorage.removeItem(FORECAST_PREFERENCES_STORAGE_KEY);
+    let recordedEvents = 0;
+    window.crypto.randomUUID.mockImplementation(() => `automatic-event-${++recordedEvents}`);
+    const current = createKalshiContract();
+    const future = createKalshiContract({
+      ticker: 'KXBTC15M-26SEP070830-30',
+      eventTicker: 'KXBTC15M-26SEP070830',
+      startsAt: current.expiresAt,
+      expiresAt: current.expiresAt + 15 * MINUTE,
+      target: null,
+      status: 'initialized',
+    });
+    useGetKalshiMarketsQuery.mockReturnValue(
+      createQuery({ markets: [current, future], receivedAt: NOW }),
+    );
+    const { store, rerenderTracker } = await renderTracker();
+    await user.click(screen.getByRole('checkbox', { name: 'Auto record' }));
+    expect(store.getState().tracker.forecasts).toHaveLength(2);
+    expect(store.getState().tracker.forecasts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ checkpointMinutes: 9, captureOrigin: 'automatic' }),
+        expect.objectContaining({ checkpointMinutes: 6, captureOrigin: 'automatic' }),
+      ]),
+    );
+    arriveAtCheckpoint(rerenderTracker, current.expiresAt - 9 * MINUTE);
+    const fixedNine = store
+      .getState()
+      .tracker.forecasts.find((entry) => entry.checkpointMinutes === 9);
+    expect(fixedNine.status).toBe('pending');
+    expectFixedPrediction(fixedNine);
+    expect(
+      store.getState().tracker.forecasts.find((entry) => entry.checkpointMinutes === 6).status,
+    ).toBe('analyzing');
+    arriveAtCheckpoint(rerenderTracker, current.expiresAt - 6 * MINUTE, 49_500);
+    const fixedSix = store
+      .getState()
+      .tracker.forecasts.find((entry) => entry.checkpointMinutes === 6);
+    expect(fixedSix.status).toBe('pending');
+    expect(fixedSix.aboveProbability).not.toBe(fixedNine.aboveProbability);
+    expectFixedPrediction(fixedSix);
+    expect(store.getState().tracker.forecasts.find((entry) => entry.id === fixedNine.id)).toEqual(
+      fixedNine,
+    );
+
+    const openedAt = future.startsAt + 1000;
+    jest.setSystemTime(openedAt);
+    market = createMarket(openedAt);
+    quoteQuery = createQuery(market.ticker);
+    candleQuery = createQuery(market.candles);
+    const opened = { ...future, target: 50_123.45, status: 'active', receivedAt: openedAt };
+    useGetKalshiMarketsQuery.mockReturnValue(
+      createQuery({ markets: [opened], receivedAt: openedAt }),
+    );
+    rerenderTracker();
+    act(() => jest.advanceTimersByTime(1000));
+    const saved = store.getState().tracker.forecasts;
+    expect(saved).toHaveLength(4);
+    const nextEvent = saved.filter((entry) => entry.kalshiMarket.ticker === future.ticker);
+    expect(nextEvent).toHaveLength(2);
+    expect(
+      nextEvent.every(
+        (entry) => entry.captureOrigin === 'automatic' && entry.status === 'analyzing',
+      ),
+    ).toBe(true);
+    for (const original of [fixedNine, fixedSix]) {
+      expect(saved.find((entry) => entry.id === original.id)).toEqual({
+        ...original,
+        status: 'awaiting-settlement',
+      });
+    }
+    expect(screen.getByRole('spinbutton', { name: 'Kalshi target price' })).toHaveValue(50_123.45);
+    expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^14:58$/);
+    expect(JSON.parse(localStorage.getItem('bitcoin-tracker:journal:v1')).forecasts).toEqual(saved);
+    rerenderTracker();
+    expect(store.getState().tracker.forecasts).toHaveLength(4);
+    await user.click(screen.getByRole('checkbox', { name: 'Auto record' }));
+    expect(screen.getByRole('checkbox', { name: 'Auto record' })).not.toBeChecked();
+    expect(store.getState().tracker.forecasts).toEqual(saved);
   });
 
   test('arms the next real event and starts automatically with its published target', async () => {
@@ -524,7 +643,7 @@ describe('BitcoinTracker interactions', () => {
     useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [contract], receivedAt: NOW }));
     const original = await renderTracker();
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
-    advanceWithFreshMarket(original.rerenderTracker, 3 * MINUTE);
+    arriveAtCheckpoint(original.rerenderTracker, contract.expiresAt - 9 * MINUTE);
     const fixed = original.store.getState().tracker.forecasts[0];
     expect(fixed.status).toBe('pending');
     const remaining = screen.getByRole('timer', { name: 'Time remaining' }).textContent;
@@ -544,7 +663,7 @@ describe('BitcoinTracker interactions', () => {
     useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [contract], receivedAt: NOW }));
     const { store, rerenderTracker } = await renderTracker();
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
-    advanceWithFreshMarket(rerenderTracker, 3 * MINUTE);
+    arriveAtCheckpoint(rerenderTracker, contract.expiresAt - 9 * MINUTE);
     const fixed = store.getState().tracker.forecasts[0];
     act(() => jest.advanceTimersByTime(contract.expiresAt - Date.now() + 1000));
     market = createMarket(Date.now(), 49_000);

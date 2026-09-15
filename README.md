@@ -18,12 +18,15 @@ Open [localhost:3000](http://localhost:3000). On Windows, if Turbopack cannot sp
 - Loads the actual Kalshi target and 15-minute close time. YES means the rounded final-minute BRTI average is at or above the target; equality is YES.
 - Defaults to the current contract. Select an upcoming event to schedule it, even while its target is pending. Keep the page open for the scheduled start.
 - Counts down to the original close time. Joining with 12 minutes left starts at 12 minutes, without extending the event.
-- Shows a live estimate and a separate immutable fixed call. Observation takes up to three minutes, with shorter waits for late joins. Valid weak and balanced estimates can publish without a confidence threshold.
+- Shows a live estimate plus separate immutable fixed calls at any selected 12/9/6/3/1 minutes remaining. The default selection is 9 and 6 minutes. A call uses fresh data at its absolute checkpoint, with five seconds of scheduling grace; missed checkpoints are never backfilled. Valid weak and balanced estimates can publish without a confidence threshold. Previously saved calls keep their original policy.
+- Optional **Auto record** starts the selected checkpoints for each newly open verified Kalshi event. Keep the browser open and the computer awake. Preferences persist; changes affect the next event, and turning Auto off prevents subsequent event starts. This does not place trades.
+- Coordinates recording through one browser tab. Other tabs follow saved calls, and a waiting tab takes over when the writer closes. Automatic starts survive reloads and history clearing without recapturing the same event.
 - Shows the estimated chance that a fixed call loses, plus current buying/selling pressure and market conditions.
 - Models the final-minute average, including already observed benchmark readings and uncertainty in missing readings.
 - Uses the full hour of BRTI history for responsive index volatility and movement features when complete; Coinbase trades remain an optional pressure input. Healthy native BRTI estimates continue through Coinbase outages.
 - Scores forecasts only against the official finalized Kalshi result, retrying after reconnecting or reloading.
 - Records real contracts at 12/9/6/3/1 minutes remaining for chronological evaluation and guarded outcome learning.
+- Compares settlement-only, spot-only, futures-only and combined predictions on identical captured inputs; the continuous collector also checks replay and records future BRTI labels.
 
 Coinbase candles, executed trades and order-book data remain market inputs. Their source is explicitly labeled. The old Coinbase forecast mode, custom targets, custom scheduling controls, and legacy research recorder have been retired.
 
@@ -60,6 +63,7 @@ pnpm test
 pnpm format:check
 pnpm build
 pnpm research:collect --once
+pnpm research:collect --report
 ```
 
 No deployment or trading execution is included.

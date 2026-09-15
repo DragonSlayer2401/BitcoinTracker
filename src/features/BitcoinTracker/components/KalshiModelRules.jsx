@@ -55,21 +55,28 @@ export default function KalshiModelRules() {
           crossed.
         </p>
         <p>
-          The chart shows Coinbase prices. It does not display a spot-price forecast range as if it
-          were a range for Kalshi’s settlement average.
+          The chart shows CF Benchmarks BRTI readings. The interval at the closing time estimates
+          the settlement average, rather than a future spot-price path.
         </p>
       </section>
       <section className="col-md-6">
         <h3 className="h6">Fixed prediction and reversal risk</h3>
         <p>
-          Observation lasts up to three minutes, or roughly a quarter of the remaining time when
-          joining late, with a 15-second minimum. The first valid estimate is then fixed, including
-          a weak lean. Its target, deadline and percentages stay unchanged.
+          Choose any of 12, 9, 6, 3 and 1 minute remaining. Each checkpoint saves a separate fixed
+          call from the current model, including a weak lean. Its target, deadline and percentages
+          stay unchanged. A five-second capture window allows for scheduling delays; a missed
+          checkpoint is never filled in with a later prediction. Older saved calls retain their
+          original observation policy.
+        </p>
+        <p>
+          Auto record repeats the selected checkpoints for each newly open event while the browser
+          is running. Changes apply to the next event. Turning Auto off stops future event starts;
+          the current event still finishes. One tab owns recording to avoid duplicate calls.
         </p>
         <p>
           Live risk estimates the chance the fixed Yes/No call will lose. It uses that saved
-          contract, even while another event is being previewed. It is an estimated chance, not a
-          measured success rate.
+          contract. With several checkpoints, the risk button identifies the latest published call.
+          It is an estimated chance, not a measured success rate.
         </p>
       </section>
       <section className="col-md-6">

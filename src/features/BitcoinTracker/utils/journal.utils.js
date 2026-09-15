@@ -8,7 +8,7 @@ export { getValidatedForecast } from './journal/forecastValidation.utils';
 export { getValidatedScheduledForecast } from './journal/scheduleValidation.utils';
 export { getValidatedJournal, getValidatedJournalState } from './journal/journalValidation.utils';
 
-const JOURNAL_STORAGE_KEY = 'bitcoin-tracker:journal:v1';
+export const JOURNAL_STORAGE_KEY = 'bitcoin-tracker:journal:v1';
 
 export function loadJournal(storage) {
   let savedJournal;

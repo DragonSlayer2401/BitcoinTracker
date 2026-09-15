@@ -197,6 +197,7 @@ export function createKalshiResearchRecorder({ recorderId, state = null }) {
             expiresAt: entry.expiresAt,
             kalshiMarket: entry.kalshiMarket,
             benchmark,
+            captureResearchInputs: true,
           };
           const calculated = canObserve ? getEstimate(inputs) : null;
           const estimate = calculated

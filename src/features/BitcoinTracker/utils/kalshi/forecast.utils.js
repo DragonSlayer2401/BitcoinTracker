@@ -159,7 +159,7 @@ function getAboveProbability(distribution, threshold) {
  * Brownian bridges retain uncertainty for missing elapsed readings, while official readings
  * have zero observation variance. A proxy's shared basis error does not vanish near the end.
  */
-export function getKalshiForecast(input = {}, pressureBase = null) {
+export function getKalshiForecast(input = {}, pressureBase = null, options = {}) {
   const { kalshiMarket: market, benchmark, now, ticker } = input;
   const hasDerivativesPolicy = input.derivatives !== undefined;
   const modelVersion = hasDerivativesPolicy
@@ -344,6 +344,81 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
   if (![aboveProbability, lowerBound, upperBound].every(positive)) {
     return unavailable('The settlement estimate cannot be calculated safely.');
   }
+  // Paired experiments remove effects from these exact conditional distributions. They never
+  // remove a feed, which could otherwise change the reference, volatility or missing-data policy.
+  let researchVariants;
+  if (options.includeResearchVariants) {
+    const withoutSpot = baselineDistributions.map((sample) => ({
+      ...sample,
+      logMean: sample.logMean - sample.pressureShift,
+      pressureShift: 0,
+    }));
+    const futuresOnly = derivatives?.applied
+      ? withoutSpot.map((sample, index) => {
+          const minutes = (sampleTimes[index] - now) / MINUTE;
+          return minutes > 0
+            ? {
+                ...sample,
+                logMean: sample.logMean + getIncrementalShift(minutes, 0),
+                futureVarianceTime: getDerivativesVarianceTime(minutes),
+              }
+            : sample;
+        })
+      : withoutSpot;
+    const variants = [
+      ['settlement-only', withoutSpot, false, false],
+      ['spot-only', baselineDistributions, true, false, baselineDistribution],
+      ['futures-only', futuresOnly, false, true],
+      ['combined', distributions, true, true, distribution],
+    ];
+    researchVariants = Object.fromEntries(
+      variants.map(([name, samples, usesSpot, usesFutures, existingDistribution]) => {
+        const moments =
+          existingDistribution ??
+          getAverageDistribution(
+            samples,
+            minuteVariance,
+            basisVariance,
+            usesFutures ? addedMinuteVariance : 0,
+          );
+        const probability = getAboveProbability(moments, threshold);
+        const available = positive(moments.volatility) && Number.isFinite(probability);
+        return [
+          name,
+          {
+            available,
+            reason: available ? null : 'The experiment distribution is unavailable.',
+            modelVersion,
+            aboveProbability: available ? probability : null,
+            belowProbability: available ? 1 - probability : null,
+            appliedSpot: Boolean(usesSpot && modelBase.pressure?.applied),
+            appliedFutures: Boolean(usesFutures && derivatives?.applied),
+            fallbacks: [
+              ...(usesSpot && !modelBase.pressure?.applied
+                ? [modelBase.pressure?.reason ?? 'Spot pressure is unavailable.']
+                : []),
+              ...(usesFutures && !derivatives?.applied
+                ? [derivatives?.reason ?? 'Futures pressure is unavailable.']
+                : []),
+            ],
+            referenceSource,
+            referencePrice,
+            referenceAt,
+            minuteVolatility,
+            basisLogDeviation,
+            expectedSettlementAverage: available ? moments.expectedAverage : null,
+            settlementStandardDeviation: available ? Math.sqrt(moments.averageVariance) : null,
+            settlementLowerBound: available
+              ? Math.exp(moments.logMedian - NORMAL_CENTRAL_80_QUANTILE * moments.volatility)
+              : null,
+            settlementUpperBound: available
+              ? Math.exp(moments.logMedian + NORMAL_CENTRAL_80_QUANTILE * moments.volatility)
+              : null,
+          },
+        ];
+      }),
+    );
+  }
   return {
     ...base,
     available: true,
@@ -367,6 +442,7 @@ export function getKalshiForecast(input = {}, pressureBase = null) {
     intervalAvailable: false,
     intervalReason:
       'This forecast estimates the final settlement average, not a future spot-price path.',
+    ...(researchVariants ? { researchVariants } : {}),
     pressure: {
       ...modelBase.pressure,
       expectedLogReturn: getPressureShift(modelBase, horizonMinutes),

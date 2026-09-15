@@ -31,7 +31,8 @@
     "react-dom": "19.2.8",
     "react-redux": "9.3.0",
     "react-select": "5.10.2",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",

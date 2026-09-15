@@ -11,6 +11,7 @@ import trackerReducer, {
 } from '../state/slices/trackerSlice';
 import { selectActiveForecast, selectForecasts } from '../state/selectors/trackerSelectors';
 import { getResearchForecast } from '../utils/researchForecast.utils';
+import { replayResearchInputSnapshot } from '../utils/researchExperiments.utils';
 import {
   KALSHI_MODEL_VERSION,
   KALSHI_DERIVATIVES_MODEL_VERSION,
@@ -479,6 +480,11 @@ describe('learned forecast integration', () => {
     );
     expect(decision.intervalLow).toBeNull();
     expect(decision.intervalHigh).toBeNull();
+    expect(decision.researchInputSnapshot.capturedAt).toBe(CAPTURE);
+    expect(decision.researchInputSnapshot.models.active.id).toBe(fixed.learning.modelId);
+    expect(replayResearchInputSnapshot(decision.researchInputSnapshot).aboveProbability).toBe(
+      fixed.aboveProbability,
+    );
   });
 
   test('reloads a learned fixed call unchanged and resolves it against the official Kalshi result', async () => {
@@ -524,6 +530,17 @@ describe('learned forecast integration', () => {
     expect(resolved.learning).toEqual(fixed.learning);
     expect(saveJournal([resolved], window.localStorage)).toBeNull();
     expect(loadJournal(window.localStorage).forecasts).toEqual([resolved]);
+  });
+
+  test('an observation resumed after expiry records the no-call without an invalid late replay', async () => {
+    const view = createObservation();
+    await flush();
+    view.update(END + 1000);
+    await flush();
+    expect(stored(view).status).toBe('withheld');
+    const decision = evidenceRows().find((row) => row.event === 'decision');
+    expect(decision).toBeDefined();
+    expect(decision.researchInputSnapshot ?? null).toBeNull();
   });
 
   test('a later active model or changed live price cannot rewrite an already-captured forecast', async () => {

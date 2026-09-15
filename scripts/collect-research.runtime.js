@@ -5,6 +5,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createClient } from '@libsql/client';
 import { createCoinbaseStream } from '../src/services/coinbase/stream/coinbaseStream.service';
 import { createDerivativesStream } from '../src/services/derivatives/derivativesStream.service';
+import { createKalshiBenchmarkStream } from '../src/services/kalshi/benchmarkStream/benchmarkStream.service';
+import { createResearchInputSnapshot } from '../src/features/BitcoinTracker/utils/researchExperiments.utils';
+import { collectForwardResearchLabels, getCollectorAnalysis } from './collect-research.analysis';
 import {
   fetchCoinbaseCandles,
   fetchCoinbaseTicker,
@@ -16,7 +19,11 @@ import {
 import { createLearningService } from '../src/services/research/learning.service';
 import { getResearchForecast } from '../src/features/BitcoinTracker/utils/researchForecast.utils';
 import { getKalshiMarketConditions } from '../src/features/BitcoinTracker/utils/kalshi/marketConditions.utils';
-import { acquireCollectorLock, createCollectorStateStore } from './collect-research.storage';
+import {
+  acquireCollectorLock,
+  createCollectorStateStore,
+  writeCollectorState,
+} from './collect-research.storage';
 import {
   fetchKalshiMarkets,
   fetchKalshiMarket,
@@ -41,10 +48,12 @@ export function parseCollectorOptions(args, projectRoot = process.cwd()) {
   const options = {
     once: false,
     help: false,
+    report: false,
     statePath: path.join(projectRoot, 'data/kalshi-collector-state.json'),
   };
   for (const argument of args) {
     if (argument === '--once') options.once = true;
+    else if (argument === '--report') options.report = true;
     else if (argument === '--help') options.help = true;
     else if (argument.startsWith('--state-file=')) {
       const selected = path.resolve(projectRoot, argument.slice('--state-file='.length));
@@ -71,6 +80,7 @@ export async function runResearchCollector({
   signal,
   createStream = createCoinbaseStream,
   createFuturesStream = createDerivativesStream,
+  createBenchmarkStream = createKalshiBenchmarkStream,
   loadTicker = fetchCoinbaseTicker,
   loadCandles = fetchCoinbaseCandles,
   loadMarkets = fetchKalshiMarkets,
@@ -83,6 +93,7 @@ export async function runResearchCollector({
   const releaseLock = await acquireCollectorLock(statePath);
   let stream;
   let futuresStream;
+  let benchmarkStream;
   const tasks = new Map();
   const warnings = new Map();
   const warn = (key, message) => {
@@ -104,6 +115,8 @@ export async function runResearchCollector({
     markets: -Infinity,
     outcomes: -Infinity,
     benchmark: -Infinity,
+    labels: -Infinity,
+    comparison: -Infinity,
   };
   const refresh = (name, task, message) => {
     if (tasks.has(name)) return tasks.get(name);
@@ -124,6 +137,8 @@ export async function runResearchCollector({
     stream.start();
     futuresStream = createFuturesStream();
     futuresStream.start();
+    benchmarkStream = createBenchmarkStream();
+    benchmarkStream.start();
     await Promise.all([
       refresh(
         'ticker',
@@ -158,6 +173,7 @@ export async function runResearchCollector({
           'benchmark',
           async () => {
             benchmark = await loadBenchmark();
+            benchmarkStream.seed(benchmark);
           },
           'The official benchmark is unavailable; forecasts identify Coinbase as a proxy.',
         ),
@@ -187,13 +203,15 @@ export async function runResearchCollector({
           market.startsAt <= observedAt &&
           market.expiresAt > observedAt,
       );
+      const streamedBenchmark = benchmarkStream.getSnapshot(observedAt);
       const inputs = {
         candles,
         ticker,
-        benchmark,
+        benchmark: streamedBenchmark?.available ? streamedBenchmark : benchmark,
         stream: snapshot,
         derivatives: futuresStream.getSnapshot(observedAt),
       };
+      const capturedModels = models;
       if (
         once &&
         !getResearchForecast(
@@ -205,7 +223,7 @@ export async function runResearchCollector({
             now: observedAt,
             horizonMinutes: (kalshiMarket?.expiresAt - observedAt) / 60_000,
           },
-          models,
+          capturedModels,
         ).available
       ) {
         throw new Error(
@@ -218,20 +236,31 @@ export async function runResearchCollector({
           ticker,
           stream: inputs.stream,
           markets: [...markets, ...settledMarkets.values()],
-          benchmark,
-          getEstimate: ({ target, now: time, expiresAt, kalshiMarket: recordedMarket }) =>
-            getResearchForecast(
-              {
-                ...inputs,
-                target,
-                now: time,
-                expiresAt,
-                ...(recordedMarket ? { kalshiMarket: recordedMarket } : {}),
-                horizonMinutes: (expiresAt - time) / 60_000,
-              },
-              models,
+          benchmark: inputs.benchmark,
+          getEstimate: ({ target, now: time, expiresAt, kalshiMarket: recordedMarket }) => {
+            const capturedInput = {
+              ...inputs,
+              target,
+              now: time,
+              expiresAt,
+              ...(recordedMarket ? { kalshiMarket: recordedMarket } : {}),
+              horizonMinutes: (expiresAt - time) / 60_000,
+            };
+            const estimate = getResearchForecast(
+              capturedInput,
+              capturedModels,
               expiresAt - 900_000,
-            ),
+            );
+            return {
+              ...estimate,
+              researchInputSnapshot: createResearchInputSnapshot(
+                capturedInput,
+                capturedModels,
+                expiresAt - 900_000,
+                estimate,
+              ),
+            };
+          },
           getConditions: ({
             target,
             now: time,
@@ -264,11 +293,26 @@ export async function runResearchCollector({
         );
       }
       if (once) {
+        await collectForwardResearchLabels({
+          repository,
+          benchmark: inputs.benchmark,
+          now: observedAt,
+          statePath,
+        });
+        const analysis = await getCollectorAnalysis({ repository, now: observedAt });
+        await writeCollectorState(`${statePath}.comparison.json`, analysis);
         const status = await repository.getResearchStatus();
         log(
           `Collector check complete: ${status.mode}, ${status.evidenceCount} stored evidence event(s), stream ${snapshot.status}. A complete 15-minute outcome was not implied by this check.`,
         );
-        return { status, streamStatus: snapshot.status };
+        log(
+          `Research comparisons checked; replay ${analysis.replay.matched} matched, ${analysis.replay.failed} failed; ${analysis.forwardLabels.observed} observed forward labels. Report: ${statePath}.comparison.json`,
+        );
+        if (analysis.replay.failed)
+          throw new Error(
+            'Saved prediction replay failed. Inspect the comparison report; original records are retained.',
+          );
+        return { status, streamStatus: snapshot.status, analysis };
       }
       if (observedAt - lastRefresh.markets >= 15_000) {
         refresh(
@@ -279,13 +323,33 @@ export async function runResearchCollector({
           'Kalshi markets could not be refreshed; existing contract targets remain immutable.',
         );
       }
-      if (observedAt - lastRefresh.benchmark >= 2000) {
+      if (
+        observedAt - lastRefresh.benchmark >=
+        (inputs.benchmark?.transport === 'kalshi-websocket' && inputs.benchmark.available
+          ? 60_000
+          : 2000)
+      ) {
         refresh(
           'benchmark',
           async () => {
             benchmark = await loadBenchmark({ expiresAt: kalshiMarket?.expiresAt });
+            benchmarkStream.seed(benchmark);
           },
           'The official benchmark is unavailable; forecasts identify Coinbase as a proxy.',
+        );
+      }
+      if (observedAt - lastRefresh.labels >= 5000) {
+        refresh(
+          'labels',
+          async () => {
+            await collectForwardResearchLabels({
+              repository,
+              benchmark: inputs.benchmark,
+              now: observedAt,
+              statePath,
+            });
+          },
+          'Forward BRTI labels could not be saved; captures remain pending and will be retried.',
         );
       }
       if (observedAt - lastRefresh.outcomes >= 5000) {
@@ -343,6 +407,23 @@ export async function runResearchCollector({
       }
       // Fit/evaluate away from the opening five seconds and fixed-capture window.
       const elapsed = observedAt % 900_000;
+      if (
+        elapsed > 330_000 &&
+        elapsed < 840_000 &&
+        observedAt - lastRefresh.comparison >= 300_000
+      ) {
+        refresh(
+          'comparison',
+          async () => {
+            const analysis = await getCollectorAnalysis({ repository, now: now() });
+            await writeCollectorState(`${statePath}.comparison.json`, analysis);
+            log(
+              `Research comparisons updated; replay ${analysis.replay.matched} matched, ${analysis.replay.failed} failed; forward labels ${analysis.forwardLabels.observed} observed / ${analysis.forwardLabels.missing} missing. Report: ${statePath}.comparison.json`,
+            );
+          },
+          'Model comparison analysis could not complete; saved inputs and outcomes are retained.',
+        );
+      }
       if (elapsed > 330_000 && elapsed < 840_000 && observedAt - lastRefresh.learning >= 300_000) {
         refresh(
           'learning',
@@ -355,6 +436,7 @@ export async function runResearchCollector({
       await sleep(1000);
     }
   } finally {
+    benchmarkStream?.stop();
     futuresStream?.stop();
     stream?.stop();
     await Promise.allSettled([...tasks.values()]);
@@ -366,7 +448,7 @@ export async function runCollectorCommand(args) {
   const options = parseCollectorOptions(args);
   if (options.help) {
     console.log(
-      'Usage: pnpm research:collect [--once] [--state-file=data/kalshi-collector-state.json]\nRequires Node 24. Records real Kalshi contracts at 12/9/6/3/1 minutes remaining and official finalized results. --once performs one recorder step and exits; it never fabricates a historical forecast or outcome.',
+      'Usage: npm run research:collect -- [--once | --report] [--state-file=data/kalshi-collector-state.json]\nRequires Node 24. Records real Kalshi 12/9/6/3/1-minute checkpoints, paired variants, replay inputs, forward BRTI labels and official results. --once checks one current recorder step and local comparisons; it does not imply a completed outcome. --report analyzes saved comparisons and replays the latest 100 captured inputs, without opening market feeds or training models.',
     );
     return;
   }
@@ -381,6 +463,16 @@ export async function runCollectorCommand(args) {
       await mkdir(path.dirname(fileURLToPath(configuration.url)), { recursive: true });
     client = createClient(configuration);
     const repository = createResearchRepository({ client, mode: configuration.mode });
+    if (options.report) {
+      const analysis = await getCollectorAnalysis({
+        repository,
+        now: Date.now(),
+        replayLimit: 100,
+      });
+      console.log(JSON.stringify(analysis, null, 2));
+      if (analysis.replay.failed) process.exitCode = 1;
+      return;
+    }
     await runResearchCollector({
       ...options,
       repository,
