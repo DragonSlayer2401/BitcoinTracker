@@ -9,7 +9,7 @@ export default function TrackerHeader({ now, benchmarkData, hasStreamTicker }) {
   return (
     <div className="monitor-header d-flex justify-content-between align-items-center flex-wrap gap-2">
       <h1 className="mb-0">
-        Bitcoin monitor <span>Kalshi · BTC 15m</span>
+        Bitcoin trading adviser <span>Kalshi · BTC 15m</span>
       </h1>
       <div className="feed-indicator d-flex align-items-center flex-wrap gap-3">
         <div className={`feed-status ${benchmarkData.isFresh ? 'fresh' : ''}`} role="status">

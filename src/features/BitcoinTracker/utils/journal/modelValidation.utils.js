@@ -15,8 +15,21 @@ import {
   EARLY_LEARNING_REQUIREMENTS,
 } from '../learning/earlyModel.utils';
 import {
+  CHALLENGER_KINDS,
+  CHALLENGER_MODEL_VERSION,
+  CHALLENGER_POLICY_VERSION,
+  LEGACY_CHALLENGER_MODEL_VERSION,
+  LEGACY_CHALLENGER_POLICY_VERSION,
+  CHALLENGER_REQUIREMENTS,
+  DIRECTIONAL_REVERSAL_KIND,
+  DIRECTIONAL_REVERSAL_POLICY_VERSION,
+  isFittedChallenger,
+} from '../learning/challengerModel.utils';
+import {
   KALSHI_MODEL_VERSION,
   KALSHI_DERIVATIVES_MODEL_VERSION,
+  LEGACY_KALSHI_MODEL_VERSION,
+  LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION,
   KALSHI_MODEL_PARAMETERS,
 } from '../kalshi/forecast.utils';
 import {
@@ -37,10 +50,14 @@ const legacyKalshiModelParameters = Object.freeze({
 });
 const kalshiBaselineVersions = [
   'kalshi-brti-average-v1',
+  LEGACY_KALSHI_MODEL_VERSION,
+  LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION,
   KALSHI_MODEL_VERSION,
   KALSHI_DERIVATIVES_MODEL_VERSION,
 ];
 const learnedModelVersions = [
+  LEGACY_CHALLENGER_MODEL_VERSION,
+  CHALLENGER_MODEL_VERSION,
   EARLY_MODEL_VERSION,
   'outcome-logistic-v1',
   'outcome-logistic-kalshi-v1',
@@ -48,6 +65,8 @@ const learnedModelVersions = [
   KALSHI_OUTCOME_MODEL_VERSION,
 ];
 const kalshiModelVersions = [
+  LEGACY_CHALLENGER_MODEL_VERSION,
+  CHALLENGER_MODEL_VERSION,
   EARLY_MODEL_VERSION,
   ...kalshiBaselineVersions,
   'outcome-logistic-kalshi-v1',
@@ -72,16 +91,36 @@ export function hasValidLearningMetadata(learning, forecast) {
   const usesLegacyModel = ['outcome-logistic-v1', 'outcome-logistic-kalshi-v1'].includes(
     forecast.modelVersion,
   );
+  const usesChallenger = [CHALLENGER_MODEL_VERSION, LEGACY_CHALLENGER_MODEL_VERSION].includes(
+    forecast.modelVersion,
+  );
+  const challengerKind =
+    usesChallenger && typeof learning?.modelId === 'string'
+      ? CHALLENGER_KINDS.find(
+          (kind) =>
+            learning.modelId.startsWith(`${forecast.modelVersion}-${kind}-`) &&
+            learning.modelId.length > forecast.modelVersion.length + kind.length + 2,
+        )
+      : null;
   return (
     hasExactFields(learning, fields) &&
     learning.applied === true &&
     isIdentifier(learning.modelId) &&
     learning.modelId.startsWith(`${forecast.modelVersion}-`) &&
     /^[a-z0-9-]+$/.test(learning.modelId.slice(forecast.modelVersion.length + 1)) &&
+    (!usesChallenger || Boolean(challengerKind)) &&
+    (challengerKind !== DIRECTIONAL_REVERSAL_KIND ||
+      forecast.modelVersion === CHALLENGER_MODEL_VERSION) &&
     learning.calibrationVersion ===
-      (forecast.modelVersion === EARLY_MODEL_VERSION
-        ? EARLY_CALIBRATION_VERSION
-        : CALIBRATION_VERSION) &&
+      (usesChallenger
+        ? forecast.modelVersion === LEGACY_CHALLENGER_MODEL_VERSION
+          ? LEGACY_CHALLENGER_POLICY_VERSION
+          : challengerKind === DIRECTIONAL_REVERSAL_KIND
+            ? DIRECTIONAL_REVERSAL_POLICY_VERSION
+            : CHALLENGER_POLICY_VERSION
+        : forecast.modelVersion === EARLY_MODEL_VERSION
+          ? EARLY_CALIBRATION_VERSION
+          : CALIBRATION_VERSION) &&
     (usesLegacyModel
       ? learning.featureVersion === 'deadline-reversal-features-v1'
       : [LEARNING_FEATURE_VERSION, DERIVATIVES_LEARNING_FEATURE_VERSION].includes(
@@ -96,6 +135,11 @@ export function hasValidLearningMetadata(learning, forecast) {
     (forecast.modelVersion !== EARLY_MODEL_VERSION ||
       Math.abs(learning.aboveProbability - learning.baselineAboveProbability) <=
         EARLY_LEARNING_REQUIREMENTS.maximumProbabilityAdjustment + 1e-9) &&
+    (!usesChallenger ||
+      !isFittedChallenger(challengerKind) ||
+      challengerKind === DIRECTIONAL_REVERSAL_KIND ||
+      Math.abs(learning.aboveProbability - learning.baselineAboveProbability) <=
+        CHALLENGER_REQUIREMENTS.maximumProbabilityAdjustment + 1e-9) &&
     learning.aboveProbability === forecast.aboveProbability
   );
 }
@@ -153,7 +197,9 @@ export function hasValidKalshiMetadata(metadata, forecast) {
     isTimestamp(metadata.referenceAt) &&
     metadata.referenceAt <= forecast.createdAt &&
     (usesProxy
-      ? metadata.referenceAt === forecast.createdAt &&
+      ? ([KALSHI_MODEL_VERSION, KALSHI_DERIVATIVES_MODEL_VERSION].includes(forecast.modelVersion)
+          ? forecast.createdAt - metadata.referenceAt <= 20_000
+          : metadata.referenceAt === forecast.createdAt) &&
         isPositiveNumber(metadata.basisLogDeviation) &&
         metadata.basisLogDeviation >= parameters.minimumProxyBasisLogDeviation
       : forecast.createdAt - metadata.referenceAt <= parameters.maximumBenchmarkAgeMs &&

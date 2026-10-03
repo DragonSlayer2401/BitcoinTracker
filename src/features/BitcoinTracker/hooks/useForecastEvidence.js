@@ -3,7 +3,12 @@ import { appendEvidenceRows, getEvidenceRow } from '../utils/evidenceStorage.uti
 import { getKalshiMarketConditions } from '../utils/kalshi/marketConditions.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { KALSHI_OUTCOME_DEFINITION, isVerifiedKalshiOutcome } from '../utils/kalshi/contract.utils';
-import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
+import {
+  isKalshiDerivativesModelVersion,
+  LEGACY_KALSHI_MODEL_VERSION,
+  LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION,
+} from '../utils/kalshi/forecast.utils';
+import { RESEARCH_EXPERIMENT_V3 } from '../utils/researchVariantConfig.utils';
 
 export default function useForecastEvidence({
   forecasts,
@@ -125,14 +130,24 @@ export default function useForecastEvidence({
           now,
           horizonMinutes,
           stream,
-          derivatives:
-            entry.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION ? derivatives : undefined,
+          derivatives: isKalshiDerivativesModelVersion(entry.modelVersion)
+            ? derivatives
+            : undefined,
           expiresAt: entry.expiresAt,
           kalshiMarket: entry.kalshiMarket,
           benchmark,
         },
         models,
         entry.startsAt,
+        {
+          // A restored observation uses the same calculation generation as its saved call.
+          researchVersion: [
+            LEGACY_KALSHI_MODEL_VERSION,
+            LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION,
+          ].includes(entry.modelVersion)
+            ? RESEARCH_EXPERIMENT_V3
+            : undefined,
+        },
       );
       const conditions = getKalshiMarketConditions({
         candles,

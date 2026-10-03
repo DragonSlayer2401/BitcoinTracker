@@ -6,6 +6,7 @@ import {
 } from './kalshi/contract.utils';
 import { groupOverlappingWindows, scoreLearningRows } from './learning/evaluation.utils';
 import { RESEARCH_EXPERIMENT_VERSION, RESEARCH_VARIANT_NAMES } from './researchExperiments.utils';
+import { getResearchVariantNames } from './researchVariantConfig.utils';
 import {
   KALSHI_CHECKPOINT_POLICY_VERSION,
   isKalshiCheckpointMinutes,
@@ -225,7 +226,7 @@ function getExperimentReason(record) {
   const experiment = row.researchExperiment;
   if (!experiment) return 'experiment-not-recorded';
   if (
-    experiment.version !== RESEARCH_EXPERIMENT_VERSION ||
+    !getResearchVariantNames(experiment.version).length ||
     experiment.capturedAt !== capture ||
     experiment.marketTicker !== row.kalshiMarket.ticker ||
     experiment.target !== row.target ||
@@ -240,6 +241,8 @@ function getExperimentReason(record) {
 function getVariant(record, name, experimentReason) {
   if (experimentReason) return { available: false, reason: experimentReason, fallbacks: [] };
   const experiment = record.decision.researchExperiment;
+  if (name !== 'production' && !getResearchVariantNames(experiment.version).includes(name))
+    return { available: false, reason: 'variant-not-recorded', fallbacks: [] };
   const variant = name === 'production' ? experiment.production : experiment.variants[name];
   if (!variant) return { available: false, reason: 'variant-not-recorded', fallbacks: [] };
   if (variant.available !== true)
@@ -285,7 +288,10 @@ function getMetrics(records, variant) {
       probability: record.variants[variant].aboveProbability,
       outcome: record.outcome,
       windowStart: record.windowStartAt,
-      currentSide: Number(Math.round(record.decision.spot * 100) / 100 >= record.decision.target),
+      currentSide:
+        Number.isFinite(record.decision.spot) && record.decision.spot > 0
+          ? Number(Math.round(record.decision.spot * 100) / 100 >= record.decision.target)
+          : null,
     })),
   );
   const intervals = records.filter((record) => {
@@ -304,6 +310,17 @@ function getMetrics(records, variant) {
       record.settlementPrice <= estimate.settlementUpperBound
     );
   }).length;
+  const successfulReversalCalls = records.filter((record) => {
+    const probability = record.variants[variant].aboveProbability;
+    const currentSide = Number(
+      Math.round(record.decision.spot * 100) / 100 >= record.decision.target,
+    );
+    return (
+      probability !== 0.5 &&
+      Number(probability > 0.5) !== currentSide &&
+      Number(probability > 0.5) === record.outcome
+    );
+  });
   return {
     examples: records.length,
     brier: score.brier,
@@ -311,6 +328,21 @@ function getMetrics(records, variant) {
     accuracy: score.callAccuracy,
     directionalCalls: score.directionalCalls,
     directionalAccuracy: score.directionalAccuracy,
+    currentSideAccuracy: score.currentSideAccuracy,
+    currentSideComparison: score.currentSideComparison,
+    reversals: score.reversals,
+    reversalAlerts: score.reversalAlerts,
+    reversalsCaught: score.reversalsCaught,
+    falseReversalWarnings: score.falseReversalWarnings,
+    reversalRecall: score.reversalRecall,
+    reversalFalseAlarmRate: score.reversalFalseAlarmRate,
+    meanReversalLeadMinutes: successfulReversalCalls.length
+      ? average(
+          successfulReversalCalls.map(
+            (record) => (record.expiresAt - record.decision.capturedAt) / 60_000,
+          ),
+        )
+      : null,
     expectedCalibrationError: score.expectedCalibrationError,
     calibrationBins: score.calibrationBins,
     interval: {
@@ -556,6 +588,10 @@ export function evaluateResearchExperiments(evidenceRows = [], { now = Date.now(
       uniqueContracts: new Set(records.map((record) => record.decision.kalshiMarket.ticker)).size,
       independentWindows: groupOverlappingWindows(records).length,
       recordedExperiments: records.filter((record) => !record.experimentReason).length,
+      experimentVersions: records.reduce((counts, record) => {
+        if (!record.experimentReason) increment(counts, record.decision.researchExperiment.version);
+        return counts;
+      }, {}),
     },
     checkpoints: CHECKPOINTS.map((minutes) => ({
       checkpointMinutes: minutes,

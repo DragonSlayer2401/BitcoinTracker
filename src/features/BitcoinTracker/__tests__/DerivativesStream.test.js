@@ -81,6 +81,58 @@ describe('Public futures observations', () => {
     expect(market.getSnapshot(NOW + 15_000, true).windows[60].available).toBe(false);
   });
 
+  test('keeps using eligible executions when the exchange clock briefly leads the local clock', () => {
+    fillTrades(market, NOW, 60);
+    const futureAt = NOW + 60_200;
+    market.apply(batch(futureAt, [trade(futureAt, { S: 'Sell', v: '100' })]), NOW + 60_010);
+    const before = market.getSnapshot(NOW + 60_100, true);
+    expect(before).toMatchObject({ hasFreshTrades: true, lastTradeAt: NOW + 60_000 });
+    expect(before.windows[60]).toMatchObject({
+      available: true,
+      buyBtc: 60,
+      sellBtc: 0,
+      tradeCount: 60,
+      imbalance: 1,
+    });
+    expect(market.getSnapshot(futureAt, true).windows[60]).toMatchObject({
+      available: true,
+      buyBtc: 60,
+      sellBtc: 100,
+      tradeCount: 61,
+    });
+  });
+
+  test('does not put later received trades or liquidations into an earlier capture', () => {
+    fillTrades(market, NOW, 15);
+    market.apply(batch(NOW + 15_100, [trade(NOW + 15_100)]), NOW + 15_500);
+    market.apply(
+      batch(NOW + 15_100, [trade(NOW + 15_100, { v: '8' })], 'allLiquidation.BTCUSDT'),
+      NOW + 15_500,
+    );
+    const before = market.getSnapshot(NOW + 15_200, true);
+    expect(before.lastTradeAt).toBe(NOW + 15_000);
+    expect(before.windows[15].tradeCount).toBe(15);
+    expect(before.lastLiquidationAt).toBeNull();
+    expect(before.liquidations.windows[15].longBtc).toBe(0);
+    expect(market.getSnapshot(NOW + 15_500, true).liquidations.windows[15].longBtc).toBe(8);
+  });
+
+  test('excludes future-dated liquidation metadata until that execution time has passed', () => {
+    fillTrades(market, NOW, 15);
+    market.apply(
+      batch(NOW + 15_200, [trade(NOW + 15_200, { v: '8' })], 'allLiquidation.BTCUSDT'),
+      NOW + 15_010,
+    );
+    expect(market.getSnapshot(NOW + 15_100, true)).toMatchObject({
+      lastLiquidationAt: null,
+      liquidations: { windows: { 15: { count: 0, longBtc: 0 } } },
+    });
+    expect(market.getSnapshot(NOW + 15_200, true)).toMatchObject({
+      lastLiquidationAt: NOW + 15_200,
+      liquidations: { windows: { 15: { count: 1, longBtc: 8 } } },
+    });
+  });
+
   test('accepts distinct trades with the same cross sequence and noncontiguous sequence jumps', () => {
     market.apply(batch(NOW, [trade(NOW, { i: 'a', seq: 10 })]), NOW);
     market.apply(batch(NOW + 1000, [trade(NOW + 1000, { i: 'b', seq: 10 })]), NOW + 1000);
@@ -169,8 +221,8 @@ describe('Public futures observations', () => {
       'allLiquidation.BTCUSDT',
     );
     market.apply(liquidation, NOW + 15_000);
-    market.apply(liquidation, NOW + 15_000);
-    const snapshot = market.getSnapshot(NOW + 15_000, true);
+    market.apply(liquidation, NOW + 15_010);
+    const snapshot = market.getSnapshot(NOW + 15_010, true);
     expect(snapshot.liquidations).toMatchObject({
       available: true,
       coverage: 'venue-reported',
@@ -250,6 +302,25 @@ describe('Public futures observations', () => {
       openInterest: 1234,
     });
     expect(market.getSnapshot(NOW + 7000, true).ticker).toBeNull();
+  });
+
+  test('retains the last eligible merged ticker while a newer exchange timestamp is pending', () => {
+    market.apply(ticker(NOW), NOW);
+    market.apply(
+      { ...ticker(NOW + 200), type: 'delta', data: { symbol: 'BTCUSDT', lastPrice: '100010' } },
+      NOW + 10,
+    );
+    expect(market.getSnapshot(NOW + 100, true).ticker).toMatchObject({
+      time: NOW,
+      lastPrice: 100000,
+    });
+    expect(market.getSnapshot(NOW + 200, true).ticker).toMatchObject({
+      time: NOW + 200,
+      lastPrice: 100010,
+      indexPrice: 100001,
+    });
+    market.reset(NOW + 300);
+    expect(market.getSnapshot(NOW + 300, true).ticker).toBeNull();
   });
 
   test('caps trade storage and removes expired history and deduplication state', () => {

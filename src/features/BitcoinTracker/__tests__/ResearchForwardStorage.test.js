@@ -92,10 +92,43 @@ test('stores labels for the exact original anchor and retries identical content 
   expect(await repository.persistForwardLabels(labels)).toEqual({ inserted: 3, duplicates: 0 });
   expect(await repository.persistForwardLabels(labels)).toEqual({ inserted: 0, duplicates: 3 });
   expect(await repository.getForwardResearchLabels()).toEqual(labels);
-  const changed = { ...labels[0], recordedAt: labels[0].recordedAt + 1 };
-  await expect(repository.persistForwardLabels([changed])).rejects.toMatchObject({ status: 409 });
   expect(await repository.getForwardResearchLabels()).toEqual(labels);
 });
+
+test('acknowledges an identical observation recorded 15ms later without changing its original row or hash', async () => {
+  const labels = makeLabels(decision);
+  await repository.persistForwardLabels(labels);
+  const before = await client.execute(
+    'SELECT sequence, recorded_at, content_hash, payload FROM research_forward_labels ORDER BY sequence',
+  );
+  const duplicate = { ...labels[0], recordedAt: labels[0].recordedAt + 15 };
+  await expect(repository.persistForwardLabels([duplicate])).resolves.toEqual({
+    inserted: 0,
+    duplicates: 1,
+  });
+  const after = await client.execute(
+    'SELECT sequence, recorded_at, content_hash, payload FROM research_forward_labels ORDER BY sequence',
+  );
+  expect(after.rows).toEqual(before.rows);
+  expect(await repository.getForwardResearchLabels()).toEqual(labels);
+});
+
+test.each(['reading', 'receipt', 'provenance'])(
+  'rejects a later recording with changed %s evidence',
+  async (field) => {
+    const labels = makeLabels(decision);
+    await repository.persistForwardLabels(labels);
+    const changed = JSON.parse(JSON.stringify(labels[0]));
+    changed.recordedAt += 15;
+    if (field === 'reading') {
+      changed.reading.price += 1;
+      changed.logReturn = Math.log(changed.reading.price / changed.reference.price);
+    } else if (field === 'receipt') changed.reading.receivedAt += 1;
+    else changed.reading.provenance = 'different-source';
+    await expect(repository.persistForwardLabels([changed])).rejects.toMatchObject({ status: 409 });
+    expect(await repository.getForwardResearchLabels()).toEqual(labels);
+  },
+);
 
 test.each([
   [

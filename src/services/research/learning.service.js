@@ -29,6 +29,10 @@ import {
   evaluateEarlyShadowCandidate,
   trainEarlyCandidate,
 } from '@/features/BitcoinTracker/utils/learning/earlyTraining.utils';
+import { isChallengerArtifact } from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
+import { evaluateResearchExperiments } from '@/features/BitcoinTracker/utils/researchEvaluation.utils';
+import { createChallengerService } from './challenger.service';
+import { createCollectorHealthService } from './collectorHealth.service';
 
 const MINIMUM_NEW_WINDOWS_FOR_RETRAINING = 60;
 const LEARNING_LEASE_DURATION_MS = 120_000;
@@ -177,6 +181,8 @@ function getTrainingStatus({ candidate, shadow, latest, counts }) {
 
 export function createLearningService(repository) {
   let runningCycle;
+  const challengerService = createChallengerService(repository);
+  const collectorHealthService = createCollectorHealthService(repository);
 
   async function getResearchModels() {
     const [artifacts, storedActive] = await Promise.all([
@@ -206,6 +212,7 @@ export function createLearningService(repository) {
       active: selected.active,
       candidate: selected.candidate,
       earlyCandidate: selected.earlyCandidate,
+      challengers: await challengerService.getChallengerModels({ artifacts, storedActive }),
     };
   }
 
@@ -280,6 +287,12 @@ export function createLearningService(repository) {
       shadow: earlyShadow,
       monitoring,
     });
+    const challengers = await challengerService.getChallengerStatus({
+      now,
+      events,
+      artifacts,
+      storedActive,
+    });
     return {
       events,
       latest,
@@ -289,7 +302,12 @@ export function createLearningService(repository) {
       result: {
         generatedAt: now,
         analysis,
-        active: earlyActive && isEarlyDisabled ? null : active,
+        comparison: evaluateResearchExperiments(events, { now }),
+        collectorHealth: await collectorHealthService
+          .getCollectorHealth({ now, events })
+          .catch(() => null),
+        challengers,
+        active: challengers.active ?? (earlyActive && isEarlyDisabled ? null : active),
         candidate,
         earlyCandidate,
         shadow,
@@ -434,14 +452,32 @@ export function createLearningService(repository) {
         earlyLastRun = { status: 'disabled', modelId: active.id, reason };
         state = await readState(now);
       }
-      // Neither early observation nor an early active model can hold up the full lane.
-      const full = await advanceFullModel(state, now);
+      // Older lanes compare against the original baseline, not an active challenger.
+      // They cannot replace it without a paired comparison to current production.
+      const hasActiveChallenger =
+        isChallengerArtifact(state.result.challengers.active) ||
+        Boolean(state.result.challengers.confirmation);
+      const full = hasActiveChallenger
+        ? {
+            lastRun: {
+              status: 'deferred',
+              reason: 'A validated challenger is active or a frozen confirmation trial is running.',
+            },
+          }
+        : await advanceFullModel(state, now);
       if (full.changed) state = await readState(now);
-      const early = await advanceEarlyModel(state, now, { deferFit: full.trained });
+      const early = hasActiveChallenger
+        ? {
+            status: 'superseded',
+            reason: 'A validated challenger is active or confirmation is running.',
+          }
+        : await advanceEarlyModel(state, now, { deferFit: full.trained });
+      const challengerResult = await challengerService.runChallengerCycle({ now, leaseHeld: true });
       const result = await getLearningStatus({ now });
       return {
         ...result,
         lastRun: full.lastRun,
+        challengers: { ...result.challengers, lastRun: challengerResult.lastRun },
         early: {
           ...result.early,
           lastRun: early.status === 'activated' ? early : (earlyLastRun ?? early),
@@ -459,10 +495,16 @@ export function createLearningService(repository) {
     });
     return runningCycle;
   }
-  return { getResearchModels, getLearningStatus, runLearningCycle };
+  return {
+    getResearchModels,
+    getLearningStatus,
+    runLearningCycle,
+    enrollChallengerCandidates: challengerService.enrollChallengerCandidates,
+  };
 }
 
 const service = createLearningService(researchRepository);
 export const getLearningStatus = service.getLearningStatus;
 export const runLearningCycle = service.runLearningCycle;
 export const getResearchModels = service.getResearchModels;
+export const enrollChallengerCandidates = service.enrollChallengerCandidates;

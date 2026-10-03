@@ -308,6 +308,74 @@ describe('risk trend continuity', () => {
 });
 
 describe('risk dialog', () => {
+  test('compares current loss risk with capture in percentage points without changing the fixed call', async () => {
+    const user = userEvent.setup();
+    const saved = Object.freeze({ ...fixedForecast });
+    render(<ForecastRisk {...input} fixedForecast={saved} />);
+    const button = screen.getByRole('button', {
+      name: /Fixed loss risk · 43.0% · \+11.0 pp from capture/,
+    });
+    await user.click(button);
+    expect(screen.getByText(/Saved loss risk/)).toHaveTextContent('32.0% → current 43.0%');
+    expect(screen.getByText(/Saved loss risk/)).toHaveTextContent(
+      'Increased by 11.0 percentage points since capture',
+    );
+    expect(saved).toEqual(fixedForecast);
+  });
+
+  test('a saved Below call compares its original Above odds and shows decreasing risk', async () => {
+    const user = userEvent.setup();
+    render(
+      <ForecastRisk
+        {...input}
+        forecast={{ ...input.forecast, aboveProbability: 0.3, belowProbability: 0.7 }}
+        fixedForecast={{
+          ...fixedForecast,
+          direction: 'below',
+          aboveProbability: 0.4,
+          belowProbability: 0.6,
+        }}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /Fixed loss risk · 30.0% · -10.0 pp/ }));
+    expect(screen.getByText(/Saved loss risk/)).toHaveTextContent('40.0% → current 30.0%');
+    expect(screen.getByText(/Saved loss risk/)).toHaveTextContent(
+      'Decreased by 10.0 percentage points since capture',
+    );
+  });
+
+  test.each([
+    { aboveProbability: undefined, belowProbability: undefined },
+    { aboveProbability: 0.8, belowProbability: 0.3 },
+    { aboveProbability: NaN, belowProbability: 0.3 },
+  ])(
+    'retains current risk but does not invent a saved comparison for malformed saved odds %j',
+    async (savedOdds) => {
+      const user = userEvent.setup();
+      render(<ForecastRisk {...input} fixedForecast={{ ...fixedForecast, ...savedOdds }} />);
+      const button = screen.getByRole('button', {
+        name: 'Fixed loss risk · 43.0%, view estimated deadline risk',
+      });
+      expect(button).not.toHaveTextContent('pp');
+      await user.click(button);
+      expect(screen.getByText(/original saved probabilities are unavailable/)).toBeVisible();
+      expect(screen.queryByText(/Saved loss risk/)).not.toBeInTheDocument();
+    },
+  );
+
+  test('hides both risk and capture comparison for another target or deadline', async () => {
+    const user = userEvent.setup();
+    render(<ForecastRisk {...input} forecast={{ ...input.forecast, target: 90_000 }} />);
+    await user.click(
+      screen.getByRole('button', { name: 'Forecast risk, view estimated deadline risk' }),
+    );
+    expect(
+      screen.getByText('Waiting for an estimate for the saved target and deadline.'),
+    ).toBeVisible();
+    expect(screen.queryByText(/Saved loss risk/)).not.toBeInTheDocument();
+    expect(screen.queryByText('43.0%')).not.toBeInTheDocument();
+  });
+
   test('exposes estimated risk, the immutable reference, and restores keyboard focus', async () => {
     const user = userEvent.setup();
     const submit = jest.fn((event) => event.preventDefault());
@@ -317,7 +385,7 @@ describe('risk dialog', () => {
       </form>,
     );
     const button = screen.getByRole('button', {
-      name: 'Fixed-call risk · 43.0%, view estimated deadline risk',
+      name: 'Fixed loss risk · 43.0% · +11.0 pp from capture, view estimated deadline risk',
     });
     await user.click(button);
     const dialog = within(screen.getByRole('dialog', { name: 'Deadline and reversal risk' }));
@@ -342,7 +410,7 @@ describe('risk dialog', () => {
   test('explains a currently opposing price and gives coherent distinct risks', async () => {
     const user = userEvent.setup();
     render(<ForecastRisk {...input} ticker={{ ...input.ticker, price: 99_990 }} />);
-    await user.click(screen.getByRole('button', { name: /Fixed-call risk/ }));
+    await user.click(screen.getByRole('button', { name: /Fixed loss risk/ }));
     const dialog = within(screen.getByRole('dialog'));
     expect(dialog.getByText(/Currently below/)).toHaveTextContent('already on the side opposite');
     expect(
@@ -359,7 +427,7 @@ describe('risk dialog', () => {
   test('an exact-price tie is distinct from neutral model probabilities', async () => {
     const user = userEvent.setup();
     render(<ForecastRisk {...input} ticker={{ ...input.ticker, price: 100_000 }} />);
-    await user.click(screen.getByRole('button', { name: /Fixed-call risk/ }));
+    await user.click(screen.getByRole('button', { name: /Fixed loss risk/ }));
     expect(screen.getByText(/no current side to flip from/)).toBeVisible();
     expect(
       screen.getByText(/does not assign a separate probability to an exact-price tie/),

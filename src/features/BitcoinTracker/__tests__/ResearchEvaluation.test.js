@@ -1,6 +1,7 @@
 import { evaluateResearchExperiments } from '../utils/researchEvaluation.utils';
 import { getKalshiOutcome, KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { KALSHI_CHECKPOINT_POLICY_VERSION } from '../utils/fixedPrediction.utils';
+import { analyzeForecastEvidence } from '../utils/learning/evaluation.utils';
 
 const START = Date.UTC(2026, 8, 14, 12);
 const NOW = START + 2 * 24 * 60 * 60_000;
@@ -183,6 +184,58 @@ test('retains neutral probability scores without claiming a directional win', ()
     directionalAccuracy: null,
     expectedCalibrationError: 0.5,
   });
+});
+
+test('reports extra correct calls on matching directional events and does not reuse another variant’s sample', () => {
+  const outcomes = ['yes', 'no', 'yes', 'no', 'no'];
+  const probabilities = [0.8, 0.2, 0.2, 0.2, 0.5];
+  const events = outcomes.flatMap((outcome, index) => {
+    const recorded = recordedEvent(index, { outcome, checkpoint: 6 });
+    changeProbability(recorded[0], 'combined', probabilities[index]);
+    if (index < 2)
+      Object.assign(variant(recorded[0], 'spot-only'), {
+        available: false,
+        reason: 'Missing pressure.',
+      });
+    return recorded;
+  });
+  const summary = checkpoint(evaluate(events), 6);
+  expect(summary.variants.combined.metrics.currentSideComparison).toEqual({
+    examples: 4,
+    modelCorrect: 3,
+    currentSideCorrect: 2,
+    modelAccuracy: 0.75,
+    currentSideAccuracy: 0.5,
+    additionalCorrect: 1,
+  });
+  expect(summary.variants.combined.metrics).toMatchObject({
+    examples: 5,
+    reversals: 3,
+    reversalsCaught: 2,
+    falseReversalWarnings: 1,
+    reversalAlerts: 3,
+  });
+  expect(summary.variants['spot-only'].metrics.currentSideComparison).toEqual({
+    examples: 3,
+    modelCorrect: 1,
+    currentSideCorrect: 1,
+    modelAccuracy: 1 / 3,
+    currentSideAccuracy: 1 / 3,
+    additionalCorrect: 0,
+  });
+});
+
+test('performance lists exact checkpoints without counting repeated captures as new contracts', () => {
+  const events = [12, 9, 6, 3, 1].flatMap((checkpoint) => recordedEvent(0, { checkpoint }));
+  events.push(...recordedEvent(0, { checkpoint: 6, recorder: 'duplicate' }));
+  const result = analyzeForecastEvidence(events, NOW);
+  expect(result.independentWindows).toBe(1);
+  expect(result.byCheckpoint.map((row) => row.checkpointMinutes)).toEqual([12, 9, 6, 3, 1]);
+  expect(result.byCheckpoint.every((row) => row.examples === 1)).toBe(true);
+  expect(result.byCheckpoint.every((row) => row.currentSideComparison.examples === 1)).toBe(true);
+  expect(
+    result.byCheckpoint.every((row) => row.currentSideComparison.additionalCorrect === 0),
+  ).toBe(true);
 });
 
 test('scores recorded settlement intervals against official prices and leaves absent production ranges unavailable', () => {

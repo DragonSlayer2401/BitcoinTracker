@@ -3,6 +3,7 @@ import jStat from 'jstat';
 const RETENTION_MS = 240_000;
 const MAXIMUM_TRADES = 50_000;
 const HEARTBEAT_AGE_MS = 5000;
+const MAXIMUM_RECENT_HEARTBEATS = 16;
 const DECIMAL = /^\d+(?:\.\d+)?$/;
 const getSubMillisecond = (timestamp) =>
   Number(
@@ -55,12 +56,12 @@ export function createCoinbaseTrades() {
   let lastTradeFraction = 0;
   let baselineId = null;
   let completeSince = null;
-  let heartbeatAt = null;
   let heartbeatTime = null;
   let heartbeatFraction = 0;
   let heartbeatTradeId = null;
-  let confirmedThrough = null;
   let pendingHeartbeat = null;
+  let recentHeartbeats = [];
+  let recentConfirmations = [];
   let thresholds = null;
   let classifiedSince = null;
   let bursts = [];
@@ -74,12 +75,12 @@ export function createCoinbaseTrades() {
     lastTradeFraction = 0;
     baselineId = null;
     completeSince = null;
-    heartbeatAt = null;
     heartbeatTime = null;
     heartbeatFraction = 0;
     heartbeatTradeId = null;
-    confirmedThrough = null;
     pendingHeartbeat = null;
+    recentHeartbeats = [];
+    recentConfirmations = [];
     thresholds = null;
     classifiedSince = null;
     bursts = [];
@@ -92,9 +93,14 @@ export function createCoinbaseTrades() {
     completeSince = now;
   }
 
-  function confirmHeartbeat() {
+  function recordConfirmation(time, receivedAt, tradeId) {
+    recentConfirmations.push({ time, receivedAt, tradeId });
+    if (recentConfirmations.length > MAXIMUM_RECENT_HEARTBEATS) recentConfirmations.shift();
+  }
+
+  function confirmHeartbeat(now) {
     if (pendingHeartbeat && pendingHeartbeat.id <= lastTradeId) {
-      confirmedThrough = Math.max(confirmedThrough ?? 0, pendingHeartbeat.time);
+      recordConfirmation(pendingHeartbeat.time, now, pendingHeartbeat.id);
       pendingHeartbeat = null;
     }
   }
@@ -135,15 +141,16 @@ export function createCoinbaseTrades() {
         ) {
           throw new Error('Heartbeat trade marker conflicts with observed executions.');
         }
-        heartbeatAt = now;
         heartbeatTime = time;
         heartbeatFraction = fraction;
         heartbeatTradeId = id;
+        recentHeartbeats.push({ time, receivedAt: now, tradeId: id });
+        if (recentHeartbeats.length > MAXIMUM_RECENT_HEARTBEATS) recentHeartbeats.shift();
         if (id >= baselineId) {
-          if (id <= lastTradeId) confirmedThrough = Math.max(confirmedThrough ?? 0, time);
+          if (id <= lastTradeId) recordConfirmation(time, now, id);
           else pendingHeartbeat = { id, time, receivedAt: pendingHeartbeat?.receivedAt ?? now };
         }
-        confirmHeartbeat();
+        confirmHeartbeat(now);
         return null;
       }
       if (message.type !== 'match') return null;
@@ -186,14 +193,15 @@ export function createCoinbaseTrades() {
           burstRun = { side: trade.side, count: 0, lastTime: trade.time };
         burstRun.count += 1;
         burstRun.lastTime = trade.time;
-        if (burstRun.count === 3) bursts.push({ time: trade.time, side: trade.side });
+        if (burstRun.count === 3)
+          bursts.push({ time: trade.time, receivedAt: trade.receivedAt, side: trade.side });
       }
       trades.push(trade);
       tradesById.set(trade.id, trade);
       lastTradeId = trade.id;
       lastTradeTime = trade.time;
       lastTradeFraction = trade.subMillisecond;
-      confirmHeartbeat();
+      confirmHeartbeat(now);
       return null;
     } catch (error) {
       reset();
@@ -202,25 +210,36 @@ export function createCoinbaseTrades() {
   }
 
   function getQuality(now) {
-    const reason =
-      heartbeatAt === null
-        ? 'Waiting for stream heartbeat.'
-        : now < heartbeatAt ||
-            now - heartbeatAt > HEARTBEAT_AGE_MS ||
-            now - heartbeatTime > HEARTBEAT_AGE_MS
-          ? 'Stream heartbeats are delayed.'
-          : pendingHeartbeat
-            ? 'Verifying potentially missing trades.'
-            : null;
+    // Exchange clocks may lead the local clock. Only proof already received and
+    // whose source time has arrived may certify the captured stream history.
+    const eligible = (entry) => entry.time <= now && entry.receivedAt <= now;
+    const heartbeat = recentHeartbeats.findLast(eligible);
+    const confirmation = recentConfirmations.findLast(eligible);
+    const pending =
+      heartbeat &&
+      (!confirmation ||
+        confirmation.time < heartbeat.time ||
+        confirmation.tradeId < heartbeat.tradeId);
+    const observedStart = completeSince !== null && completeSince <= now ? completeSince : null;
+    const observedTrade = trades.findLast(
+      (trade) => eligible(trade) && isAtOrBefore(trade.time, trade.subMillisecond, now),
+    );
+    const reason = !heartbeat
+      ? 'Waiting for stream heartbeat.'
+      : now - heartbeat.receivedAt > HEARTBEAT_AGE_MS || now - heartbeat.time > HEARTBEAT_AGE_MS
+        ? 'Stream heartbeats are delayed.'
+        : pending || !confirmation
+          ? 'Verifying potentially missing trades.'
+          : null;
     return {
       available: reason === null,
       reason,
-      heartbeatAt,
-      confirmedThrough,
-      completeSince,
-      lastTradeId,
+      heartbeatAt: heartbeat?.receivedAt ?? null,
+      confirmedThrough: confirmation?.time ?? null,
+      completeSince: observedStart,
+      lastTradeId: observedTrade?.id ?? (observedStart === null ? null : baselineId),
       flowReadySeconds:
-        completeSince === null ? 0 : Math.max(0, Math.min(180, (now - completeSince) / 1000)),
+        observedStart === null ? 0 : Math.max(0, Math.min(180, (now - observedStart) / 1000)),
       needsReconnect: pendingHeartbeat && now - pendingHeartbeat.receivedAt > 2000,
     };
   }
@@ -232,19 +251,23 @@ export function createCoinbaseTrades() {
     trades = obsolete === -1 ? [] : trades.slice(obsolete);
     bursts = bursts.filter((burst) => burst.time > now - 60_000);
     const quality = getQuality(now);
+    const eligibleTrades = trades.filter(
+      (trade) => trade.receivedAt <= now && isAtOrBefore(trade.time, trade.subMillisecond, now),
+    );
     // Non-overlapping completed intervals expose contemporaneous impact observations. They do
     // not establish that an execution caused a price move or that the relationship will persist.
     const impactSamples = [];
     const bucketMs = 15_000;
-    const lastBucketEnd = Math.floor(Math.min(now, confirmedThrough ?? 0) / bucketMs) * bucketMs;
+    const lastBucketEnd =
+      Math.floor(Math.min(now, quality.confirmedThrough ?? 0) / bucketMs) * bucketMs;
     if (quality.available && completeSince !== null) {
       for (let endAt = lastBucketEnd - 14 * bucketMs; endAt <= lastBucketEnd; endAt += bucketMs) {
         const startAt = endAt - bucketMs;
         if (startAt < completeSince || startAt < now - RETENTION_MS + 5000) continue;
-        const startTrade = trades.findLast((trade) =>
+        const startTrade = eligibleTrades.findLast((trade) =>
           isAtOrBefore(trade.time, trade.subMillisecond, startAt),
         );
-        const endTrade = trades.findLast((trade) =>
+        const endTrade = eligibleTrades.findLast((trade) =>
           isAtOrBefore(trade.time, trade.subMillisecond, endAt),
         );
         if (
@@ -257,7 +280,7 @@ export function createCoinbaseTrades() {
         let buyBtc = 0;
         let sellBtc = 0;
         let tradeCount = 0;
-        for (const trade of trades) {
+        for (const trade of eligibleTrades) {
           if (
             isAtOrBefore(trade.time, trade.subMillisecond, startAt) ||
             !isAtOrBefore(trade.time, trade.subMillisecond, endAt)
@@ -281,8 +304,8 @@ export function createCoinbaseTrades() {
     const impact = {
       available: quality.available && impactSamples.length > 0,
       asOf: now,
-      completeSince,
-      confirmedThrough,
+      completeSince: quality.completeSince,
+      confirmedThrough: quality.confirmedThrough,
       bucketSeconds: 15,
       samples: impactSamples,
     };
@@ -306,7 +329,7 @@ export function createCoinbaseTrades() {
         let buyBtc = 0;
         let sellBtc = 0;
         let tradeCount = 0;
-        for (const trade of trades) {
+        for (const trade of eligibleTrades) {
           if (trade.time <= now - seconds * 1000 || trade.time > now) continue;
           if (trade.side === 'buy') buyBtc += trade.size;
           else sellBtc += trade.size;
@@ -327,7 +350,7 @@ export function createCoinbaseTrades() {
         ];
       }),
     );
-    const reference = trades.filter((trade) => trade.time > now - 180_000 && trade.time <= now);
+    const reference = eligibleTrades.filter((trade) => trade.time > now - 180_000);
     if (
       windows[60].available &&
       reference.length >= 100 &&
@@ -354,9 +377,7 @@ export function createCoinbaseTrades() {
     }
     const largeReady =
       quality.available && classifiedSince !== null && now - classifiedSince >= 60_000;
-    const large = trades.filter(
-      (trade) => trade.time > now - 60_000 && trade.time <= now && trade.isLarge,
-    );
+    const large = eligibleTrades.filter((trade) => trade.time > now - 60_000 && trade.isLarge);
     const largeTrades = {
       available: largeReady,
       thresholdBtc: thresholds ? Math.min(thresholds.buy, thresholds.sell) : null,
@@ -368,7 +389,9 @@ export function createCoinbaseTrades() {
       count60: largeReady ? large.length : null,
       buyCount60: largeReady ? large.filter((trade) => trade.side === 'buy').length : null,
       sellCount60: largeReady ? large.filter((trade) => trade.side === 'sell').length : null,
-      burstCount60: largeReady ? bursts.length : null,
+      burstCount60: largeReady
+        ? bursts.filter((burst) => burst.time <= now && burst.receivedAt <= now).length
+        : null,
       lastTrade: large.at(-1) ? { ...large.at(-1) } : null,
     };
     return { available: windows[180].available, windows, largeTrades, impact };
@@ -396,9 +419,10 @@ export function createCoinbaseTrades() {
         status: 'unobserved',
         reason: 'The complete trade stream began after the deadline.',
       };
-    if (quality.available && confirmedThrough > expiresAt) {
-      const trade = trades.findLast((entry) =>
-        isAtOrBefore(entry.time, entry.subMillisecond, expiresAt),
+    if (quality.available && quality.confirmedThrough > expiresAt) {
+      const trade = trades.findLast(
+        (entry) =>
+          entry.receivedAt <= now && isAtOrBefore(entry.time, entry.subMillisecond, expiresAt),
       );
       if (trade && trade.time >= completeSince && expiresAt - trade.time <= 5000) {
         return {
@@ -407,7 +431,7 @@ export function createCoinbaseTrades() {
           observedPrice: trade.price,
           observedAt: trade.time,
           observedTradeId: trade.id,
-          confirmedThrough,
+          confirmedThrough: quality.confirmedThrough,
           completeSince,
         };
       }

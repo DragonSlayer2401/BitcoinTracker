@@ -4,6 +4,7 @@ const SYMBOL = 'BTCUSDT';
 const RETENTION_MS = 240_000;
 const MAXIMUM_TRADES = 50_000;
 const MAXIMUM_LIQUIDATIONS = 10_000;
+const MAXIMUM_TICKERS = 512;
 const BUCKET_MS = 15_000;
 const FRESHNESS_MS = 5000;
 const DECIMAL = /^\d+(?:\.\d+)?$/;
@@ -36,6 +37,7 @@ function parseExecution(entry, now, isLiquidation = false) {
   return {
     id: isLiquidation ? null : entry.i,
     time: entry.T,
+    receivedAt: now,
     price,
     size,
     side: entry.S === 'Buy' ? 'buy' : 'sell',
@@ -52,8 +54,8 @@ export function createDerivativesMarket() {
   let completeSince = null;
   let lastTradeAt = null;
   let lastSequence = null;
-  let lastLiquidationAt = null;
   let ticker = null;
+  let tickerHistory = [];
   let threshold = null;
   let thresholdBucket = null;
   let classifiedSince = null;
@@ -66,8 +68,8 @@ export function createDerivativesMarket() {
     completeSince = timestamp;
     lastTradeAt = null;
     lastSequence = null;
-    lastLiquidationAt = null;
     ticker = null;
+    tickerHistory = [];
     threshold = null;
     thresholdBucket = null;
     classifiedSince = null;
@@ -81,6 +83,7 @@ export function createDerivativesMarket() {
     }
     if (removed) trades = trades.slice(removed);
     liquidations = liquidations.filter((entry) => entry.time >= now - RETENTION_MS);
+    tickerHistory = tickerHistory.filter((entry) => entry.value.time >= now - FRESHNESS_MS);
     for (const [key, time] of liquidationFrames) {
       if (time < now - RETENTION_MS) liquidationFrames.delete(key);
     }
@@ -153,7 +156,10 @@ export function createDerivativesMarket() {
     const entries = message.data.map((entry) => parseExecution(entry, now, true));
     // This feed has no execution IDs. Deduplicate exact repeated frames, retaining equal rows
     // within a frame because distinct positions can share side, time, size, and bankruptcy price.
-    const frameKey = JSON.stringify([message.ts, entries]);
+    const frameKey = JSON.stringify([
+      message.ts,
+      entries.map(({ receivedAt: _receivedAt, ...execution }) => execution),
+    ]);
     if (liquidationFrames.has(frameKey)) return;
     if (liquidationFrames.size >= MAXIMUM_LIQUIDATIONS)
       throw new Error('Futures liquidation frames exceed the supported buffer.');
@@ -164,15 +170,15 @@ export function createDerivativesMarket() {
       // S is the liquidated POSITION side: Buy is a liquidated long, hence sell pressure.
       liquidations.push({
         time: entry.time,
+        receivedAt: now,
         size: entry.size,
         position: entry.side === 'buy' ? 'long' : 'short',
       });
-      lastLiquidationAt = Math.max(lastLiquidationAt ?? entry.time, entry.time);
     }
     liquidationFrames.set(frameKey, message.ts);
   }
 
-  function applyTicker(message) {
+  function applyTicker(message, now) {
     const data = message.data;
     if (!data || data.symbol !== SYMBOL || !['snapshot', 'delta'].includes(message.type))
       throw new Error('Invalid futures ticker.');
@@ -185,6 +191,8 @@ export function createDerivativesMarket() {
       if (!Number.isFinite(next[key])) throw new Error('Futures ticker snapshot is incomplete.');
     }
     ticker = { ...next, time: message.ts };
+    tickerHistory.push({ value: ticker, receivedAt: now });
+    if (tickerHistory.length > MAXIMUM_TICKERS) tickerHistory.shift();
   }
 
   function apply(message, now) {
@@ -192,27 +200,39 @@ export function createDerivativesMarket() {
     prune(now);
     if (message.topic === `publicTrade.${SYMBOL}`) applyTrades(message, now);
     else if (message.topic === `allLiquidation.${SYMBOL}`) applyLiquidations(message, now);
-    else if (message.topic === `tickers.${SYMBOL}`) applyTicker(message);
+    else if (message.topic === `tickers.${SYMBOL}`) applyTicker(message, now);
   }
 
-  function getBoundaryTrade(time, maximumAgeMs = BUCKET_MS) {
-    const trade = trades.findLast((entry) => entry.time <= time);
+  function getBoundaryTrade(observedTrades, time, maximumAgeMs = BUCKET_MS) {
+    const trade = observedTrades.findLast((entry) => entry.time <= time);
     return trade && time - trade.time <= maximumAgeMs ? trade : null;
   }
 
   function getSnapshot(now, connected) {
     prune(now);
+    // Exchange clocks can lead the local clock slightly. Keep those messages buffered,
+    // but calculate from executions whose exchange AND receipt times have both passed.
+    const observedTrades = trades.filter((entry) => entry.time <= now && entry.receivedAt <= now);
+    const observedLiquidations = liquidations.filter(
+      (entry) => entry.time <= now && entry.receivedAt <= now,
+    );
+    const observedLastTradeAt = observedTrades.at(-1)?.time ?? null;
+    const observedLastLiquidationAt = observedLiquidations.reduce(
+      (latest, entry) => Math.max(latest ?? entry.time, entry.time),
+      null,
+    );
+    const observedTicker = tickerHistory.findLast(
+      (entry) => entry.value.time <= now && entry.receivedAt <= now,
+    )?.value;
     const hasFreshTrades =
-      connected && lastTradeAt !== null && lastTradeAt <= now && now - lastTradeAt <= FRESHNESS_MS;
+      connected && observedLastTradeAt !== null && now - observedLastTradeAt <= FRESHNESS_MS;
     const isCompleteWindow = (seconds) =>
       completeSince !== null && completeSince <= now - seconds * 1000;
     const windows = Object.fromEntries(
       WINDOWS.map((seconds) => {
         const startAt = now - seconds * 1000;
         const available = hasFreshTrades && isCompleteWindow(seconds);
-        const entries = available
-          ? trades.filter((entry) => entry.time > startAt && entry.time <= now)
-          : [];
+        const entries = available ? observedTrades.filter((entry) => entry.time > startAt) : [];
         const buyBtc = entries.reduce(
           (sum, entry) => sum + (entry.side === 'buy' ? entry.size : 0),
           0,
@@ -228,8 +248,8 @@ export function createDerivativesMarket() {
           classifiedSince <= startAt &&
           entries.every((entry) => entry.isLarge !== null);
         const large = largeTradesAvailable ? entries.filter((entry) => entry.isLarge) : [];
-        const start = getBoundaryTrade(startAt);
-        const end = getBoundaryTrade(now, FRESHNESS_MS);
+        const start = getBoundaryTrade(observedTrades, startAt);
+        const end = getBoundaryTrade(observedTrades, now, FRESHNESS_MS);
         return [
           seconds,
           {
@@ -255,15 +275,17 @@ export function createDerivativesMarket() {
       }),
     );
     const samples = [];
-    const lastBucketEnd = Math.floor(Math.min(now, lastTradeAt ?? 0) / BUCKET_MS) * BUCKET_MS;
+    const lastBucketEnd = Math.floor((observedLastTradeAt ?? 0) / BUCKET_MS) * BUCKET_MS;
     if (hasFreshTrades && completeSince !== null) {
       for (let endAt = lastBucketEnd - 14 * BUCKET_MS; endAt <= lastBucketEnd; endAt += BUCKET_MS) {
         const startAt = endAt - BUCKET_MS;
         if (startAt < completeSince || startAt < now - RETENTION_MS + FRESHNESS_MS) continue;
-        const start = getBoundaryTrade(startAt);
-        const end = getBoundaryTrade(endAt);
+        const start = getBoundaryTrade(observedTrades, startAt);
+        const end = getBoundaryTrade(observedTrades, endAt);
         if (!start || !end) continue;
-        const entries = trades.filter((entry) => entry.time > startAt && entry.time <= endAt);
+        const entries = observedTrades.filter(
+          (entry) => entry.time > startAt && entry.time <= endAt,
+        );
         samples.push({
           startAt,
           endAt,
@@ -283,8 +305,8 @@ export function createDerivativesMarket() {
     }
     return {
       completeSince,
-      lastTradeAt,
-      lastLiquidationAt,
+      lastTradeAt: observedLastTradeAt,
+      lastLiquidationAt: observedLastLiquidationAt,
       hasFreshTrades,
       retainedTrades: trades.length,
       retainedLiquidations: liquidations.length,
@@ -303,9 +325,7 @@ export function createDerivativesMarket() {
           WINDOWS.map((seconds) => {
             const available = connected && isCompleteWindow(seconds);
             const entries = available
-              ? liquidations.filter(
-                  (entry) => entry.time > now - seconds * 1000 && entry.time <= now,
-                )
+              ? observedLiquidations.filter((entry) => entry.time > now - seconds * 1000)
               : [];
             return [
               seconds,
@@ -330,8 +350,8 @@ export function createDerivativesMarket() {
         ),
       },
       ticker:
-        connected && ticker && ticker.time <= now && now - ticker.time <= FRESHNESS_MS
-          ? { ...ticker }
+        connected && observedTicker && now - observedTicker.time <= FRESHNESS_MS
+          ? { ...observedTicker }
           : null,
     };
   }
@@ -340,8 +360,10 @@ export function createDerivativesMarket() {
     // Ticker snapshots can precede the subscription acknowledgement; preserve that snapshot
     // so subsequent deltas can be merged without losing the initial reference fields.
     const initialTicker = ticker;
+    const initialTickerHistory = tickerHistory;
     reset(timestamp);
     ticker = initialTicker;
+    tickerHistory = initialTickerHistory;
   }
 
   return { reset, beginCoverage, apply, getSnapshot };

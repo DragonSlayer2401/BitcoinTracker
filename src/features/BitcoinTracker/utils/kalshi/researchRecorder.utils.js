@@ -180,6 +180,15 @@ export function createKalshiResearchRecorder({ recorderId, state = null }) {
       const freshMarket = available.get(saved.contract.ticker);
       const matching = isSameKalshiContract(freshMarket, saved.contract);
       const outcome = matching ? getKalshiOutcome(freshMarket, now) : null;
+      // A restart can precede the first outcome lookup. Keep the saved contract until
+      // a recent matching response confirms no result; elapsed offline time is not a lookup.
+      const hasExpiredWithoutOutcome =
+        !outcome &&
+        now > saved.contract.expiresAt + RETENTION_MS &&
+        matching &&
+        timestamp(freshMarket.receivedAt) &&
+        freshMarket.receivedAt <= now &&
+        now - freshMarket.receivedAt <= 60_000;
       for (let index = 0; index < saved.checkpoints.length; index++) {
         let entry = saved.checkpoints[index];
         const evidence = (event, inputs = {}) =>
@@ -196,13 +205,12 @@ export function createKalshiResearchRecorder({ recorderId, state = null }) {
             now,
             expiresAt: entry.expiresAt,
             kalshiMarket: entry.kalshiMarket,
+            kalshiQuote: matching ? getKalshiQuoteSnapshot(freshMarket, now) : null,
             benchmark,
             captureResearchInputs: true,
           };
           const calculated = canObserve ? getEstimate(inputs) : null;
-          const estimate = calculated
-            ? { ...calculated, kalshiQuote: getKalshiQuoteSnapshot(freshMarket, now) }
-            : null;
+          const estimate = calculated ? { ...calculated, kalshiQuote: inputs.kalshiQuote } : null;
           const reference = getKalshiReferenceQuote(estimate, ticker);
           const direction = isFreshQuote(reference, now)
             ? getQualifyingDirection(estimate, PRESSURE_POLICY_VERSION)
@@ -259,7 +267,7 @@ export function createKalshiResearchRecorder({ recorderId, state = null }) {
           }
         }
         saved.checkpoints[index] = entry;
-        if (outcome || now > saved.contract.expiresAt + RETENTION_MS) {
+        if (outcome || hasExpiredWithoutOutcome) {
           const resolved = outcome
             ? {
                 ...entry,
@@ -277,12 +285,12 @@ export function createKalshiResearchRecorder({ recorderId, state = null }) {
               outcomeStatus: outcome ? 'observed' : 'unobserved',
               reason: outcome
                 ? null
-                : 'An official Kalshi result was not obtained within seven days.',
+                : 'A recent matching Kalshi response still had no official result after seven days.',
             }),
           );
         }
       }
-      if (outcome || now > saved.contract.expiresAt + RETENTION_MS)
+      if (outcome || hasExpiredWithoutOutcome)
         next.completed.push({ ticker: saved.contract.ticker, expiresAt: saved.contract.expiresAt });
       else unresolved.push(saved);
     }

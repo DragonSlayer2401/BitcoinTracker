@@ -96,6 +96,12 @@ export function getKalshiReadResource(path) {
     ) {
       rejectResource();
     }
+  } else if (/^\/markets\/[^/]+\/orderbook$/.test(pathname)) {
+    assertKalshiTicker(pathname.split('/')[2]);
+    if (parameters.size !== 1 || parameters.get('depth') !== '100') rejectResource();
+  } else if (pathname === '/events/fee_changes') {
+    assertKalshiTicker(parameters.get('event_ticker'), { event: true });
+    if (parameters.size !== 2 || parameters.get('limit') !== '100') rejectResource();
   } else if (pathname === '/markets') {
     if (
       parameters.get('series_ticker') !== 'KXBTC15M' ||

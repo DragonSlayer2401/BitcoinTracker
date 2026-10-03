@@ -214,6 +214,8 @@ export function getPriceChartOption({
   candleMinutes = 1,
   comparisonTime = null,
   chartHeight = 400,
+  currentReading = null,
+  currentPriceStatus = 'unavailable',
 }) {
   const hasDeadline = Number.isFinite(deadline) && deadline > startTime;
   const axisEndTime = hasDeadline ? Math.max(endTime, deadline) : endTime;
@@ -234,6 +236,12 @@ export function getPriceChartOption({
     deadline > endTime,
   );
   const hasTarget = Number.isFinite(target) && target > 0;
+  const hasCurrentPrice =
+    hasPricePoint(currentReading) &&
+    currentReading.price <= 1_000_000_000 &&
+    currentReading.time > 0 &&
+    currentReading.time <= endTime;
+  const currentPriceColor = currentPriceStatus === 'live' ? '#2563eb' : '#5b665e';
   const lastPoint = readings.at(-1);
   const isPriceRising = !lastPoint || lastPoint.price >= readings[0].price;
   const lineColor = isPriceRising ? GREEN : RED;
@@ -252,6 +260,9 @@ export function getPriceChartOption({
     .forEach((point) => prices.push(point.price));
   // An off-screen target or future range must not flatten a zoomed historical section.
   if (hasTarget && (!isZoomed || prices.length === 0)) prices.push(target);
+  // Keep the latest index level visible even while inspecting a historical time window.
+  // This reference affects only the price scale; it never becomes an observed candle or sample.
+  if (hasCurrentPrice) prices.push(currentReading.price);
   const minimum = prices.length ? Math.min(...prices) : 0;
   const maximum = prices.length ? Math.max(...prices) : 1;
   const padding = Math.max((maximum - minimum) * 0.15, maximum * 0.00015);
@@ -296,6 +307,30 @@ export function getPriceChartOption({
             distance: 3,
           },
         })),
+      ...(hasCurrentPrice
+        ? [
+            {
+              name:
+                currentPriceStatus === 'live' ? 'Current BRTI price' : 'Last observed BRTI price',
+              yAxis: currentReading.price,
+              lineStyle: { color: currentPriceColor, type: 'dashed', width: 1 },
+              label: {
+                show: true,
+                position: 'end',
+                formatter: formatPrice(currentReading.price),
+                color: '#ffffff',
+                backgroundColor: currentPriceColor,
+                borderColor: currentPriceColor,
+                borderWidth: 1,
+                borderRadius: 2,
+                padding: [2, 4],
+                fontSize: 11,
+                fontWeight: 600,
+                distance: 3,
+              },
+            },
+          ]
+        : []),
     ]),
     markArea: {
       silent: true,

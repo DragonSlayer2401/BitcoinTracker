@@ -6,7 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createClient } from '@libsql/client';
 import { getResearchWriteTransaction } from './research.connection';
 import { initializeResearchSchema } from './research.schema';
+import { createChallengerTrialRepository } from './challengerTrial.repository';
+import { createChallengerDevelopmentRepository } from './challengerDevelopment.repository';
+import { isCollectorHeartbeat } from '@/features/BitcoinTracker/utils/collectorHealth.utils';
 import { EARLY_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/earlyModel.utils';
+import { CHALLENGER_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
 import {
   ResearchDataError,
   getCanonicalResearchJson,
@@ -238,6 +242,52 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
   }
 
   const repository = {
+    ...createChallengerTrialRepository({ client, initialize, runWriteOperation }),
+    ...createChallengerDevelopmentRepository({ client, initialize, runWriteOperation }),
+    async writeCollectorHeartbeat(heartbeat) {
+      if (!isCollectorHeartbeat(heartbeat))
+        throw new ResearchDataError('Invalid collector heartbeat.');
+      return runWriteOperation(async () => {
+        await initialize();
+        const result = await client.execute({
+          sql: `INSERT INTO collector_heartbeats(collector_id, heartbeat_at, payload) VALUES (?, ?, ?)
+            ON CONFLICT(collector_id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, payload = excluded.payload
+            WHERE (collector_heartbeats.heartbeat_at < excluded.heartbeat_at OR
+              (collector_heartbeats.heartbeat_at = excluded.heartbeat_at AND
+               json_extract(collector_heartbeats.payload, '$.status') IN ('starting', 'running') AND
+               json_extract(excluded.payload, '$.status') IN ('stopped', 'error')))
+              AND json_extract(collector_heartbeats.payload, '$.startedAt') = json_extract(excluded.payload, '$.startedAt')`,
+          args: [heartbeat.collectorId, heartbeat.heartbeatAt, getCanonicalResearchJson(heartbeat)],
+        });
+        return { written: result.rowsAffected > 0 };
+      });
+    },
+    async readCollectorHeartbeats() {
+      await initialize();
+      const result = await client.execute(
+        'SELECT payload FROM collector_heartbeats ORDER BY heartbeat_at DESC LIMIT 100',
+      );
+      return result.rows.map((row) => JSON.parse(row.payload));
+    },
+    async getCollectorHealthRows({ since, now }) {
+      if (!isResearchTimestamp(since) || !isResearchTimestamp(now) || since > now)
+        throw new ResearchDataError('Invalid collector health time range.');
+      await initialize();
+      const [evidence, labels] = await Promise.all([
+        client.execute({
+          sql: 'SELECT payload FROM evidence_events WHERE recorded_at BETWEEN ? AND ? ORDER BY sequence',
+          args: [Math.max(0, since - 30 * 60_000), now],
+        }),
+        client.execute({
+          sql: 'SELECT payload FROM research_forward_labels WHERE recorded_at BETWEEN ? AND ? ORDER BY sequence',
+          args: [Math.max(0, since - 30 * 60_000), now],
+        }),
+      ]);
+      return {
+        evidence: evidence.rows.map((row) => JSON.parse(row.payload)),
+        labels: labels.rows.map((row) => JSON.parse(row.payload)),
+      };
+    },
     persistEvidenceRows(rows) {
       return appendEvents('evidence_events', rows, (row) => {
         const evidenceJson = validateEvidenceRow(row);
@@ -399,11 +449,21 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
                 409,
               );
             const exists = await transaction.execute({
-              sql: 'SELECT content_hash FROM research_forward_labels WHERE label_id = ?',
+              sql: 'SELECT content_hash, payload FROM research_forward_labels WHERE label_id = ?',
               args: [label.labelId],
             });
             if (exists.rows.length) {
-              if (exists.rows[0].content_hash !== hash)
+              const stored = exists.rows[0];
+              // Two collectors can receive the same exact index observation and save it
+              // milliseconds apart. Acknowledge that observation without changing the
+              // archive's original recording time, receipt provenance, payload or hash.
+              const sameObservation =
+                stored.content_hash === hash ||
+                getCanonicalResearchJson({
+                  ...JSON.parse(stored.payload),
+                  recordedAt: label.recordedAt,
+                }) === json;
+              if (getContentHash(stored.payload) !== stored.content_hash || !sameObservation)
                 throw new ResearchDataError(
                   'A forward label cannot overwrite its original observation.',
                   409,
@@ -599,6 +659,40 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
           const latest = current.rows[0];
           if (latest && activatedAt < Number(latest.activated_at))
             throw new ResearchDataError('Activation cannot replace a newer activation.', 409);
+          if (artifact.version === CHALLENGER_MODEL_VERSION) {
+            const prior = await transaction.execute({
+              sql: 'SELECT 1 FROM model_activations WHERE model_id = ? LIMIT 1',
+              args: [id],
+            });
+            if (prior.rows.length)
+              throw new ResearchDataError(
+                'A confirmation trial can activate its candidate only once.',
+                409,
+              );
+            const confirmation = await transaction.execute({
+              sql: 'SELECT payload FROM challenger_trials WHERE model_id = ?',
+              args: [id],
+            });
+            const trial = confirmation.rows.length
+              ? JSON.parse(confirmation.rows[0].payload)
+              : null;
+            const incumbent =
+              latest && latest.retired_at == null ? JSON.parse(latest.payload) : null;
+            if (
+              !trial ||
+              trial.status !== 'passed' ||
+              shadowEvaluation.phase !== 'confirmation' ||
+              getCanonicalResearchJson(trial.evaluation) !==
+                getCanonicalResearchJson(shadowEvaluation) ||
+              trial.updatedAt > activatedAt ||
+              trial.productionModelId !== (incumbent?.id ?? null) ||
+              trial.productionActivatedAt !== (incumbent ? Number(latest.activated_at) : null)
+            )
+              throw new ResearchDataError(
+                'Activation requires persisted passing confirmation against the unchanged incumbent.',
+                409,
+              );
+          }
           if (
             artifact.version === EARLY_MODEL_VERSION &&
             latest &&
@@ -766,6 +860,8 @@ export const getResearchRows = async (parameters) =>
   (await getDefaultRepository()).getResearchRows(parameters);
 export const getLearningEvidenceRows = async (parameters) =>
   (await getDefaultRepository()).getLearningEvidenceRows(parameters);
+export const getForwardResearchLabels = async () =>
+  (await getDefaultRepository()).getForwardResearchLabels();
 export const getResearchStatus = async () => (await getDefaultRepository()).getResearchStatus();
 export const writeModelArtifact = async (artifact) =>
   (await getDefaultRepository()).writeModelArtifact(artifact);
@@ -783,3 +879,21 @@ export const acquireLearningLease = async (parameters) =>
   (await getDefaultRepository()).acquireLearningLease(parameters);
 export const releaseLearningLease = async (ownerId) =>
   (await getDefaultRepository()).releaseLearningLease(ownerId);
+export const readChallengerTrials = async () =>
+  (await getDefaultRepository()).readChallengerTrials();
+export const createChallengerTrial = async (input) =>
+  (await getDefaultRepository()).createChallengerTrial(input);
+export const updateChallengerTrial = async (id, input) =>
+  (await getDefaultRepository()).updateChallengerTrial(id, input);
+export const writeCollectorHeartbeat = async (input) =>
+  (await getDefaultRepository()).writeCollectorHeartbeat(input);
+export const readCollectorHeartbeats = async () =>
+  (await getDefaultRepository()).readCollectorHeartbeats();
+export const getCollectorHealthRows = async (options) =>
+  (await getDefaultRepository()).getCollectorHealthRows(options);
+export const readChallengerDevelopments = async () =>
+  (await getDefaultRepository()).readChallengerDevelopments();
+export const createChallengerDevelopment = async (input) =>
+  (await getDefaultRepository()).createChallengerDevelopment(input);
+export const updateChallengerDevelopment = async (id, input) =>
+  (await getDefaultRepository()).updateChallengerDevelopment(id, input);

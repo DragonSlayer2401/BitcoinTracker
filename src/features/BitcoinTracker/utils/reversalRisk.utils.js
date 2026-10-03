@@ -74,8 +74,11 @@ export function getReversalRisk({ forecast, fixedForecast, ticker, now } = {}) {
   ) {
     return unavailable('Waiting for a fresh reference price for this Kalshi estimate.');
   }
-  const currentSide =
-    referencePrice > fixedForecast.target
+  const currentSide = usesKalshi
+    ? Math.round(referencePrice * 100) / 100 >= fixedForecast.target
+      ? 'above'
+      : 'below'
+    : referencePrice > fixedForecast.target
       ? 'above'
       : referencePrice < fixedForecast.target
         ? 'below'

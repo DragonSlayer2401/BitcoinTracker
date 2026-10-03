@@ -9,10 +9,14 @@ import {
   collectForwardResearchLabels,
   getCollectorAnalysis,
 } from '../../../../scripts/collect-research.analysis';
-import { createCollectorStateStore } from '../../../../scripts/collect-research.storage';
+import {
+  createCollectorStateStore,
+  writeCollectorState,
+} from '../../../../scripts/collect-research.storage';
 import { replayResearchInputSnapshot } from '../utils/researchExperiments.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { getForwardResearchLabels } from '../utils/researchForwardLabels.utils';
+import { RESEARCH_VARIANT_NAMES } from '../utils/researchExperiments.utils';
 
 jest.mock('server-only', () => ({}));
 const start = Date.UTC(2026, 8, 14, 12);
@@ -52,7 +56,7 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-async function capture() {
+async function capture(marketPatch = {}, learningService = {}) {
   const ticker = {
     price: 50_000,
     bid: 49_999,
@@ -71,7 +75,7 @@ async function capture() {
     once: true,
     statePath,
     repository,
-    learningService: { getLearningStatus: async () => ({}) },
+    learningService: { getLearningStatus: async () => ({}), ...learningService },
     createStream: () => ({
       start() {},
       stop() {},
@@ -81,13 +85,67 @@ async function capture() {
     createBenchmarkStream: () => benchmarkStream,
     loadTicker: async () => ticker,
     loadCandles: async () => [],
-    loadMarkets: async () => ({ markets: [market] }),
+    loadMarkets: async () => ({ markets: [{ ...market, ...marketPatch }] }),
     loadBenchmark: async () => benchmark,
     now: () => capturedAt,
     log: jest.fn(),
   });
   return { result, benchmarkStream, benchmark };
 }
+
+test('fresh Kalshi prices reach calculation before capture and reproduce exactly from storage', async () => {
+  const enrollChallengerCandidates = jest.fn(async ({ proofEventIds }) => {
+    const stored = await repository.readResearchInputSnapshot(proofEventIds[0]);
+    expect(stored.snapshot.input.kalshiQuote.yesBid).toBe(0.7);
+  });
+  await capture(
+    { yesBid: 0.7, yesAsk: 0.74, noBid: 0.26, noAsk: 0.3 },
+    { enrollChallengerCandidates },
+  );
+  const [decision] = await repository.getLearningEvidenceRows();
+  const { snapshot } = await repository.readResearchInputSnapshot(decision.eventId);
+  expect(snapshot.input.kalshiMarket.yesBid).toBeUndefined();
+  expect(snapshot.input.kalshiQuote).toEqual(decision.kalshiQuote);
+  const variants = decision.researchExperiment.variants;
+  expect(variants['market-blend']).toMatchObject({ appliedMarket: true, marketProbability: 0.72 });
+  expect(variants['market-blend'].aboveProbability).not.toBe(variants.combined.aboveProbability);
+  expect(variants['market-only'].aboveProbability).toBe(0.72);
+  expect(replayResearchInputSnapshot(snapshot).aboveProbability).toBe(decision.aboveProbability);
+  expect(enrollChallengerCandidates).toHaveBeenCalledWith(
+    expect.objectContaining({ proofEventIds: [decision.eventId] }),
+  );
+});
+
+test.each([
+  ['stale quote', { yesBid: 0.7, yesAsk: 0.74, receivedAt: capturedAt - 20_000 }],
+  ['crossed quote', { yesBid: 0.8, yesAsk: 0.7 }],
+  ['wide spread', { yesBid: 0.1, yesAsk: 0.9 }],
+])('%s retains the normal forecast without a market adjustment', async (_, marketPatch) => {
+  await capture(marketPatch);
+  const [decision] = await repository.getLearningEvidenceRows();
+  const variants = decision.researchExperiment.variants;
+  expect(decision.decision).toBe('pending');
+  expect(variants['market-blend'].appliedMarket).toBe(false);
+  expect(variants['market-blend'].aboveProbability).toBe(variants.combined.aboveProbability);
+  expect(
+    replayResearchInputSnapshot(
+      (await repository.readResearchInputSnapshot(decision.eventId)).snapshot,
+    ).aboveProbability,
+  ).toBe(decision.aboveProbability);
+});
+
+test('enrollment failure does not undo a successfully captured forecast', async () => {
+  await capture(
+    {},
+    {
+      enrollChallengerCandidates: async () => {
+        throw new Error('temporarily unavailable');
+      },
+    },
+  );
+  expect(await repository.getLearningEvidenceRows()).toHaveLength(1);
+  expect(JSON.parse(await readFile(statePath, 'utf8')).pendingRows).toEqual([]);
+});
 
 test('the collector records paired inputs, replays after canonical DB storage, and scores official settlement', async () => {
   const { result, benchmarkStream } = await capture();
@@ -100,7 +158,10 @@ test('the collector records paired inputs, replays after canonical DB storage, a
     researchReplay: { status: 'stored' },
   });
   expect(decision.researchInputSnapshot).toBeUndefined();
-  expect(Object.keys(decision.researchExperiment.variants)).toHaveLength(4);
+  expect(Object.keys(decision.researchExperiment.variants).sort()).toEqual(
+    [...RESEARCH_VARIANT_NAMES].sort(),
+  );
+  expect(decision.researchExperiment.variants['reversal-candidate'].available).toBe(false);
   const stored = await repository.readResearchInputSnapshot(decision.eventId);
   expect(stored.snapshot.input.benchmark.samples).toHaveLength(1201);
   expect(replayResearchInputSnapshot(stored.snapshot).aboveProbability).toBe(
@@ -205,6 +266,35 @@ test('forward labels use exact future BRTI seconds and retain the first observat
   expect(replayResearchInputSnapshot(stored.snapshot).aboveProbability).toBe(
     decision.aboveProbability,
   );
+});
+
+test('an identical forward observation from a second collector clears the outbox only after archive acknowledgment', async () => {
+  await capture();
+  const time = capturedAt + 15_000;
+  await collectForwardResearchLabels({
+    repository,
+    benchmark: benchmarkAt(time),
+    now: time,
+    statePath,
+  });
+  const [original] = await repository.getForwardResearchLabels();
+  const duplicate = { ...original, recordedAt: original.recordedAt + 15 };
+  await writeCollectorState(`${statePath}.forward-labels.json`, {
+    version: 1,
+    pending: [duplicate],
+  });
+  await expect(
+    collectForwardResearchLabels({
+      repository,
+      benchmark: benchmarkAt(time + 1000),
+      now: time + 1000,
+      statePath,
+    }),
+  ).resolves.toBe(0);
+  expect(JSON.parse(await readFile(`${statePath}.forward-labels.json`, 'utf8')).pending).toEqual(
+    [],
+  );
+  expect(await repository.getForwardResearchLabels()).toEqual([original]);
 });
 
 test('missing exact labels remain missing and proxy captures cannot be labeled as BRTI returns', async () => {

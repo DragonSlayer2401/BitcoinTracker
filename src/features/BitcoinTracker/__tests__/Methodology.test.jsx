@@ -2,6 +2,14 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Methodology from '../components/Methodology';
 
+jest.mock('@/services/research/collectorHealth.api', () => ({
+  useGetCollectorHealthQuery: () => ({}),
+}));
+
+jest.mock('@/services/research/paperTrading/paperTrading.api', () => ({
+  useGetPaperTradingReportQuery: () => ({}),
+}));
+
 describe('Model and data rules panel', () => {
   test('keeps the summary visible and opens the full model, timing, and source rules on demand', async () => {
     const user = userEvent.setup();

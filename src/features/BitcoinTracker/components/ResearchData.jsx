@@ -4,6 +4,9 @@ import { readEvidenceRows } from '../utils/evidenceStorage.utils';
 import ResearchModelStatus from './ResearchData/ResearchModelStatus';
 import ResearchPerformance from './ResearchData/ResearchPerformance';
 import ResearchCollectionStatus from './ResearchData/ResearchCollectionStatus';
+import ResearchExperiments from './ResearchData/ResearchExperiments';
+import { useGetCollectorHealthQuery } from '@/services/research/collectorHealth.api';
+import { COLLECTOR_HEALTH_POLICY } from '../utils/collectorHealth.utils';
 import {
   readResearchExport,
   requestResearch,
@@ -18,6 +21,11 @@ export default function ResearchData({ warning, researchStatus }) {
   const [report, setReport] = useState(null);
   const [error, setError] = useState(null);
   const [exportedCount, setExportedCount] = useState(null);
+  const { data: collectorHealth } = useGetCollectorHealthQuery(undefined, {
+    skip: !isOpen,
+    pollingInterval: COLLECTOR_HEALTH_POLICY.heartbeatIntervalMs,
+    refetchOnMountOrArgChange: true,
+  });
 
   useEffect(() => {
     if (!isOpen) return;
@@ -97,7 +105,11 @@ export default function ResearchData({ warning, researchStatus }) {
         <Modal.Body>
           <ResearchModelStatus report={report} />
           <ResearchPerformance analysis={report?.analysis} />
-          <ResearchCollectionStatus researchStatus={researchStatus} />
+          <ResearchExperiments comparison={report?.comparison} challengers={report?.challengers} />
+          <ResearchCollectionStatus
+            researchStatus={researchStatus}
+            collectorHealth={collectorHealth ?? report?.collectorHealth}
+          />
           {isLoading && (
             <p role="status" className="small mt-3 mb-0">
               Loading archive analysis…

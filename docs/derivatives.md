@@ -4,7 +4,7 @@ The browser and persistent collector subscribe to Bybit's public BTCUSDT linear 
 
 ## Calculation
 
-`kalshi-brti-derivatives-v1` extends the existing settlement-average calculation. The official target, closing time, cent rounding, and final-minute BRTI average remain the predicted event.
+`kalshi-brti-derivatives-v2` extends the existing settlement-average calculation. The official target, closing time, cent rounding, and final-minute BRTI average remain the predicted event. Saved v1 calculations retain their original replay rules.
 
 - Executed buy and sell BTC are measured over 15, 60, and 180 seconds. Large executions are classified relative to earlier activity; a current burst cannot establish its own threshold.
 - A fit between signed executed BTC and observed returns in completed 15-second intervals estimates recent price response. Six intervals are needed initially. Shrinkage reduces small-sample influence, and current buying/selling that prices absorb receives less directional weight.
@@ -19,6 +19,12 @@ These are explicit engineering assumptions, not fitted accuracy guarantees. The 
 Trade `S` is the **taker** side: Buy means an aggressive buyer. Liquidation `S` is the **position** side: Buy means a long was liquidated, hence selling pressure; Sell means a short was liquidated. A liquidation's published price is a bankruptcy price and is not treated as an execution price.
 
 Trade IDs deduplicate executions. Repeated cross-sequence values may contain distinct trades and are not discarded as duplicate batches. Off-book block trades are excluded from aggressive pressure. Subscription acknowledgements establish the observation boundary; reconnects clear rolling measurements. Buffers, frames, and reconnect retries are bounded. Coverage is explicitly venue-reported; no claim is made that this is every futures trade or liquidation across the market.
+
+An exchange timestamp can lead the local clock slightly. Such messages remain buffered until both
+their original exchange and local receipt times are at or before the calculation time. Meanwhile,
+the calculation uses the newest eligible executions and ticker, so one ahead-of-clock message does
+not disable otherwise fresh buying/selling pressure. Neither timestamp is rewritten. Stale data
+still fails the existing freshness rules, and no eligible history means the optional input is absent.
 
 ## Saved data and learning
 

@@ -51,6 +51,62 @@ function inputs() {
 }
 
 describe('Kalshi reversal reference', () => {
+  test.each([
+    [49_999.994, 'below', 'above', 0.4],
+    [49_999.999, 'above', 'below', 0.6],
+    [50_000, 'above', 'below', 0.6],
+    [50_000.001, 'above', 'below', 0.6],
+    [50_000.006, 'above', 'below', 0.6],
+    [49_990, 'below', 'above', 0.4],
+    [50_010, 'above', 'below', 0.6],
+  ])(
+    'cent-rounded reference %s identifies %s without changing stored-call loss risk',
+    (price, currentSide, oppositeSide, flipProbability) => {
+      const input = inputs();
+      input.forecast.kalshi.referencePrice = price;
+      expect(getReversalRisk(input)).toMatchObject({
+        available: true,
+        referencePrice: price,
+        currentSide,
+        oppositeSide,
+        currentSideFlipProbability: flipProbability,
+        fixedFailureSide: 'below',
+        fixedFailureProbability: 0.6,
+        isAgainstFixedCall: currentSide === 'below',
+      });
+      input.fixedForecast.direction = 'below';
+      expect(getReversalRisk(input)).toMatchObject({
+        currentSide,
+        oppositeSide,
+        currentSideFlipProbability: flipProbability,
+        fixedFailureSide: 'above',
+        fixedFailureProbability: 0.4,
+        isAgainstFixedCall: currentSide === 'above',
+      });
+    },
+  );
+
+  test.each([
+    [49_999.999, 'below', 'above', 0.4],
+    [50_000, 'at', null, null],
+    [50_000.001, 'above', 'below', 0.6],
+  ])(
+    'non-Kalshi reference %s keeps raw-price and exact-tie behavior',
+    (price, currentSide, oppositeSide, flipProbability) => {
+      const input = inputs();
+      delete input.fixedForecast.outcomeDefinition;
+      delete input.forecast.outcomeDefinition;
+      input.ticker.price = price;
+      expect(getReversalRisk(input)).toMatchObject({
+        available: true,
+        currentSide,
+        oppositeSide,
+        currentSideFlipProbability: flipProbability,
+        fixedFailureProbability: 0.6,
+      });
+    },
+  );
+
   test('uses the actual BRTI side when Coinbase is on the opposite side of the target', () => {
     expect(getReversalRisk(inputs())).toMatchObject({
       available: true,
@@ -115,11 +171,37 @@ describe('Kalshi reversal reference', () => {
     expect(getReversalRisk(input).available).toBe(true);
   });
 
+  test.each([49_999.999, 50_000])(
+    'risk copy keeps a reference rounding to the target (%s) on the Yes side',
+    async (price) => {
+      const user = userEvent.setup();
+      const input = inputs();
+      input.forecast.kalshi.referencePrice = price;
+      render(<ForecastRisk {...input} />);
+      await user.click(screen.getByRole('button', { name: /view estimated deadline risk/ }));
+      const dialog = within(screen.getByRole('dialog', { name: 'Deadline and reversal risk' }));
+      expect(dialog.getByText(/Current BRTI benchmark/)).toHaveTextContent(
+        '$50,000.00 is at or above the saved target after rounding to cents.',
+      );
+      expect(dialog.queryByText(/there is no current side to flip from/)).not.toBeInTheDocument();
+      expect(dialog.queryByText(/side opposite the fixed call/)).not.toBeInTheDocument();
+      expect(
+        dialog.getByText(
+          (_, element) =>
+            element.tagName === 'P' &&
+            element.textContent.includes(
+              '60.0% estimated chance of settling No, opposite the current reference price side.',
+            ),
+        ),
+      ).toBeVisible();
+    },
+  );
+
   test('risk copy distinguishes current BRTI from the final average and explains Kalshi equality', async () => {
     const user = userEvent.setup();
     render(<ForecastRisk {...inputs()} />);
     const button = screen.getByRole('button', {
-      name: 'Fixed-call risk · 60.0%, view estimated deadline risk',
+      name: 'Fixed loss risk · 60.0%, view estimated deadline risk',
     });
     await user.click(button);
     const dialog = within(screen.getByRole('dialog', { name: 'Deadline and reversal risk' }));
@@ -147,5 +229,20 @@ describe('Kalshi reversal reference', () => {
     expect(dialog.queryByText(/Currently above the saved target/)).not.toBeInTheDocument();
     await user.click(dialog.getByRole('button', { name: 'Close forecast risk' }));
     expect(button).toHaveFocus();
+  });
+
+  test('does not show fixed-loss changes for a different Kalshi contract', async () => {
+    const user = userEvent.setup();
+    const input = inputs();
+    input.fixedForecast = { ...input.fixedForecast, aboveProbability: 0.7, belowProbability: 0.3 };
+    input.forecast.kalshi.marketTicker = 'KXBTC15M-OTHER';
+    render(<ForecastRisk {...input} />);
+    const button = screen.getByRole('button', {
+      name: 'Forecast risk, view estimated deadline risk',
+    });
+    expect(button).not.toHaveTextContent('pp');
+    await user.click(button);
+    expect(screen.getByText(/Waiting for an estimate for the same saved contract/)).toBeVisible();
+    expect(screen.queryByText(/Saved loss risk/)).not.toBeInTheDocument();
   });
 });

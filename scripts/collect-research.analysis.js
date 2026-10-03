@@ -3,6 +3,8 @@ import { replayResearchInputSnapshot } from '../src/features/BitcoinTracker/util
 import { getForwardResearchLabels } from '../src/features/BitcoinTracker/utils/researchForwardLabels.utils';
 import { readFile } from 'node:fs/promises';
 import { writeCollectorState } from './collect-research.storage';
+import { createChallengerService } from '../src/services/research/challenger.service';
+import { createCollectorHealthService } from '../src/services/research/collectorHealth.service';
 
 /** Future labels are stored separately and cannot enter an earlier forecast's replay input. */
 export async function collectForwardResearchLabels({ repository, benchmark, now, statePath }) {
@@ -72,6 +74,14 @@ export async function getCollectorAnalysis({ repository, now, replayLimit = 10 }
   return {
     generatedAt: now,
     comparison: evaluateResearchExperiments(evidence, { now }),
+    collectorHealth: await createCollectorHealthService(repository)
+      .getCollectorHealth({ now, events: evidence, labels })
+      .catch(() => null),
+    challengers: await createChallengerService(repository).getChallengerStatus({
+      now,
+      events: evidence,
+      labels,
+    }),
     forwardLabels: {
       total: labels.length,
       observed: labels.filter((label) => label.status === 'observed').length,

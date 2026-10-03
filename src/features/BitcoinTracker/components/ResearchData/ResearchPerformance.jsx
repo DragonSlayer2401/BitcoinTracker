@@ -12,13 +12,17 @@ function getInputSourceLabel(row) {
 export default function ResearchPerformance({ analysis }) {
   const metrics = analysis?.metrics;
   const bins = metrics?.calibrationBins?.filter((bin) => bin.count) ?? [];
+  const exactCheckpoints = analysis?.byCheckpoint?.some((row) => row.examples > 0);
 
   return (
     <>
       <h3 className="h6">Recorded performance</h3>
       <p className="small text-secondary">
         {analysis?.explanation || 'Performance appears after verified outcomes arrive.'} The
-        current-side benchmark predicts whichever side of the target the price occupies at capture.
+        current-side benchmark predicts whichever side of the target the price occupies at capture.{' '}
+        High accuracy near the end can happen because the price has little time left to cross the
+        target. Extra correct calls shows whether the model actually beat that simple benchmark on
+        the same events; a negative count means it did worse.
       </p>
       {analysis && (
         <>
@@ -33,7 +37,7 @@ export default function ResearchPerformance({ analysis }) {
               },
               ...(analysis.savedJournal?.groups ?? []),
             ]}
-            caption="Kalshi Yes includes ties. Accuracy excludes neutral calls; parentheses show directional call counts. Brier includes neutral probabilities."
+            caption="Kalshi Yes includes ties. Model and current-side accuracy use the same directional calls; parentheses show paired counts. Extra correct calls is model correct minus current-side correct. Neutral calls remain in Brier scores. Reversals caught shows correct warnings / actual reversals; false warnings shows incorrect warnings / all warnings."
           />
           {analysis.marketBenchmark && (
             <ResearchAccuracyTable
@@ -54,16 +58,20 @@ export default function ResearchPerformance({ analysis }) {
               <dd>{formatPercent(analysis.outcomeCoverage)}</dd>
             </div>
             <div>
-              <dt>Reversals detected</dt>
+              <dt>Reversals caught</dt>
               <dd>
-                {formatPercent(metrics?.reversalRecall)} ({metrics?.reversals ?? 0} reversals)
+                {Number.isInteger(metrics?.reversalsCaught) ? metrics.reversalsCaught : '—'} /{' '}
+                {metrics?.reversals ?? 0} reversals ({formatPercent(metrics?.reversalRecall)})
               </dd>
             </div>
             <div>
-              <dt>False reversal alerts</dt>
+              <dt>False reversal warnings</dt>
               <dd>
-                {formatPercent(metrics?.reversalFalseAlarmRate)} ({metrics?.reversalAlerts ?? 0}{' '}
-                alerts)
+                {Number.isInteger(metrics?.falseReversalWarnings)
+                  ? metrics.falseReversalWarnings
+                  : '—'}{' '}
+                / {metrics?.reversalAlerts ?? 0} warnings (
+                {formatPercent(metrics?.reversalFalseAlarmRate)})
               </dd>
             </div>
             <div>
@@ -81,8 +89,12 @@ export default function ResearchPerformance({ analysis }) {
           <details className="small mb-3">
             <summary>Results by remaining time, model and price source</summary>
             <ResearchAccuracyTable
-              rows={analysis.byHorizon ?? []}
-              caption="Independent windows grouped by time remaining at capture."
+              rows={exactCheckpoints ? analysis.byCheckpoint : (analysis.byHorizon ?? [])}
+              caption={
+                exactCheckpoints
+                  ? 'Exact countdown checkpoints. Model and current-side accuracy use the same directional events in each row. An event can appear at several times, so do not add the row counts together as independent events.'
+                  : 'Independent windows grouped by time remaining at capture. Each current-side comparison uses the exact same events as that row’s directional model calls.'
+              }
             />
             <ResearchAccuracyTable
               rows={(analysis.byModel ?? []).map((row) => ({

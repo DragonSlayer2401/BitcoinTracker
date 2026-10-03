@@ -2,6 +2,12 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import ResearchData from '../components/ResearchData';
 import KalshiModelRules from '../components/KalshiModelRules';
 import { requestResearch, runResearchLearning } from '@/services/research/research.client.service';
+import { useGetCollectorHealthQuery } from '@/services/research/collectorHealth.api';
+import { getCollectorHealth } from '../utils/collectorHealth.utils';
+
+jest.mock('@/services/research/collectorHealth.api', () => ({
+  useGetCollectorHealthQuery: jest.fn(() => ({})),
+}));
 
 jest.mock('@/services/research/research.client.service', () => ({
   requestResearch: jest.fn(),
@@ -79,6 +85,71 @@ const earlyReport = {
 beforeEach(() => {
   jest.clearAllMocks();
   requestResearch.mockResolvedValue(report);
+  useGetCollectorHealthQuery.mockReturnValue({});
+});
+
+test('refreshes collector health only while open without rerunning analysis or training', async () => {
+  render(<ResearchData />);
+  expect(useGetCollectorHealthQuery).toHaveBeenLastCalledWith(
+    undefined,
+    expect.objectContaining({ skip: true }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Research data' }));
+  await screen.findByText('Collect more independent windows.');
+  expect(useGetCollectorHealthQuery).toHaveBeenLastCalledWith(
+    undefined,
+    expect.objectContaining({ skip: false, pollingInterval: 30_000 }),
+  );
+  expect(requestResearch).toHaveBeenCalledTimes(1);
+  expect(runResearchLearning).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Close research data' }));
+  expect(useGetCollectorHealthQuery).toHaveBeenLastCalledWith(
+    undefined,
+    expect.objectContaining({ skip: true }),
+  );
+});
+
+test('uses refreshed collector health with the archive analysis as a fallback', async () => {
+  const health = getCollectorHealth();
+  requestResearch.mockResolvedValue({
+    ...report,
+    collectorHealth: { ...health, counts: { ...health.counts, forwardObserved: 7 } },
+  });
+  const view = render(<ResearchData />);
+  fireEvent.click(screen.getByRole('button', { name: 'Research data' }));
+  await screen.findByText(/Forward labels: 7 observed/);
+  useGetCollectorHealthQuery.mockReturnValue({
+    data: { ...health, counts: { ...health.counts, forwardObserved: 8 } },
+  });
+  view.rerender(<ResearchData />);
+  expect(screen.getByText(/Forward labels: 8 observed/)).toBeInTheDocument();
+  expect(requestResearch).toHaveBeenCalledTimes(1);
+  expect(runResearchLearning).not.toHaveBeenCalled();
+});
+
+test('includes experimental comparisons in the existing research dialog', async () => {
+  requestResearch.mockResolvedValue({
+    ...report,
+    challengers: { candidates: [], active: null },
+    comparison: {
+      checkpoints: [
+        {
+          checkpointMinutes: 9,
+          decisions: 8,
+          variants: {
+            combined: { callCoverage: 1, metrics: { examples: 8, accuracy: 0.75, brier: 0.123 } },
+          },
+        },
+      ],
+    },
+  });
+  render(<ResearchData />);
+  expect(screen.queryByRole('region', { name: 'Prediction experiments' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Research data' }));
+  await screen.findByRole('rowheader', { name: 'Combined pressure' });
+  const experiments = within(screen.getByRole('region', { name: 'Prediction experiments' }));
+  expect(experiments.getByText('0.123')).toBeInTheDocument();
+  expect(experiments.getByText(/No challenger is currently in use/)).toBeInTheDocument();
 });
 
 test('loads archived outcomes on opening and distinguishes measured scores from training readiness', async () => {
@@ -288,6 +359,28 @@ test('keeps the full model identity clear when it supersedes early learning', as
   const early = screen.getByRole('region', { name: 'Early learning' });
   expect(within(early).getByText('Full model in use.')).toBeInTheDocument();
   expect(within(early).queryByText('Active limited adjustment.')).not.toBeInTheDocument();
+});
+
+test('identifies a validated challenger separately from the full learned model', async () => {
+  const active = {
+    id: 'pressure-challenger',
+    version: 'forecast-challenger-v1',
+    kind: 'reduced-pressure',
+    variantName: 'reduced-pressure',
+  };
+  requestResearch.mockResolvedValue({
+    ...report,
+    active,
+    challengers: { active, candidates: [], reports: [] },
+  });
+  render(<ResearchData />);
+  fireEvent.click(screen.getByRole('button', { name: 'Research data' }));
+  expect(
+    await screen.findByText(/Validated challenger pressure-challenger \(Half pressure\)/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/Learned model pressure-challenger/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Saved fixed calls stay unchanged/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Full model learning' })).toBeInTheDocument();
 });
 
 test('explains a completed unsuccessful validation group without promising eventual activation', async () => {

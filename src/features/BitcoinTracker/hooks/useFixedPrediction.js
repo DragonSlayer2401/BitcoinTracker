@@ -15,9 +15,15 @@ import {
 } from '../utils/kalshi/marketConditions.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { createResearchInputSnapshot } from '../utils/researchExperiments.utils';
-import { OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION } from '../utils/learning/model.utils';
-import { EARLY_MODEL_VERSION } from '../utils/learning/earlyModel.utils';
-import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
+import { isLearnedModelVersion } from '../utils/journal/modelValidation.utils';
+import { getKalshiQuoteSnapshot } from '../utils/kalshi/marketQuote.utils';
+import { isSameKalshiContract } from '../utils/kalshi/contract.utils';
+import {
+  isKalshiDerivativesModelVersion,
+  LEGACY_KALSHI_MODEL_VERSION,
+  LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION,
+} from '../utils/kalshi/forecast.utils';
+import { RESEARCH_EXPERIMENT_V3 } from '../utils/researchVariantConfig.utils';
 
 export default function useFixedPrediction({
   forecast,
@@ -29,6 +35,7 @@ export default function useFixedPrediction({
   derivatives,
   models,
   benchmark,
+  kalshiMarket,
 }) {
   const dispatch = useDispatch();
   const observations = useRef({ id: null, samples: [] });
@@ -59,13 +66,25 @@ export default function useFixedPrediction({
       horizonMinutes: (forecast.expiresAt - capturedAt) / 60_000,
       stream,
       // A restored observation retains the baseline policy selected when it began.
-      derivatives:
-        forecast.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION ? derivatives : undefined,
+      derivatives: isKalshiDerivativesModelVersion(forecast.modelVersion) ? derivatives : undefined,
       kalshiMarket: forecast.kalshiMarket,
+      kalshiQuote: isSameKalshiContract(kalshiMarket, forecast.kalshiMarket)
+        ? getKalshiQuoteSnapshot(kalshiMarket, capturedAt)
+        : null,
       benchmark,
       expiresAt: forecast.expiresAt,
     };
-    const estimate = getResearchForecast(forecastInput, models, forecast.startsAt);
+    const estimate = {
+      ...getResearchForecast(forecastInput, models, forecast.startsAt, {
+        researchVersion: [
+          LEGACY_KALSHI_MODEL_VERSION,
+          LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION,
+        ].includes(forecast.modelVersion)
+          ? RESEARCH_EXPERIMENT_V3
+          : undefined,
+      }),
+      kalshiQuote: forecastInput.kalshiQuote,
+    };
     const conditions = getKalshiMarketConditions({
       candles,
       ticker,
@@ -83,11 +102,7 @@ export default function useFixedPrediction({
       reference.receivedAt < forecast.analysis.startedAt ||
       reference.time < (observations.current.samples.at(-1)?.quoteTime ?? 0) ||
       (estimate.modelVersion !== forecast.modelVersion &&
-        !(
-          [OUTCOME_MODEL_VERSION, KALSHI_OUTCOME_MODEL_VERSION, EARLY_MODEL_VERSION].includes(
-            estimate.modelVersion,
-          ) && estimate.learning?.applied
-        ))
+        !(isLearnedModelVersion(estimate.modelVersion) && estimate.learning?.applied))
     ) {
       estimate.available = false;
     }
@@ -173,6 +188,7 @@ export default function useFixedPrediction({
     models,
     dispatch,
     benchmark,
+    kalshiMarket,
   ]);
 
   return progress;

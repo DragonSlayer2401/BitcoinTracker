@@ -62,6 +62,74 @@ const liquidity = {
 };
 
 describe('Coinbase executed trade completeness', () => {
+  test('retains the last causal heartbeat and waits for future-dated executions without rewriting times', () => {
+    const feed = createCoinbaseTrades();
+    feed.apply({ type: 'last_match', trade_id: 100 }, NOW - 20_000);
+    feed.apply(heartbeat(100, NOW - 1000), NOW - 1000);
+    feed.apply(match(101, NOW + 195, { size: '2' }), NOW);
+    feed.apply(heartbeat(101, NOW + 195), NOW);
+    expect(feed.getQuality(NOW)).toMatchObject({
+      available: true,
+      heartbeatAt: NOW - 1000,
+      confirmedThrough: NOW - 1000,
+      lastTradeId: 100,
+    });
+    expect(feed.getSnapshot(NOW, liquidity).windows[15]).toMatchObject({
+      available: true,
+      tradeCount: 0,
+      totalBtc: 0,
+    });
+    expect(feed.getSnapshot(NOW, liquidity).impact.confirmedThrough).toBe(NOW - 1000);
+    expect(feed.getQuality(NOW + 195)).toMatchObject({
+      available: true,
+      heartbeatAt: NOW,
+      confirmedThrough: NOW + 195,
+      lastTradeId: 101,
+    });
+    expect(feed.getSnapshot(NOW + 195, liquidity).windows[15]).toMatchObject({
+      tradeCount: 1,
+      totalBtc: 2,
+    });
+  });
+
+  test('a heartbeat or trade received after capture cannot certify or enter that earlier snapshot', () => {
+    const feed = createCoinbaseTrades();
+    feed.apply({ type: 'last_match', trade_id: 100 }, NOW - 20_000);
+    feed.apply(heartbeat(100, NOW - 1000), NOW - 1000);
+    feed.apply(match(101, NOW - 100), NOW + 100);
+    feed.apply(heartbeat(101, NOW), NOW + 200);
+    expect(feed.getQuality(NOW)).toMatchObject({ confirmedThrough: NOW - 1000, lastTradeId: 100 });
+    expect(feed.getSnapshot(NOW, liquidity).windows[15].tradeCount).toBe(0);
+    expect(feed.getSnapshot(NOW + 200, liquidity).windows[15].tradeCount).toBe(1);
+    expect(feed.getQuality(NOW + 200).confirmedThrough).toBe(NOW);
+  });
+
+  test('a pending heartbeat becomes confirmation only when its missing trade is actually received', () => {
+    const feed = createCoinbaseTrades();
+    feed.apply({ type: 'last_match', trade_id: 100 }, NOW - 20_000);
+    feed.apply(heartbeat(100, NOW - 1000), NOW - 1000);
+    feed.apply(heartbeat(101, NOW), NOW);
+    feed.apply(match(101, NOW - 100), NOW + 200);
+    expect(feed.getQuality(NOW + 100)).toMatchObject({
+      available: false,
+      confirmedThrough: NOW - 1000,
+    });
+    expect(feed.getQuality(NOW + 200)).toMatchObject({ available: true, confirmedThrough: NOW });
+  });
+
+  test('an exclusively future heartbeat cannot certify a deadline or expose a future timestamp', () => {
+    const feed = createCoinbaseTrades();
+    feed.apply({ type: 'last_match', trade_id: 100 }, NOW - 1000);
+    feed.apply(heartbeat(100, NOW + 170), NOW);
+    expect(feed.getQuality(NOW)).toMatchObject({
+      available: false,
+      heartbeatAt: null,
+      confirmedThrough: null,
+    });
+    expect(feed.getSnapshot(NOW, liquidity).impact.confirmedThrough).toBeNull();
+    expect(feed.getDeadlineOutcome(NOW, NOW).status).toBe('waiting');
+    expect(feed.getQuality(NOW + 170).confirmedThrough).toBe(NOW + 170);
+  });
   test('inverts the maker side and distinguishes complete zero-trade windows from warmup', () => {
     const feed = createCoinbaseTrades();
     expect(feed.apply({ type: 'last_match', trade_id: 100 }, NOW)).toBeNull();
@@ -392,6 +460,58 @@ describe('Coinbase stream connection lifecycle', () => {
   afterEach(() => {
     stream?.stop();
     jest.useRealTimers();
+  });
+
+  test('a leading exchange quote keeps the most recent causal price until its actual timestamp arrives', () => {
+    stream = createCoinbaseStream({ WebSocketImpl: FakeSocket });
+    stream.start();
+    const socket = FakeSocket.instances[0];
+    socket.open();
+    socket.message(subscriptions);
+    socket.message(ticker(NOW - 100));
+    socket.message({ ...ticker(NOW + 195), price: '50001' });
+    expect(stream.getSnapshot(NOW).ticker).toMatchObject({
+      price: 50000,
+      time: NOW - 100,
+      receivedAt: NOW,
+    });
+    expect(stream.getSnapshot(NOW + 195).ticker).toMatchObject({
+      price: 50001,
+      time: NOW + 195,
+      receivedAt: NOW,
+    });
+    expect(stream.getSnapshot(NOW + 5001).ticker).toBeNull();
+  });
+
+  test('a quote received after a requested capture cannot replace the retained earlier quote', () => {
+    stream = createCoinbaseStream({ WebSocketImpl: FakeSocket });
+    stream.start();
+    const socket = FakeSocket.instances[0];
+    socket.open();
+    socket.message(ticker(NOW - 100));
+    jest.setSystemTime(NOW + 250);
+    socket.message({ ...ticker(NOW), price: '50001' });
+    expect(stream.getSnapshot(NOW + 200).ticker).toMatchObject({ price: 50000, receivedAt: NOW });
+    expect(stream.getSnapshot(NOW + 250).ticker).toMatchObject({
+      price: 50001,
+      time: NOW,
+      receivedAt: NOW + 250,
+    });
+  });
+
+  test('no eligible earlier quote remains unavailable instead of altering a future exchange time', () => {
+    stream = createCoinbaseStream({ WebSocketImpl: FakeSocket });
+    stream.start();
+    const socket = FakeSocket.instances[0];
+    socket.open();
+    socket.message(ticker(NOW + 170));
+    expect(stream.getSnapshot(NOW).ticker).toBeNull();
+    expect(stream.getSnapshot(NOW + 170).ticker).toMatchObject({
+      time: NOW + 170,
+      receivedAt: NOW,
+    });
+    stream.stop();
+    expect(stream.getSnapshot(NOW + 170).ticker).toBeNull();
   });
 
   test('subscribes to public channels, accepts level2_50 acknowledgement and publishes at one-second intervals', () => {

@@ -2,6 +2,12 @@
 
 This repository is a Next.js App Router application using JavaScript and JSX. React Bootstrap supplies UI primitives, Redux owns the saved forecast state, and RTK Query owns cached server responses. Start with the user workflow, then follow the data into the calculation and storage layers.
 
+The primary dashboard now serves a position-aware paper trading adviser. Its action, simulated
+$100 account and positions lead the screen; prediction controls and diagnostics remain available
+through the research dialog. Prediction collection and model validation still run independently.
+Start adviser work at `features/TradingAdvisor/` and `services/research/tradingAdvisor/`; see
+[trading adviser](trading-advisor.md) for decision math, ownership, execution and evidence.
+
 ## Start here
 
 Read these files in order:
@@ -68,6 +74,62 @@ of learning activation. `scripts/collect-research.analysis.js` connects those re
 `utils/researchForwardLabels.utils.js` to the durable archive. The original input and later label
 have separate tables; labels never become inputs to an earlier snapshot. See
 [collector experiments](research-collector.md#paired-experiments-and-replay) for commands and limits.
+
+`utils/researchVariantConfig.utils.js` freezes the experiment generations and pressure policies.
+`utils/marketBlendForecast.utils.js` consumes the already-fetched Kalshi quote. The challenger
+model and training modules in `utils/learning/` own bounded prediction, chronological fitting,
+prospective scoring and monitoring. `services/research/challenger.service.js` coordinates those
+six candidate families under the existing learning lease and model store. Read endpoints never
+fit or promote candidates. The collector snapshots compact frozen artifacts, not analysis reports.
+
+Research V5 adds the direct directional reversal candidate to V4's corrected BRTI history and
+proxy-timing calculations. It preserves the same baseline and feature pipeline so compatible V4
+observations can supply training, while only new V5 captures contain the new candidate's predictions.
+V1–V4 keep their original variant sets and replay behavior. V1–V3 replay their
+original math. `benchmarkConditions.utils.js` retains real minute closes when at most one interior
+second is missing, reports observed-only coverage, and never fills settlement readings. The CLI's
+`scripts/collect-research.background.js` and worker entry point isolate archive analysis and model
+fitting from the live-feed thread. Fixed records retain the calculation generation chosen when
+observation began, including through reload and later evidence collection.
+
+For newly fitted reversal challengers, the explicit `reversalFeatureVersion` selects changing
+15/60-second pressure and signed spot/futures agreement inputs, with separate availability flags.
+Previously saved V1/V2 artifacts without this marker retain their original six-input calculation.
+
+`directionalReversal.utils.js` owns the separate final-outcome flip target and oriented features.
+Unlike the older bounded reversal adjustment, this family predicts flip probability directly.
+Its own policy and checkpoint calibration identify those semantics. Primary-only chronological
+folds select regularization; a later calibration partition and two future validation cohorts are
+kept separate. Promotion additionally requires a positive paired accuracy advantage over the
+current-side benchmark. Saved calls and existing artifacts retain their original math.
+
+For current V2 challengers, `challengerCheckpoint.utils.js` owns checkpoint calibration and
+reliability bins; `challengerValidation.utils.js` owns separate development and confirmation
+cohorts. `challengerTrial.repository.js` persists nomination, append-only contract membership,
+global attempt numbers and immutable final results. Activation checks that saved confirmation
+and the current incumbent in one database transaction. `researchForecast.utils.js` applies only
+approved countdown bands and stores a separate `activePrediction` in V3 snapshots, allowing a
+same-family replacement to be evaluated without overwriting its incumbent's recorded estimate.
+
+`challengerDevelopment.repository.js` owns collector readiness proofs, the immutable future
+development boundary and append-only development membership. Current collector code and an actually
+persisted matching prediction must be verified before a new candidate starts its test. Missing
+recording evidence is distinguished from poor predictive performance; neither can promote a model.
+
+`services/research/collectorHealth.service.js` summarizes bounded recent archive rows and durable
+heartbeats. Its independent read endpoint powers modal-only polling without fitting or promotion.
+Health reporting failures do not block forecasts or the research analysis cycle.
+
+`services/kalshi/purchaseValue/` owns bounded order-book and verified fee reads through the shared
+limiter. `utils/kalshi/purchaseValue.utils.js` calculates depth-aware purchase estimates;
+`components/KalshiPurchaseValue.jsx` exposes them inside Forecast risk. It has no order-writing API.
+
+`features/PaperTrading/` owns the separate experimental paper-entry policy, delayed book simulation,
+accounting and report popup. `services/research/paperTrading/` stores immutable decisions and
+lifecycle events without changing forecast evidence. The collector's explicit `--paper-trading`
+flag supplies production forecasts and current inputs; `--paper-report` and the private report
+endpoint only read saved results. See [paper trading](paper-trading.md) for costs, risk limits,
+capture/fill timing and the distinction between simulated profitability and live execution.
 
 ## Read the index chart
 

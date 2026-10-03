@@ -13,6 +13,7 @@ import {
 } from '../../../../scripts/collect-research.runtime';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
+import { isCollectorHeartbeat } from '../utils/collectorHealth.utils';
 
 const createCollectorStateStore = createContractStateStore;
 const runResearchCollector = runContractCollector;
@@ -106,6 +107,21 @@ test('a process lock rejects another owner until clean release', async () => {
   const releaseAgain = await acquireCollectorLock(statePath);
   await releaseAgain();
   expect(await readdir(directory)).toEqual([]);
+});
+
+test('a replaced process lock stops the previous owner before it can replace shared state', async () => {
+  const release = await acquireCollectorLock(statePath);
+  const persistRows = jest.fn();
+  const store = await createCollectorStateStore({
+    statePath,
+    persistRows,
+    assertOwnership: release.assertOwned,
+  });
+  await writeFile(`${statePath}.lock`, JSON.stringify({ token: 'replacement-owner' }));
+  await expect(store.advance(input())).rejects.toMatchObject({ code: 'COLLECTOR_LOCK_LOST' });
+  expect(persistRows).not.toHaveBeenCalled();
+  await release();
+  expect(await readdir(directory)).toEqual(['collector-state.json.lock']);
 });
 
 test('an unclean lock is preserved rather than raced by multiple recovery processes', async () => {
@@ -207,6 +223,51 @@ test('rejects state paths outside the data directory and unknown arguments', () 
   ).toMatchObject({ once: true, statePath: path.join(directory, 'data/check.json') });
 });
 
+test('paper collection is explicit and reports cannot silently start the experiment', () => {
+  expect(parseCollectorOptions([], directory)).toMatchObject({
+    paperTrading: false,
+    paperReport: false,
+  });
+  expect(parseCollectorOptions(['--paper-trading'], directory).paperTrading).toBe(true);
+  expect(parseCollectorOptions(['--paper-report'], directory)).toMatchObject({
+    paperTrading: false,
+    paperReport: true,
+  });
+  for (const argumentsList of [
+    ['--paper-trading', '--once'],
+    ['--paper-trading', '--report'],
+    ['--paper-trading', '--paper-report'],
+    ['--paper-report', '--report'],
+  ]) {
+    expect(() => parseCollectorOptions(argumentsList, directory)).toThrow('continuous collection');
+  }
+});
+
+test('position-aware advice is opt-in and report commands never start collection', () => {
+  expect(parseCollectorOptions([], directory)).toMatchObject({
+    tradingAdvisor: false,
+    advisorReport: false,
+  });
+  expect(parseCollectorOptions(['--trading-advisor', '--paper-trading'], directory)).toMatchObject({
+    tradingAdvisor: true,
+    paperTrading: true,
+  });
+  expect(parseCollectorOptions(['--advisor-report'], directory)).toMatchObject({
+    tradingAdvisor: false,
+    advisorReport: true,
+  });
+  for (const argumentsList of [
+    ['--trading-advisor', '--once'],
+    ['--trading-advisor', '--report'],
+    ['--trading-advisor', '--paper-report'],
+    ['--trading-advisor', '--advisor-report'],
+    ['--paper-trading', '--advisor-report'],
+    ['--paper-report', '--advisor-report'],
+  ]) {
+    expect(() => parseCollectorOptions(argumentsList, directory)).toThrow('continuous collection');
+  }
+});
+
 function getRuntime(time = start + 240_000) {
   const benchmarkStream = {
     start: jest.fn(),
@@ -245,6 +306,8 @@ function getRuntime(time = start + 240_000) {
         persistEvidenceRows: jest.fn().mockResolvedValue(undefined),
         getPendingForwardCaptures: jest.fn().mockResolvedValue([]),
         getLearningEvidenceRows: jest.fn().mockResolvedValue([]),
+        readModelArtifacts: jest.fn().mockResolvedValue([]),
+        getActiveModelArtifact: jest.fn().mockResolvedValue(null),
         getForwardResearchLabels: jest.fn().mockResolvedValue([]),
         getResearchStatus: jest
           .fn()
@@ -302,6 +365,128 @@ test('the collector supplies contemporaneous futures inputs to the shared curren
   expect(runtime.futuresStream.stop).toHaveBeenCalledTimes(1);
 });
 
+test.each(['paperTradingService', 'tradingAdvisorService'])(
+  '%s receives production inputs and shuts down without altering research',
+  async (serviceName) => {
+    const time = start + 540_000;
+    const runtime = getRuntime(time);
+    const controller = new AbortController();
+    let paperForecast;
+    const paperTradingService = {
+      advance: jest.fn(async ({ getForecast }) => {
+        paperForecast = getForecast();
+      }),
+      stop: jest.fn(async () => {}),
+    };
+    await runResearchCollector({
+      ...runtime.arguments,
+      once: false,
+      signal: controller.signal,
+      sleep: async () => controller.abort(),
+      [serviceName]: paperTradingService,
+    });
+    expect(paperTradingService.advance).toHaveBeenCalledTimes(1);
+    expect(paperForecast).toMatchObject({
+      aboveProbability: 0.51,
+      capturedAt: time,
+      modelVersion: 'test-model',
+      researchInputSnapshot: {
+        input: { now: time, derivatives: runtime.futuresStream.getSnapshot() },
+      },
+    });
+    expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalled();
+    expect(paperTradingService.stop).toHaveBeenCalledWith('stopped');
+  },
+);
+
+test('an advice failure preserves ordinary research collection and releases the collector lock', async () => {
+  const runtime = getRuntime(start + 540_000);
+  const controller = new AbortController();
+  const tradingAdvisorService = {
+    advance: jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('private-database-path'), { code: 'SQLITE_BUSY' }),
+      ),
+    stop: jest.fn().mockResolvedValue(undefined),
+  };
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    sleep: async () => controller.abort(),
+    tradingAdvisorService,
+  });
+  expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalled();
+  expect(runtime.arguments.log).toHaveBeenCalledWith(
+    expect.stringContaining('Trading adviser could not advance (storage-locked)'),
+  );
+  expect(JSON.stringify(runtime.arguments.log.mock.calls)).not.toContain('private-database-path');
+  expect(tradingAdvisorService.stop).toHaveBeenCalledWith('stopped');
+  expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
+});
+
+test('a source-ahead stream ticker falls back to an already observed REST price in both capture inputs', async () => {
+  const time = start + 180_000;
+  const runtime = getRuntime(time);
+  const controller = new AbortController();
+  runtime.stream.getSnapshot.mockReturnValue({
+    status: 'live',
+    ticker: { ...quote(time), time: time + 150 },
+    quality: { confirmedThrough: time },
+  });
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    sleep: async () => controller.abort(),
+  });
+  expect(getResearchForecast).toHaveBeenCalledWith(
+    expect.objectContaining({
+      ticker: quote(time),
+      stream: expect.objectContaining({ ticker: null }),
+    }),
+    expect.anything(),
+    start,
+  );
+  const [row] = runtime.arguments.repository.persistEvidenceRows.mock.calls[0][0];
+  expect(row.researchInputSnapshot.timing.replayable).toBe(true);
+});
+
+test('future optional quotes cannot poison a native BRTI capture or its replay timestamps', async () => {
+  const time = start + 180_000;
+  const runtime = getRuntime(time);
+  const controller = new AbortController();
+  const futureTicker = { ...quote(time), time: time + 150 };
+  runtime.stream.getSnapshot.mockReturnValue({
+    status: 'live',
+    ticker: futureTicker,
+    quality: { confirmedThrough: time },
+  });
+  getResearchForecast.mockReturnValue({
+    ...getEstimate(),
+    kalshi: {
+      referenceSource: 'cf-brti',
+      referenceAt: time,
+      referenceReceivedAt: time,
+      referencePrice: 100_000,
+    },
+  });
+  await runResearchCollector({
+    ...runtime.arguments,
+    loadTicker: async () => futureTicker,
+    once: false,
+    signal: controller.signal,
+    sleep: async () => controller.abort(),
+  });
+  const [row] = runtime.arguments.repository.persistEvidenceRows.mock.calls[0][0];
+  expect(row.decision).toBe('pending');
+  expect(row.referenceSource).toBe('cf-brti');
+  expect(row.researchInputSnapshot.input.ticker).toBeNull();
+  expect(row.researchInputSnapshot.input.stream.ticker).toBeNull();
+  expect(row.researchInputSnapshot.timing.replayable).toBe(true);
+});
+
 test('once mode cannot pass with unavailable market inputs or create fabricated outcomes', async () => {
   const runtime = getRuntime();
   getResearchForecast.mockReturnValue({ available: false });
@@ -333,6 +518,181 @@ test('a termination signal exits a continuous loop and releases owned resources'
     sleep: async () => controller.abort(),
   });
   expect(runtime.stream.stop).toHaveBeenCalledTimes(1);
+  expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
+});
+
+test('durable collector heartbeat is bounded to 30 seconds and records a graceful shutdown', async () => {
+  const runtime = getRuntime();
+  let time = start + 240_000;
+  const controller = new AbortController();
+  const writeCollectorHeartbeat = jest.fn().mockResolvedValue(undefined);
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    repository: { ...runtime.arguments.repository, writeCollectorHeartbeat },
+    now: () => time,
+    sleep: async () => {
+      time += 10_000;
+      if (time >= start + 310_000) controller.abort();
+    },
+  });
+  const rows = writeCollectorHeartbeat.mock.calls.map(([row]) => row);
+  expect(rows.map((row) => row.status)).toEqual([
+    'starting',
+    'running',
+    'running',
+    'running',
+    'stopped',
+  ]);
+  expect(rows.map((row) => row.heartbeatAt - rows[0].heartbeatAt)).toEqual([
+    0, 0, 30_000, 60_000, 70_000,
+  ]);
+  expect(rows.every(isCollectorHeartbeat)).toBe(true);
+  expect(new Set(rows.map((row) => row.collectorId)).size).toBe(1);
+  expect(JSON.stringify(rows)).not.toContain(statePath);
+});
+
+test('failed heartbeat writes retry without blocking evidence recording or shutdown', async () => {
+  const runtime = getRuntime();
+  let time = start + 240_000;
+  const controller = new AbortController();
+  const writeCollectorHeartbeat = jest
+    .fn()
+    .mockRejectedValueOnce(new Error('health database busy'))
+    .mockResolvedValue(undefined);
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    repository: { ...runtime.arguments.repository, writeCollectorHeartbeat },
+    now: () => time,
+    sleep: async () => {
+      time += 30_000;
+      if (time >= start + 300_000) controller.abort();
+    },
+  });
+  expect(writeCollectorHeartbeat).toHaveBeenCalledTimes(4);
+  expect(writeCollectorHeartbeat.mock.calls.at(-1)[0].status).toBe('stopped');
+  expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalled();
+});
+
+test('same-millisecond smoke-run shutdown reports a terminal state using the real clock', async () => {
+  const runtime = getRuntime();
+  const writeCollectorHeartbeat = jest.fn().mockResolvedValue(undefined);
+  await runResearchCollector({
+    ...runtime.arguments,
+    repository: { ...runtime.arguments.repository, writeCollectorHeartbeat },
+  });
+  const rows = writeCollectorHeartbeat.mock.calls.map(([row]) => row);
+  expect(rows.map((row) => row.status)).toEqual(['starting', 'running', 'stopped']);
+  expect(rows[1].heartbeatAt).toBe(rows[0].heartbeatAt);
+  expect(rows.every(isCollectorHeartbeat)).toBe(true);
+});
+
+test('an unavailable health report cannot fail an otherwise successful smoke run', async () => {
+  const runtime = getRuntime();
+  const result = await runResearchCollector({
+    ...runtime.arguments,
+    repository: {
+      ...runtime.arguments.repository,
+      readCollectorHeartbeats: jest.fn().mockRejectedValue(new Error('heartbeat read failed')),
+    },
+  });
+  expect(result.analysis.collectorHealth).toBeNull();
+  expect(result.streamStatus).toBe('live');
+  expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalled();
+});
+
+test('a pending heartbeat cannot block capture, and shutdown retains ownership until it finishes', async () => {
+  const runtime = getRuntime(start + 180_000);
+  const result = await runResearchCollector({
+    ...runtime.arguments,
+    shutdownTimeoutMs: 10,
+    repository: {
+      ...runtime.arguments.repository,
+      writeCollectorHeartbeat: jest.fn(() => new Promise(() => {})),
+    },
+  });
+  expect(result.streamStatus).toBe('live');
+  expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(await readFile(statePath, 'utf8')).pendingRows).toEqual([]);
+  expect(await readdir(directory)).toContain('collector-state.json.lock');
+});
+
+test('candidate verification cannot delay acknowledging successfully persisted evidence', async () => {
+  const runtime = getRuntime(start + 180_000);
+  const enrollChallengerCandidates = jest.fn(() => new Promise(() => {}));
+  await runResearchCollector({
+    ...runtime.arguments,
+    shutdownTimeoutMs: 10,
+    learningService: { ...runtime.arguments.learningService, enrollChallengerCandidates },
+  });
+  expect(enrollChallengerCandidates).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(await readFile(statePath, 'utf8')).pendingRows).toEqual([]);
+  expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalledTimes(1);
+});
+
+test('an unresolved evidence write times out without overlap or losing the original outbox', async () => {
+  const runtime = getRuntime(start + 180_000);
+  runtime.arguments.repository.persistEvidenceRows.mockImplementation(() => new Promise(() => {}));
+  await expect(
+    runResearchCollector({
+      ...runtime.arguments,
+      operationTimeoutMs: 10,
+      shutdownTimeoutMs: 10,
+    }),
+  ).rejects.toMatchObject({ code: 'COLLECTOR_OPERATION_TIMEOUT' });
+  expect(runtime.arguments.repository.persistEvidenceRows).toHaveBeenCalledTimes(1);
+  const saved = JSON.parse(await readFile(statePath, 'utf8'));
+  expect(saved.pendingRows).toHaveLength(1);
+  expect(saved.pendingRows[0].capturedAt).toBe(start + 180_000);
+  expect(await readdir(directory)).toContain('collector-state.json.lock');
+});
+
+test('temporary storage failures retry their exact pending rows and report safe progress diagnostics', async () => {
+  const runtime = getRuntime(start + 180_000);
+  let time = start + 180_000;
+  const controller = new AbortController();
+  const writeCollectorHeartbeat = jest.fn().mockResolvedValue(undefined);
+  runtime.arguments.repository.persistEvidenceRows
+    .mockRejectedValueOnce(Object.assign(new Error('private-db-path'), { code: 'SQLITE_BUSY' }))
+    .mockRejectedValueOnce(Object.assign(new Error('private-db-path'), { code: 'SQLITE_BUSY' }));
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    repository: { ...runtime.arguments.repository, writeCollectorHeartbeat },
+    now: () => time,
+    sleep: async () => {
+      time += 1000;
+      if (time >= start + 185_000) controller.abort();
+    },
+  });
+  const calls = runtime.arguments.repository.persistEvidenceRows.mock.calls;
+  expect(calls).toHaveLength(3);
+  expect(calls[1][0]).toEqual(calls[0][0]);
+  expect(calls[2][0]).toEqual(calls[0][0]);
+  expect(runtime.arguments.log.mock.calls.flat().join(' ')).toContain('storage-locked');
+  expect(runtime.arguments.log.mock.calls.flat().join(' ')).not.toContain('private-db-path');
+  expect(writeCollectorHeartbeat.mock.calls.at(-1)[0].progress).toMatchObject({
+    lastSuccessfulTickAt: start + 184_000,
+    failureCode: null,
+    lastFailureAt: start + 181_000,
+  });
+});
+
+test('an unrecoverable smoke-run error reports a stopped error state and still releases its lock', async () => {
+  const runtime = getRuntime();
+  getResearchForecast.mockReturnValue({ available: false });
+  const writeCollectorHeartbeat = jest.fn().mockResolvedValue(undefined);
+  await expect(
+    runResearchCollector({
+      ...runtime.arguments,
+      repository: { ...runtime.arguments.repository, writeCollectorHeartbeat },
+    }),
+  ).rejects.toThrow('could not obtain fresh');
+  expect(writeCollectorHeartbeat.mock.calls.at(-1)[0].status).toBe('error');
   expect((await readdir(directory)).some((name) => name.endsWith('.lock'))).toBe(false);
 });
 
@@ -429,6 +789,188 @@ test('a fresh Coinbase quote cannot replace a pending official Kalshi outcome', 
   );
   expect(rows.some((row) => row.event === 'outcome')).toBe(false);
   expect(runtime.stream.getDeadlineOutcome).not.toHaveBeenCalled();
+});
+
+async function savePendingContract() {
+  const decisions = [];
+  const store = await createCollectorStateStore({
+    statePath,
+    persistRows: async (rows) => decisions.push(...rows),
+  });
+  for (const remainingMinutes of [12, 9, 6, 3, 1]) {
+    const capturedAt = start + 900_000 - remainingMinutes * 60_000;
+    await store.advance({
+      ...input(capturedAt),
+      getEstimate: () => ({
+        ...getEstimate(),
+        aboveProbability: 0.5 + remainingMinutes / 100,
+        belowProbability: 0.5 - remainingMinutes / 100,
+      }),
+    });
+  }
+  expect(decisions).toHaveLength(5);
+  expect(decisions.every((row) => row.event === 'decision' && row.decision === 'pending')).toBe(
+    true,
+  );
+  return { decisions, state: store.getState() };
+}
+
+const afterSettlementRetention = start + 900_000 + 8 * 24 * 60 * 60_000;
+
+test.each([
+  ['absent', () => []],
+  ['stale', (now) => [marketAt(now - 60_001)]],
+  ['a different target', (now) => [marketAt(now, 99_000)]],
+  [
+    'a different contract',
+    (now) => [{ ...marketAt(now), ticker: 'KXBTC15M-OTHER', eventTicker: 'KXBTC15M-OTHER' }],
+  ],
+  [
+    'future dated',
+    (now) => [
+      { ...marketAt(now + 1), status: 'finalized', result: 'yes', settlementPrice: 100_010 },
+    ],
+  ],
+  ['without a receipt time', () => [{ ...marketAt(start), receivedAt: null }]],
+])(
+  'a restarted old pending contract is retained when the market response is %s',
+  async (_, getMarkets) => {
+    const { state } = await savePendingContract();
+    const persistRows = jest.fn().mockResolvedValue(undefined);
+    const restarted = await createCollectorStateStore({ statePath, persistRows });
+    const estimate = jest.fn();
+    const result = await restarted.advance({
+      now: afterSettlementRetention,
+      markets: getMarkets(afterSettlementRetention),
+      ticker: quote(afterSettlementRetention, 120_000),
+      getEstimate: estimate,
+    });
+    expect(result.status.phase).toBe('settling');
+    expect(result.rowsWritten).toBe(0);
+    expect(restarted.getState()).toEqual(state);
+    expect(persistRows).not.toHaveBeenCalled();
+    expect(estimate).not.toHaveBeenCalled();
+  },
+);
+
+test('an old pending contract resolves from a fresh official result without rewriting its decisions', async () => {
+  const { decisions, state } = await savePendingContract();
+  const originalDecisions = JSON.parse(JSON.stringify(decisions));
+  const persistRows = jest.fn().mockResolvedValue(undefined);
+  const restarted = await createCollectorStateStore({ statePath, persistRows });
+  const estimate = jest.fn();
+  await restarted.advance({ now: afterSettlementRetention, markets: [], getEstimate: estimate });
+  expect(restarted.getState()).toEqual(state);
+  await restarted.advance({
+    now: afterSettlementRetention + 1000,
+    markets: [
+      {
+        ...marketAt(afterSettlementRetention + 1000),
+        status: 'finalized',
+        result: 'yes',
+        settlementPrice: 100_010,
+      },
+    ],
+    ticker: quote(afterSettlementRetention + 1000, 80_000),
+    getEstimate: estimate,
+  });
+  const outcomes = persistRows.mock.calls.flatMap(([rows]) => rows);
+  expect(outcomes).toHaveLength(5);
+  for (const original of decisions) {
+    expect(outcomes.find((row) => row.forecastId === original.forecastId)).toMatchObject({
+      event: 'outcome',
+      decision: 'resolved',
+      outcomeStatus: 'observed',
+      outcome: 'above',
+      observedPrice: 100_010,
+      observedAt: original.expiresAt,
+      aboveProbability: original.aboveProbability,
+      belowProbability: original.belowProbability,
+      target: original.target,
+      capturedAt: original.capturedAt,
+      modelVersion: original.modelVersion,
+    });
+  }
+  expect(decisions).toEqual(originalDecisions);
+  expect(estimate).not.toHaveBeenCalled();
+  expect(restarted.getState().markets).toEqual([]);
+  expect(restarted.getState().completed).toEqual([
+    { ticker: marketAt(start).ticker, expiresAt: start + 900_000 },
+  ]);
+});
+
+test('the seven-day unresolved timeout still applies after a fresh matching nonfinal response', async () => {
+  const { decisions } = await savePendingContract();
+  const persistRows = jest.fn().mockResolvedValue(undefined);
+  const restarted = await createCollectorStateStore({ statePath, persistRows });
+  await restarted.advance({
+    now: afterSettlementRetention,
+    markets: [{ ...marketAt(afterSettlementRetention - 60_000), status: 'closed' }],
+    getEstimate: jest.fn(),
+  });
+  const outcomes = persistRows.mock.calls.flatMap(([rows]) => rows);
+  expect(outcomes).toHaveLength(5);
+  for (const original of decisions) {
+    expect(outcomes.find((row) => row.forecastId === original.forecastId)).toMatchObject({
+      event: 'outcome',
+      decision: 'unobserved',
+      outcomeStatus: 'unobserved',
+      outcome: null,
+      observedPrice: null,
+      aboveProbability: original.aboveProbability,
+      target: original.target,
+      capturedAt: original.capturedAt,
+    });
+  }
+  expect(restarted.getState().markets).toEqual([]);
+});
+
+test('collector restart fetches a pending old contract before applying any settlement timeout', async () => {
+  const { decisions } = await savePendingContract();
+  const runtime = getRuntime(afterSettlementRetention);
+  const controller = new AbortController();
+  const loadMarket = jest.fn(async (ticker) => {
+    const saved = JSON.parse(await readFile(statePath, 'utf8'));
+    expect(ticker).toBe(marketAt(start).ticker);
+    expect(saved.state.markets[0].checkpoints.every((entry) => entry.status === 'pending')).toBe(
+      true,
+    );
+    return {
+      ...marketAt(afterSettlementRetention),
+      status: 'finalized',
+      result: 'yes',
+      settlementPrice: 100_010,
+    };
+  });
+  let ticks = 0;
+  await runResearchCollector({
+    ...runtime.arguments,
+    once: false,
+    signal: controller.signal,
+    loadMarkets: async () => ({ markets: [] }),
+    loadMarket,
+    sleep: async () => {
+      if (++ticks === 1) await Promise.all(loadMarket.mock.results.map((result) => result.value));
+      else controller.abort();
+    },
+  });
+  expect(loadMarket).toHaveBeenCalledTimes(1);
+  const outcomes = runtime.arguments.repository.persistEvidenceRows.mock.calls.flatMap(
+    ([rows]) => rows,
+  );
+  expect(outcomes).toHaveLength(5);
+  expect(outcomes.every((row) => row.event === 'outcome' && row.outcomeStatus === 'observed')).toBe(
+    true,
+  );
+  for (const original of decisions) {
+    expect(outcomes.find((row) => row.forecastId === original.forecastId)).toMatchObject({
+      decision: 'resolved',
+      aboveProbability: original.aboveProbability,
+      belowProbability: original.belowProbability,
+      target: original.target,
+      capturedAt: original.capturedAt,
+    });
+  }
 });
 
 test('the default collector records an actual Kalshi target and checkpoint, with separate state', async () => {

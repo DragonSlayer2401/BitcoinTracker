@@ -18,6 +18,7 @@ const schemaStatements = [
     payload TEXT NOT NULL
   )`,
   'CREATE INDEX IF NOT EXISTS evidence_forecast ON evidence_events(forecast_id)',
+  'CREATE INDEX IF NOT EXISTS evidence_recorded_at ON evidence_events(recorded_at)',
   `CREATE TABLE IF NOT EXISTS research_input_snapshots (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id TEXT NOT NULL UNIQUE,
@@ -37,6 +38,7 @@ const schemaStatements = [
     FOREIGN KEY(snapshot_id) REFERENCES research_input_snapshots(snapshot_id)
   )`,
   'CREATE INDEX IF NOT EXISTS research_labels_snapshot ON research_forward_labels(snapshot_id)',
+  'CREATE INDEX IF NOT EXISTS research_labels_recorded_at ON research_forward_labels(recorded_at)',
   "CREATE INDEX IF NOT EXISTS evidence_event_kind ON evidence_events(json_extract(payload, '$.event'), sequence)",
   `CREATE TABLE IF NOT EXISTS forecast_snapshots (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +75,28 @@ const schemaStatements = [
     lease_key TEXT PRIMARY KEY,
     owner_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS challenger_trials (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id TEXT NOT NULL UNIQUE,
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    FOREIGN KEY(model_id) REFERENCES model_artifacts(model_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS collector_heartbeats (
+    collector_id TEXT PRIMARY KEY,
+    heartbeat_at INTEGER NOT NULL,
+    payload TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS challenger_developments (
+    model_id TEXT PRIMARY KEY,
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    FOREIGN KEY(model_id) REFERENCES model_artifacts(model_id)
   )`,
 ];
 

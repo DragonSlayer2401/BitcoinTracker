@@ -7,6 +7,7 @@ import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 import { getResearchForecast } from '../utils/researchForecast.utils';
 import { getPressureForecast, PRESSURE_MODEL_VERSION } from '../utils/pressureForecast.utils';
 import { getBenchmarkConditions } from '../utils/kalshi/benchmarkConditions.utils';
+import { RESEARCH_EXPERIMENT_V3 } from '../utils/researchVariantConfig.utils';
 
 const START = Date.UTC(2026, 8, 10, 12);
 const END = START + 900_000;
@@ -412,7 +413,7 @@ describe('Kalshi final-minute settlement model', () => {
     );
   });
 
-  test('future samples cannot affect volatility and a recent missing second keeps the labeled fallback', () => {
+  test('future samples cannot affect volatility and one missing interior second retains index dynamics', () => {
     const input = market();
     const benchmark = benchmarkHistory(input.now);
     const native = getKalshiForecast({ ...input, benchmark });
@@ -431,12 +432,47 @@ describe('Kalshi final-minute settlement model', () => {
     expect(gap.available).toBe(true);
     expect(gap.kalshi).toMatchObject({
       referenceSource: 'cf-brti',
-      priceDynamicsSource: 'coinbase-candles',
-      benchmarkConditions: { available: false },
+      priceDynamicsSource: 'cf-brti-history',
+      benchmarkConditions: { available: true },
     });
     expect(getBenchmarkConditions({ benchmark, now: input.now }).features).not.toHaveProperty(
       'relativeVolume5To30Minutes',
     );
+  });
+
+  test('proxy uncertainty starts at the actual observed quote time, not the calculation clock', () => {
+    const input = market(END - 1000, { benchmark: null });
+    const fresh = getKalshiForecast(input);
+    const delayedInput = {
+      ...input,
+      ticker: { ...input.ticker, time: input.now - 10_000 },
+    };
+    const delayed = getKalshiForecast(delayedInput);
+    const legacy = getKalshiForecast(delayedInput, null, {
+      researchVersion: RESEARCH_EXPERIMENT_V3,
+    });
+    expect(delayed.available).toBe(true);
+    expect(delayed.kalshi.referenceAt).toBe(input.now - 10_000);
+    expect(legacy.kalshi.referenceAt).toBe(input.now);
+    // Both estimates retain common basis uncertainty; the delayed quote changes which
+    // missing readings share forward/backward increments rather than inventing a new tick.
+    expect(delayed.kalshi.settlementStandardDeviation).not.toBe(
+      fresh.kalshi.settlementStandardDeviation,
+    );
+    expect(legacy.kalshi.settlementStandardDeviation).toBe(
+      fresh.kalshi.settlementStandardDeviation,
+    );
+    expect(delayed.kalshi.observedSampleCount).toBe(0);
+  });
+
+  test('a delayed proxy quote cannot replace a more recent official observation', () => {
+    const input = market();
+    input.ticker.time = input.now - 10_000;
+    input.benchmark = { current: { time: input.now - 6000, price: 50_000 }, samples: [] };
+    expect(getKalshiForecast(input)).toMatchObject({ available: false });
+    expect(
+      getKalshiForecast(input, null, { researchVersion: RESEARCH_EXPERIMENT_V3 }).available,
+    ).toBe(true);
   });
 
   test('an index move outside the operating range cannot fall back to quiet Coinbase uncertainty', () => {

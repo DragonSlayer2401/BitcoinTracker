@@ -333,14 +333,15 @@ test('long offline backlogs drain in bounded atomic batches without losing pendi
   }));
   recorder.advance(input(START, { markets }));
   const now = START + 15 * MINUTE + 7 * 24 * 60 * MINUTE + 1;
-  const first = recorder.advance(input(now, { markets: [] }));
+  const refreshed = markets.map((market) => ({ ...market, status: 'closed', receivedAt: now }));
+  const first = recorder.advance(input(now, { markets: refreshed }));
   expect(first.rows).toHaveLength(100);
   expect(first.state.markets).toHaveLength(15);
   expect(getValidatedResearchRecorderState(first.state, recorderId)).not.toBeNull();
-  const second = recorder.advance(input(now + 1, { markets: [] }));
+  const second = recorder.advance(input(now + 1, { markets: refreshed }));
   expect(second.rows).toHaveLength(100);
   expect(second.state.markets).toHaveLength(5);
-  const third = recorder.advance(input(now + 2, { markets: [] }));
+  const third = recorder.advance(input(now + 2, { markets: refreshed }));
   expect(third.rows).toHaveLength(50);
   expect(third.state.markets).toHaveLength(0);
 });
@@ -450,11 +451,13 @@ test('a legacy Coinbase artifact cannot adjust a Kalshi forecast or appear as it
   const service = createLearningService({
     readModelArtifacts: async () => [legacy],
     getActiveModelArtifact: async () => legacy,
+    getLearningEvidenceRows: async () => [],
   });
   expect(await service.getResearchModels()).toEqual({
     active: null,
     candidate: null,
     earlyCandidate: null,
+    challengers: { active: null, candidates: [] },
   });
 });
 

@@ -34,6 +34,8 @@ import {
   getLearningFeatureSchema,
 } from '../utils/learning/features.utils';
 import { KALSHI_OUTCOME_DEFINITION, getKalshiOutcome } from '../utils/kalshi/contract.utils';
+import { trainChallengerCandidate } from '../utils/learning/challengerTraining.utils';
+import { windowSet, afterWindow } from './fixtures/challengerFixtures';
 
 jest.mock('../utils/evidenceStorage.utils', () => ({
   ...jest.requireActual('../utils/evidenceStorage.utils'),
@@ -232,6 +234,75 @@ async function flush() {
 }
 
 describe('learned forecast integration', () => {
+  test('a different selected event cannot supply the Fixed call quote or block its normal publication', async () => {
+    const view = createObservation();
+    await flush();
+    view.update(CAPTURE, {
+      kalshiMarket: {
+        ...CONTRACT,
+        ticker: 'KXBTC15M-OTHER',
+        receivedAt: CAPTURE,
+        yesBid: 0.8,
+        yesAsk: 0.84,
+      },
+    });
+    await flush();
+    expect(stored(view).status).toBe('pending');
+    const decision = evidenceRows().find((row) => row.event === 'decision');
+    expect(decision.kalshiQuote).toBeNull();
+    expect(decision.researchInputSnapshot.input.kalshiQuote).toBeNull();
+    expect(decision.researchExperiment.variants['market-blend'].appliedMarket).toBe(false);
+  });
+
+  test('an approved market challenger can publish a Fixed call using the matching fresh quote', async () => {
+    const fitted = trainChallengerCandidate(windowSet(80), [], {
+      kind: 'market-blend',
+      now: afterWindow(79),
+    }).artifact;
+    const shift = START - 60_000 - fitted.trainedAt;
+    const active = JSON.parse(
+      JSON.stringify(fitted, (key, value) =>
+        typeof value === 'number' && value > 1_000_000_000_000 ? value + shift : value,
+      ),
+    );
+    active.activation = {
+      modelId: active.id,
+      activatedAt: START - 1000,
+      shadowEvaluation: {
+        modelId: active.id,
+        phase: 'confirmation',
+        evaluatedAt: START - 2000,
+        eligibleForPromotion: true,
+        approvedCheckpoints: [12],
+      },
+    };
+    active.pipeline.baselineModelVersion = KALSHI_MODEL_VERSION;
+    const view = createObservation({ models: { challengers: { active, candidates: [] } } });
+    await flush();
+    const samples = Array.from({ length: 1201 }, (_, index) => ({
+      time: CAPTURE - (1200 - index) * 1000,
+      price: 50_000 * Math.exp(Math.sin(index / 30) * 0.0001),
+    }));
+    view.update(CAPTURE, {
+      benchmark: { available: true, receivedAt: CAPTURE, current: samples.at(-1), samples },
+      kalshiMarket: { ...CONTRACT, receivedAt: CAPTURE, yesBid: 0.1, yesAsk: 0.14 },
+    });
+    await flush();
+    const fixed = stored(view);
+    expect(fixed).toMatchObject({
+      status: 'pending',
+      modelVersion: active.version,
+      learning: { applied: true, modelId: active.id },
+    });
+    const decision = evidenceRows().find((row) => row.event === 'decision');
+    expect(decision.researchInputSnapshot.input.kalshiQuote.yesBid).toBe(0.1);
+    expect(decision.kalshiQuote).toEqual(decision.researchInputSnapshot.input.kalshiQuote);
+    expect(decision.researchExperiment.variants['market-only'].aboveProbability).toBeCloseTo(0.12);
+    expect(replayResearchInputSnapshot(decision.researchInputSnapshot).aboveProbability).toBe(
+      fixed.aboveProbability,
+    );
+  });
+
   test('futures baseline and learned calls restore immutable metadata while old candidates stay separate', () => {
     const input = { ...market(CAPTURE), derivatives: null };
     const baseline = getResearchForecast(

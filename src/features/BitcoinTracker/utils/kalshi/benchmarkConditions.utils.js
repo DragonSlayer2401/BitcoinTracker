@@ -16,6 +16,10 @@ export const BENCHMARK_CONDITION_PARAMETERS = Object.freeze({
   currentJumpVolatilityWeight: 0.5,
   minimumJumpElapsedMinutes: 0.25,
 });
+const SPARSE_BENCHMARK_CONDITION_PARAMETERS = Object.freeze({
+  ...BENCHMARK_CONDITION_PARAMETERS,
+  minimumObservedSecondsPerMinute: 59,
+});
 
 const rootMeanSquare = (values) => Math.sqrt(jStat.mean(values.map((value) => value ** 2)));
 const rangeVolatility = (ranges) => rootMeanSquare(ranges) / Math.sqrt(RANGE_VARIANCE_DIVISOR);
@@ -47,8 +51,9 @@ export function getBenchmarkReadings(benchmark, now) {
 }
 
 /**
- * Price-only conditions from the actual settlement index. A completed minute contains every
- * once-second observation in (minute start, minute end]; no gap is interpolated into a candle.
+ * Price-only conditions from the actual settlement index. Minute closes must be observed.
+ * The current policy tolerates one missing interior second, retaining observed-only ranges;
+ * older policies still require every once-second reading in (minute start, minute end].
  * Coinbase volume and order-book features remain separate: an index has no executed volume.
  */
 export function getBenchmarkConditions({
@@ -56,6 +61,7 @@ export function getBenchmarkConditions({
   now,
   target,
   readings: suppliedReadings,
+  allowSparseInteriorReadings = true,
 } = {}) {
   const unavailable = (reason, isOutsideOperatingRange = false) => ({
     available: false,
@@ -72,21 +78,35 @@ export function getBenchmarkConditions({
   }
   const byTime = new Map(readings.map((sample) => [sample.time, sample.price]));
   const completed = [];
+  const parameters = allowSparseInteriorReadings
+    ? SPARSE_BENCHMARK_CONDITION_PARAMETERS
+    : BENCHMARK_CONDITION_PARAMETERS;
   const latestMinuteEnd = Math.floor(latest.time / MINUTE) * MINUTE;
   for (let age = 0; age < BENCHMARK_CONDITION_PARAMETERS.maximumCompletedMinutes; age += 1) {
     const endAt = latestMinuteEnd - age * MINUTE;
     const prices = Array.from({ length: 60 }, (_, index) => byTime.get(endAt - index * 1000));
-    if (prices.some((price) => price === undefined)) break;
-    const open = byTime.get(endAt - MINUTE) ?? prices.at(-1);
+    const observedPrices = prices.filter((price) => price !== undefined);
+    if (
+      prices[0] === undefined ||
+      observedPrices.length <
+        (allowSparseInteriorReadings ? parameters.minimumObservedSecondsPerMinute : 60)
+    )
+      break;
+    const open = byTime.get(endAt - MINUTE) ?? observedPrices.at(-1);
     completed.unshift({
       endAt,
       close: prices[0],
-      high: Math.max(open, ...prices),
-      low: Math.min(open, ...prices),
+      high: Math.max(open, ...observedPrices),
+      low: Math.min(open, ...observedPrices),
+      observedSecondCount: observedPrices.length,
     });
   }
   if (completed.length < BENCHMARK_CONDITION_PARAMETERS.minimumCompletedMinutes) {
-    return unavailable('At least 16 complete, consecutive BRTI minutes are required.');
+    return unavailable(
+      allowSparseInteriorReadings
+        ? 'At least 16 consecutive BRTI minutes with observed closes and 59 of 60 seconds are required.'
+        : 'At least 16 complete, consecutive BRTI minutes are required.',
+    );
   }
   const lastMinute = completed.at(-1);
   const returns = completed
@@ -152,6 +172,23 @@ export function getBenchmarkConditions({
   const medianHistoricalLogRange = jStat.median(ranges.slice(0, -1));
   const features = {
     completedCandleCount: completed.length,
+    ...(allowSparseInteriorReadings
+      ? {
+          completeMinuteCount: completed.filter((minute) => minute.observedSecondCount === 60)
+            .length,
+          partialMinuteCount: completed.filter((minute) => minute.observedSecondCount < 60).length,
+          observedSecondCount: completed.reduce(
+            (sum, minute) => sum + minute.observedSecondCount,
+            0,
+          ),
+          expectedSecondCount: completed.length * 60,
+          missingSecondCount: completed.reduce(
+            (sum, minute) => sum + 60 - minute.observedSecondCount,
+            0,
+          ),
+          rangeSource: 'observed-readings-only',
+        }
+      : {}),
     latestCompletedAt: lastMinute.endAt,
     logReturn1Minute: logReturn(1),
     logReturn3Minutes: logReturn(3),
@@ -243,6 +280,6 @@ export function getBenchmarkConditions({
     canPublish: true,
     riskFlags,
     features,
-    parameters: BENCHMARK_CONDITION_PARAMETERS,
+    parameters,
   };
 }

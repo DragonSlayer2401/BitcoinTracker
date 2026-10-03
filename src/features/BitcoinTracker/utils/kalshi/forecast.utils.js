@@ -8,9 +8,20 @@ import {
   getDerivativesLogShift,
   getDerivativesVarianceTime,
 } from '../derivativesForecast.utils';
+import {
+  PRESSURE_RESEARCH_POLICIES,
+  RESEARCH_EXPERIMENT_V2,
+  RESEARCH_EXPERIMENT_V3,
+  RESEARCH_EXPERIMENT_V4,
+  RESEARCH_EXPERIMENT_V5,
+} from '../researchVariantConfig.utils';
 
-export const KALSHI_MODEL_VERSION = 'kalshi-brti-average-v2';
-export const KALSHI_DERIVATIVES_MODEL_VERSION = 'kalshi-brti-derivatives-v1';
+export const LEGACY_KALSHI_MODEL_VERSION = 'kalshi-brti-average-v2';
+export const LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION = 'kalshi-brti-derivatives-v1';
+export const KALSHI_MODEL_VERSION = 'kalshi-brti-average-v3';
+export const KALSHI_DERIVATIVES_MODEL_VERSION = 'kalshi-brti-derivatives-v2';
+export const isKalshiDerivativesModelVersion = (version) =>
+  [LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION, KALSHI_DERIVATIVES_MODEL_VERSION].includes(version);
 export const KALSHI_MODEL_PARAMETERS = Object.freeze({
   sampleCount: 60,
   maximumBenchmarkAgeMs: 5000,
@@ -161,10 +172,18 @@ function getAboveProbability(distribution, threshold) {
  */
 export function getKalshiForecast(input = {}, pressureBase = null, options = {}) {
   const { kalshiMarket: market, benchmark, now, ticker } = input;
+  // Archived experiments must retain their original inputs, rules and numerical results.
+  const usesCurrentCalculation =
+    options.researchVersion === undefined ||
+    [RESEARCH_EXPERIMENT_V4, RESEARCH_EXPERIMENT_V5].includes(options.researchVersion);
   const hasDerivativesPolicy = input.derivatives !== undefined;
   const modelVersion = hasDerivativesPolicy
-    ? KALSHI_DERIVATIVES_MODEL_VERSION
-    : KALSHI_MODEL_VERSION;
+    ? usesCurrentCalculation
+      ? KALSHI_DERIVATIVES_MODEL_VERSION
+      : LEGACY_KALSHI_DERIVATIVES_MODEL_VERSION
+    : usesCurrentCalculation
+      ? KALSHI_MODEL_VERSION
+      : LEGACY_KALSHI_MODEL_VERSION;
   const horizonMinutes = (market?.expiresAt - now) / MINUTE;
   const base =
     pressureBase ?? getPressureForecast({ ...input, target: market?.target, horizonMinutes });
@@ -193,6 +212,7 @@ export function getKalshiForecast(input = {}, pressureBase = null, options = {})
     now,
     readings,
     target: market.target,
+    allowSparseInteriorReadings: usesCurrentCalculation,
   });
   if (benchmarkConditions.isOutsideOperatingRange) return unavailable(benchmarkConditions.reason);
   if (!base.available && !benchmarkConditions.available) return unavailable(base.reason);
@@ -206,11 +226,30 @@ export function getKalshiForecast(input = {}, pressureBase = null, options = {})
   const latest = readings.at(-1);
   const hasFreshBenchmark =
     latest && now - latest.time <= KALSHI_MODEL_PARAMETERS.maximumBenchmarkAgeMs;
+  if (
+    usesCurrentCalculation &&
+    !hasFreshBenchmark &&
+    (!positive(ticker?.price) ||
+      !positive(ticker.bid) ||
+      !positive(ticker.ask) ||
+      ticker.bid > ticker.ask ||
+      !timestamp(ticker.time) ||
+      !timestamp(ticker.receivedAt) ||
+      ticker.time > now ||
+      ticker.receivedAt > now ||
+      now - ticker.time > 20_000 ||
+      now - ticker.receivedAt > 20_000 ||
+      (latest && ticker.time <= latest.time))
+  ) {
+    return unavailable(
+      'A fresh, valid proxy quote is required while the BRTI price is unavailable.',
+    );
+  }
   const referenceSource = hasFreshBenchmark ? 'cf-brti' : 'coinbase-proxy';
   const midpointLocation = base.pressure?.components?.midpointLocation ?? 0;
   const proxyPrice = positive(ticker?.price) ? ticker.price * Math.exp(midpointLocation) : null;
   const referencePrice = hasFreshBenchmark ? latest.price : proxyPrice;
-  const referenceAt = hasFreshBenchmark ? latest.time : now;
+  const referenceAt = hasFreshBenchmark ? latest.time : usesCurrentCalculation ? ticker.time : now;
   const referenceReceivedAt = hasFreshBenchmark
     ? timestamp(benchmark?.receivedAt)
       ? benchmark.receivedAt
@@ -245,7 +284,7 @@ export function getKalshiForecast(input = {}, pressureBase = null, options = {})
   }));
   if (!hasFreshBenchmark) {
     // A missing BRTI value is not replaced in the observed-readings collection.
-    nodes.push({ time: now, logPrice: Math.log(proxyPrice), basisWeight: 1 });
+    nodes.push({ time: referenceAt, logPrice: Math.log(proxyPrice), basisWeight: 1 });
   }
   const observedPrices = new Map(usefulReadings.map((sample) => [sample.time, sample.price]));
   const observedSampleCount = sampleTimes.filter((time) => observedPrices.has(time)).length;
@@ -371,6 +410,69 @@ export function getKalshiForecast(input = {}, pressureBase = null, options = {})
       ['futures-only', futuresOnly, false, true],
       ['combined', distributions, true, true, distribution],
     ];
+    if (
+      [
+        RESEARCH_EXPERIMENT_V2,
+        RESEARCH_EXPERIMENT_V3,
+        RESEARCH_EXPERIMENT_V4,
+        RESEARCH_EXPERIMENT_V5,
+      ].includes(options.researchVersion)
+    ) {
+      const reducedPolicy = PRESSURE_RESEARCH_POLICIES['reduced-pressure'];
+      const fastPolicy = PRESSURE_RESEARCH_POLICIES['fast-decay'];
+      const fasterPressureBase = {
+        ...modelBase,
+        pressure: {
+          ...modelBase.pressure,
+          parameters: {
+            ...(modelBase.pressure?.parameters ?? PRESSURE_MODEL_PARAMETERS),
+            pressureHalfLifeMinutes: fastPolicy.pressureHalfLifeMinutes,
+          },
+        },
+      };
+      const reduced = distributions.map((sample, index) =>
+        sampleTimes[index] > now
+          ? {
+              ...sample,
+              logMean:
+                withoutSpot[index].logMean +
+                reducedPolicy.directionalScale * (sample.logMean - withoutSpot[index].logMean),
+            }
+          : sample,
+      );
+      const faster = distributions.map((sample, index) => {
+        const minutes = (sampleTimes[index] - now) / MINUTE;
+        if (minutes <= 0) return sample;
+        const spotShift = getPressureShift(fasterPressureBase, minutes);
+        let totalShift = spotShift;
+        if (derivatives?.applied) {
+          const fastRate = Math.log(2) / fastPolicy.pressureHalfLifeMinutes;
+          const originalRate = Math.log(2) / DERIVATIVES_MODEL_PARAMETERS.pressureHalfLifeMinutes;
+          // Rescale the uncapped coefficient, then use the original component and shared caps.
+          // Scaling an already capped shift would produce the wrong pressure path.
+          const decayRatio =
+            -Math.expm1(-fastRate * minutes) /
+            fastRate /
+            (-Math.expm1(-originalRate * minutes) / originalRate);
+          const futuresShift = getDerivativesLogShift(
+            { ...derivatives, impactCoefficient: derivatives.impactCoefficient * decayRatio },
+            minutes,
+            minuteVolatility,
+          );
+          const maximumCombinedShift =
+            DERIVATIVES_MODEL_PARAMETERS.maximumCombinedMinuteVolatilities *
+            minuteVolatility *
+            Math.sqrt(Math.min(minutes, DERIVATIVES_MODEL_PARAMETERS.maximumDriftHorizonMinutes));
+          totalShift = bounded(
+            spotShift + futuresShift,
+            -maximumCombinedShift,
+            maximumCombinedShift,
+          );
+        }
+        return { ...sample, logMean: withoutSpot[index].logMean + totalShift };
+      });
+      variants.push(['reduced-pressure', reduced, true, true], ['fast-decay', faster, true, true]);
+    }
     researchVariants = Object.fromEntries(
       variants.map(([name, samples, usesSpot, usesFutures, existingDistribution]) => {
         const moments =
@@ -386,6 +488,9 @@ export function getKalshiForecast(input = {}, pressureBase = null, options = {})
         return [
           name,
           {
+            ...(PRESSURE_RESEARCH_POLICIES[name]
+              ? { policyVersion: PRESSURE_RESEARCH_POLICIES[name].version }
+              : {}),
             available,
             reason: available ? null : 'The experiment distribution is unavailable.',
             modelVersion,

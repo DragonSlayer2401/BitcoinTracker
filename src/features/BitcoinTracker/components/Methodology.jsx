@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button, Modal } from 'react-bootstrap';
 import Icon from './Icon';
 import ResearchData from './ResearchData';
+import PaperTrading from '../features/PaperTrading/index.web';
 import KalshiModelRules from './KalshiModelRules';
 
 export default function Methodology({ evidenceWarning, researchStatus }) {
@@ -22,6 +23,7 @@ export default function Methodology({ evidenceWarning, researchStatus }) {
           View model rules
         </Button>
         <ResearchData warning={evidenceWarning} researchStatus={researchStatus} />
+        <PaperTrading />
       </div>
       {evidenceWarning && (
         <span className="small text-warning mt-1" role="status">

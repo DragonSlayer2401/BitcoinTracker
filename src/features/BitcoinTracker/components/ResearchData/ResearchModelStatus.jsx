@@ -1,4 +1,5 @@
 import EarlyModelStatus from './EarlyModelStatus';
+import { RESEARCH_VARIANT_LABELS } from '../../utils/researchVariantConfig.utils';
 
 export default function ResearchModelStatus({ report }) {
   const counts = report?.training?.counts;
@@ -6,9 +7,21 @@ export default function ResearchModelStatus({ report }) {
   const isEarlyModelInUse = Boolean(
     report?.active && report.early?.active?.id === report.active.id,
   );
+  const isChallengerInUse = Boolean(
+    report?.active && report.challengers?.active?.id === report.active.id,
+  );
   let modelDescription =
     'Kalshi settlement-average model. No learned adjustment is currently active.';
-  if (isEarlyModelInUse) {
+  if (isChallengerInUse) {
+    const label =
+      RESEARCH_VARIANT_LABELS[report.active.variantName] ??
+      RESEARCH_VARIANT_LABELS[report.active.kind] ??
+      RESEARCH_VARIANT_LABELS[`${report.active.kind}-candidate`] ??
+      'forecast challenger';
+    modelDescription =
+      `Validated challenger ${report.active.id} (${label}). ` +
+      'It passed comparisons on later recorded events before activation; unsupported conditions still use the settlement model.';
+  } else if (isEarlyModelInUse) {
     modelDescription =
       `Early learning model ${report.active.id}. ` +
       (report.early.monitoring?.status === 'disabled'

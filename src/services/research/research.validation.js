@@ -2,6 +2,7 @@ import {
   isKalshiContract,
   KALSHI_OUTCOME_DEFINITION,
 } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { getResearchVariantNames } from '@/features/BitcoinTracker/utils/researchVariantConfig.utils';
 
 export class ResearchDataError extends Error {
   constructor(message, status = 400) {
@@ -191,7 +192,7 @@ export function validateResearchInputSnapshot(row) {
     snapshot.input?.kalshiMarket?.target !== row.target ||
     snapshot.input?.kalshiMarket?.expiresAt !== row.expiresAt ||
     !row.researchExperiment ||
-    row.researchExperiment.version !== 'kalshi-ablation-v1' ||
+    !getResearchVariantNames(row.researchExperiment.version).length ||
     row.researchExperiment.capturedAt !== snapshot.capturedAt ||
     row.researchExperiment.marketTicker !== row.kalshiMarket.ticker ||
     row.researchExperiment.target !== row.target ||

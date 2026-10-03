@@ -1,5 +1,7 @@
 /** @jest-environment node */
 import { createLearningService } from '../../../services/research/learning.service';
+import { createChallengerService } from '../../../services/research/challenger.service';
+import { evaluateResearchExperiments } from '../utils/researchEvaluation.utils';
 import { trainOutcomeCandidate, evaluateShadowCandidate } from '../utils/learning/training.utils';
 import {
   trainEarlyCandidate,
@@ -10,6 +12,21 @@ import { EARLY_MODEL_VERSION } from '../utils/learning/earlyModel.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 
 jest.mock('server-only', () => ({}), { virtual: true });
+jest.mock('../../../services/research/challenger.service', () => {
+  const emptyStatus = () => ({ active: null, candidates: [], reports: [], requirements: {} });
+  const service = {
+    getChallengerModels: jest.fn(async () => emptyStatus()),
+    getChallengerStatus: jest.fn(async () => emptyStatus()),
+    runChallengerCycle: jest.fn(async () => emptyStatus()),
+  };
+  return { createChallengerService: jest.fn(() => service) };
+});
+jest.mock('../utils/researchEvaluation.utils', () => ({
+  evaluateResearchExperiments: jest.fn(() => ({ checkpoints: [] })),
+}));
+jest.mock('../utils/learning/challengerModel.utils', () => ({
+  isChallengerArtifact: (model) => model?.version === 'forecast-challenger-v1',
+}));
 jest.mock('../utils/learning/evaluation.utils', () => ({
   analyzeForecastEvidence: jest.fn(() => ({})),
   analyzeSavedForecasts: jest.fn(() => ({})),
@@ -61,6 +78,8 @@ jest.mock('../utils/learning/earlyTraining.utils', () => ({
 }));
 
 const start = Date.UTC(2026, 8, 11);
+const mockChallengerService = createChallengerService();
+const emptyChallengerStatus = { active: null, candidates: [], reports: [], requirements: {} };
 const now = start + 2 * 86_400_000;
 const pipeline = {
   baselineModelVersion: 'kalshi-brti-average-v2',
@@ -132,6 +151,9 @@ function createStore(events = rows(87), models = [], active = null) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  for (const method of Object.values(mockChallengerService)) {
+    method.mockResolvedValue(emptyChallengerStatus);
+  }
   trainOutcomeCandidate.mockReturnValue({
     status: 'insufficient-data',
     reason: 'Full model needs more events.',
@@ -189,6 +211,7 @@ test('fits the early candidate while the full model is still collecting and free
     active: null,
     candidate: null,
     earlyCandidate: candidate,
+    challengers: emptyChallengerStatus,
   });
 });
 
@@ -303,6 +326,7 @@ test('degradation retires active early influence and remains disabled after serv
     active: null,
     candidate: null,
     earlyCandidate: null,
+    challengers: emptyChallengerStatus,
   });
   expect(trainEarlyCandidate).not.toHaveBeenCalled();
 });
@@ -322,6 +346,7 @@ test('read-only model and status responses suppress degraded early influence bef
     active: null,
     candidate: null,
     earlyCandidate: null,
+    challengers: emptyChallengerStatus,
   });
   const status = await service.getLearningStatus({ now });
   expect(status.active).toBeNull();
@@ -343,4 +368,63 @@ test('an already active full model cannot be replaced by early influence or trig
   expect(status.early.candidate).toBeNull();
   expect(trainEarlyCandidate).not.toHaveBeenCalled();
   expect(store.activateModelArtifact).not.toHaveBeenCalled();
+});
+
+test('passes the existing lease to the challenger cycle and releases it afterward', async () => {
+  const store = createStore();
+  await createLearningService(store).runLearningCycle({ now });
+  expect(mockChallengerService.runChallengerCycle).toHaveBeenCalledTimes(1);
+  expect(mockChallengerService.runChallengerCycle).toHaveBeenCalledWith({ now, leaseHeld: true });
+  expect(store.acquireLearningLease).toHaveBeenCalledTimes(1);
+  expect(store.releaseLearningLease).toHaveBeenCalledWith(
+    store.acquireLearningLease.mock.calls[0][0].ownerId,
+  );
+});
+
+test('read-only model and analysis endpoints never run a challenger cycle', async () => {
+  const store = createStore();
+  const service = createLearningService(store);
+  const status = await service.getLearningStatus({ now });
+  const models = await service.getResearchModels();
+  expect(status.comparison).toEqual({ checkpoints: [] });
+  expect(status.challengers).toEqual(emptyChallengerStatus);
+  expect(models.challengers).toEqual(emptyChallengerStatus);
+  expect(evaluateResearchExperiments).toHaveBeenCalledWith(store.events, { now });
+  expect(mockChallengerService.getChallengerStatus).toHaveBeenCalled();
+  expect(mockChallengerService.getChallengerModels).toHaveBeenCalled();
+  expect(mockChallengerService.runChallengerCycle).not.toHaveBeenCalled();
+  expect(store.acquireLearningLease).not.toHaveBeenCalled();
+  expect(store.writeModelArtifact).not.toHaveBeenCalled();
+  expect(store.activateModelArtifact).not.toHaveBeenCalled();
+});
+
+test('does not run the challenger cycle when another analysis owns the lease', async () => {
+  const store = createStore();
+  store.acquireLearningLease.mockResolvedValue(false);
+  const status = await createLearningService(store).runLearningCycle({ now });
+  expect(status.lastRun.status).toBe('busy');
+  expect(mockChallengerService.runChallengerCycle).not.toHaveBeenCalled();
+  expect(store.releaseLearningLease).not.toHaveBeenCalled();
+});
+
+test('an active challenger prevents older full and early candidates from taking over', async () => {
+  const full = model('old-full', 'outcome-logistic-kalshi-v2');
+  const early = model('old-early');
+  const challenger = model('active-challenger', 'forecast-challenger-v1', now - 60_000);
+  const active = { ...challenger, activation: { modelId: challenger.id, activatedAt: now - 1000 } };
+  const store = createStore(rows(320), [full, early, challenger], active);
+  const challengerStatus = { ...emptyChallengerStatus, active };
+  mockChallengerService.getChallengerStatus.mockResolvedValue(challengerStatus);
+  mockChallengerService.getChallengerModels.mockResolvedValue(challengerStatus);
+  evaluateShadowCandidate.mockReturnValue(passedShadow(full));
+  evaluateEarlyShadowCandidate.mockReturnValue(passedShadow(early));
+  const result = await createLearningService(store).runLearningCycle({ now });
+  expect(result.active.id).toBe(challenger.id);
+  expect(result.lastRun.status).toBe('deferred');
+  expect(result.early.lastRun.status).toBe('superseded');
+  expect(trainOutcomeCandidate).not.toHaveBeenCalled();
+  expect(trainEarlyCandidate).not.toHaveBeenCalled();
+  expect(store.activateModelArtifact).not.toHaveBeenCalled();
+  expect(store.writeModelArtifact).not.toHaveBeenCalled();
+  expect(mockChallengerService.runChallengerCycle).toHaveBeenCalledWith({ now, leaseHeld: true });
 });

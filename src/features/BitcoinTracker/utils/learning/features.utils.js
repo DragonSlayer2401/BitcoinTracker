@@ -1,6 +1,6 @@
 import { logit } from './statistics.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
-import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../kalshi/forecast.utils';
+import { isKalshiDerivativesModelVersion } from '../kalshi/forecast.utils';
 import { isDerivativesForecastMetadata } from '../derivativesForecast.utils';
 
 export const LEARNING_FEATURE_VERSION = 'deadline-reversal-features-v2';
@@ -81,7 +81,7 @@ export function isLearningSchemaCompatibleWithBaseline(featureVersion, baselineM
   return Boolean(
     getLearningFeatureSchema(featureVersion) &&
     (featureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION) ===
-      (baselineModelVersion === KALSHI_DERIVATIVES_MODEL_VERSION),
+      isKalshiDerivativesModelVersion(baselineModelVersion),
   );
 }
 const getBoundedFeatureValue = (value, limit = 8) => Math.max(-limit, Math.min(limit, value));
@@ -132,10 +132,9 @@ export function getLearningFeatures({
   outcomeDefinition = forecast?.outcomeDefinition ?? KALSHI_OUTCOME_DEFINITION,
 } = {}) {
   const features = conditions?.features;
-  const schemaVersion =
-    forecast?.modelVersion === KALSHI_DERIVATIVES_MODEL_VERSION
-      ? DERIVATIVES_LEARNING_FEATURE_VERSION
-      : LEARNING_FEATURE_VERSION;
+  const schemaVersion = isKalshiDerivativesModelVersion(forecast?.modelVersion)
+    ? DERIVATIVES_LEARNING_FEATURE_VERSION
+    : LEARNING_FEATURE_VERSION;
   const getUnavailableSnapshot = (reason) => ({
     schemaVersion,
     available: false,

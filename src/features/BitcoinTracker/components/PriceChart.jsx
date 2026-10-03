@@ -146,6 +146,8 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
         candleMinutes,
         comparisonTime: comparison?.time ?? null,
         chartHeight,
+        currentReading: history.chartData?.current,
+        currentPriceStatus: history.chartData?.status,
       }),
     [
       readings,
@@ -165,6 +167,8 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
       candleMinutes,
       comparison,
       chartHeight,
+      history.chartData?.current,
+      history.chartData?.status,
     ],
   );
   const allObservations = view === 'candles' ? candles : readings;

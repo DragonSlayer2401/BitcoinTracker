@@ -1,10 +1,11 @@
 import { configureStore } from '@reduxjs/toolkit';
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Provider } from 'react-redux';
 import { useGetCandlesQuery, useGetTickerQuery } from '@/services/coinbase/coinbase.api';
 import { useGetKalshiMarketsQuery, useGetKalshiBenchmarkQuery } from '@/services/kalshi/kalshi.api';
 import BitcoinTracker from '../index.web';
+import PriceChart from '../components/PriceChart';
 import trackerReducer from '../state/slices/trackerSlice';
 import { formatPercent } from '../utils/format.utils';
 import {
@@ -18,17 +19,27 @@ jest.mock('@/services/coinbase/coinbase.api', () => ({
 }));
 
 jest.mock('@/services/kalshi/kalshi.api', () => ({
+  kalshiApi: jest.requireActual('@/services/kalshi/kalshi.api').kalshiApi,
   useGetKalshiMarketsQuery: jest.fn(),
   useGetKalshiBenchmarkQuery: jest.fn(),
 }));
 
-jest.mock('../components/PriceChart', () => () => null);
+jest.mock('../components/PriceChart', () => jest.fn(() => null));
 jest.mock('../hooks/useCoinbaseStream', () => () => mockStream);
 jest.mock('../hooks/useResearchSync', () => () => ({ warning: null, lastSyncedAt: null }));
 jest.mock('../hooks/useResearchLearning', () => {
   const models = { active: null, candidate: null };
   return () => ({ models, warning: null });
 });
+jest.mock('@/services/research/collectorHealth.api', () => ({
+  useGetCollectorHealthQuery: () => ({}),
+}));
+jest.mock('@/services/research/paperTrading/paperTrading.api', () => ({
+  useGetPaperTradingReportQuery: () => ({}),
+}));
+jest.mock('@/services/research/tradingAdvisor/tradingAdvisor.api', () => ({
+  useGetTradingAdvisorReportQuery: () => ({}),
+}));
 jest.mock('../hooks/useBackgroundResearch', () => () => ({ warning: null, status: null }));
 const mockKalshiSettlement = { outcomes: [], warning: null };
 jest.mock('../hooks/useKalshiSettlement', () => () => mockKalshiSettlement);
@@ -164,7 +175,7 @@ function createQuery(data, overrides = {}) {
   };
 }
 
-async function renderTracker() {
+async function renderTracker({ openResearch = true } = {}) {
   const store = configureStore({ reducer: { tracker: trackerReducer } });
   const renderView = () => (
     <Provider store={store}>
@@ -173,6 +184,8 @@ async function renderTracker() {
   );
   const view = render(renderView());
   await act(async () => {});
+  if (openResearch)
+    fireEvent.click(screen.getByRole('button', { name: 'Research & market details' }));
 
   return { ...view, store, rerenderTracker: () => view.rerender(renderView()) };
 }
@@ -278,7 +291,7 @@ describe('BitcoinTracker interactions', () => {
         receivedAt: NOW,
       }),
     );
-    const { rerenderTracker } = await renderTracker();
+    const { rerenderTracker } = await renderTracker({ openResearch: false });
     const headline = within(screen.getByRole('region', { name: 'Bitcoin index price' }));
     expect(headline.getByText('$50,123.45')).toBeInTheDocument();
     expect(screen.getByText('BRTI live')).toBeInTheDocument();
@@ -313,6 +326,42 @@ describe('BitcoinTracker interactions', () => {
       expect.any(Object),
     );
     expect(store.getState().tracker.forecasts).toEqual([]);
+  });
+
+  test('keeps the main trading chart on the current event while an older forecast stays in research', async () => {
+    const current = createKalshiContract();
+    useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [current], receivedAt: NOW }));
+    const { rerenderTracker } = await renderTracker({ openResearch: false });
+    expect(screen.getByRole('heading', { name: 'Simulated account' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start forecast' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Research & market details' }));
+    await user.click(screen.getByRole('button', { name: 'Start forecast' }));
+    const next = createKalshiContract({
+      ticker: 'KXBTC15M-26SEP070830-30',
+      eventTicker: 'KXBTC15M-26SEP070830',
+      target: 50_123.45,
+      startsAt: current.expiresAt,
+      expiresAt: current.expiresAt + 15 * MINUTE,
+      receivedAt: current.expiresAt + 1000,
+    });
+    jest.setSystemTime(next.startsAt + 1000);
+    useGetKalshiMarketsQuery.mockReturnValue(
+      createQuery({ markets: [next], receivedAt: Date.now() }),
+    );
+    rerenderTracker();
+    act(() => jest.advanceTimersByTime(1000));
+    expect(PriceChart.mock.lastCall[0]).toMatchObject({
+      target: next.target,
+      deadline: next.expiresAt,
+    });
+    expect(screen.getByRole('spinbutton', { name: 'Kalshi target price' })).toHaveValue(
+      current.target,
+    );
+    await user.click(screen.getByRole('button', { name: 'Close research details' }));
+    act(() => jest.advanceTimersByTime(500));
+    expect(screen.getByRole('timer', { name: 'Current Kalshi event closes in' })).toHaveTextContent(
+      /^14:5[7-8]$/,
+    );
   });
 
   test.each([
@@ -603,6 +652,8 @@ describe('BitcoinTracker interactions', () => {
       expect(screen.getByRole('button', { name: 'Start forecast' })).toBeDisabled();
       expect(screen.getByRole('heading', { name: 'Estimate paused' })).toBeInTheDocument();
       expect(store.getState().tracker.forecasts).toEqual([]);
+      await user.click(screen.getByRole('button', { name: 'Close research details' }));
+      act(() => jest.advanceTimersByTime(500));
       await user.click(screen.getByRole('button', { name: 'Retry' }));
       expect(quoteQuery.refetch).toHaveBeenCalledTimes(1);
       expect(candleQuery.refetch).toHaveBeenCalledTimes(1);

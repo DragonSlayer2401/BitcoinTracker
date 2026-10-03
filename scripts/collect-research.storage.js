@@ -5,6 +5,10 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createResearchRecorder } from '../src/features/BitcoinTracker/utils/researchRecorder.utils';
 
+function stateError(message, code, cause) {
+  return Object.assign(new Error(message, { cause }), { code });
+}
+
 async function readJson(filename) {
   try {
     const parsed = JSON.parse(await readFile(filename, 'utf8'));
@@ -13,8 +17,10 @@ async function readJson(filename) {
     return parsed;
   } catch (error) {
     if (error.code === 'ENOENT') return null;
-    throw new Error(
+    throw stateError(
       'Collector state is unreadable. Existing data was retained; repair or restore the state file before retrying.',
+      'COLLECTOR_STATE_INVALID',
+      error,
     );
   }
 }
@@ -65,53 +71,74 @@ export async function acquireCollectorLock(statePath) {
   await handle.writeFile(JSON.stringify(identity));
   await handle.sync();
   await handle.close();
-  return async () => {
+  const release = async () => {
     if ((await readJson(lockPath))?.token === identity.token) await unlink(lockPath);
   };
+  release.assertOwned = async () => {
+    if ((await readJson(lockPath))?.token !== identity.token)
+      throw stateError(
+        'Collector state ownership changed. This collector stopped without replacing another owner’s state.',
+        'COLLECTOR_LOCK_LOST',
+      );
+  };
+  return release;
 }
 
 /** State and exact pending rows commit together before the durable repository sees an event. */
-export async function createCollectorStateStore({ statePath, persistRows }) {
+export async function createCollectorStateStore({
+  statePath,
+  persistRows,
+  assertOwnership = async () => {},
+}) {
   let saved = await readJson(statePath);
   if (
     saved &&
     (!saved.state || !Array.isArray(saved.pendingRows) || saved.pendingRows.length > 100)
   ) {
-    throw new Error(
+    throw stateError(
       'Saved collector state is invalid. Recording is paused without resetting its target.',
+      'COLLECTOR_STATE_INVALID',
     );
   }
   saved ??= { recorderId: randomUUID(), state: null, pendingRows: [] };
   // Validate immediately, including a restored deadline and issued probability snapshot.
-  createResearchRecorder({ recorderId: saved.recorderId, state: saved.state });
+  const createRecorder = () => {
+    try {
+      return createResearchRecorder({ recorderId: saved.recorderId, state: saved.state });
+    } catch (error) {
+      throw stateError(error.message, 'COLLECTOR_STATE_INVALID', error);
+    }
+  };
+  createRecorder();
   let running = false;
 
   async function advance(input) {
     if (running) throw new Error('Collector ticks cannot overlap.');
     running = true;
     try {
+      await assertOwnership();
       if (saved.pendingRows.length) {
         await persistRows(saved.pendingRows);
         const flushed = { ...saved, pendingRows: [] };
+        await assertOwnership();
         await writeCollectorState(statePath, flushed);
         saved = flushed;
       }
-      const result = createResearchRecorder({
-        recorderId: saved.recorderId,
-        state: saved.state,
-      }).advance(input);
+      const result = createRecorder().advance(input);
       const pending = {
         recorderId: saved.recorderId,
         state: result.state,
         pendingRows: result.rows,
       };
       if (JSON.stringify(pending) !== JSON.stringify(saved)) {
+        await assertOwnership();
         await writeCollectorState(statePath, pending);
         saved = pending;
       }
       if (saved.pendingRows.length) {
         await persistRows(saved.pendingRows);
         const flushed = { ...saved, pendingRows: [] };
+        await assertOwnership();
         await writeCollectorState(statePath, flushed);
         saved = flushed;
       }

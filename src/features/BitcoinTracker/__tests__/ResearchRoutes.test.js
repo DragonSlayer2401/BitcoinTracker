@@ -7,8 +7,10 @@ import { GET as exportData } from '../../../app/api/research/export/route';
 import { GET as models } from '../../../app/api/research/models/route';
 import { GET as analysis } from '../../../app/api/research/analysis/route';
 import { POST as analyze } from '../../../app/api/research/analyze/route';
+import { GET as collectorHealth } from '../../../app/api/research/collector-health/route';
 import * as repository from '../../../services/research/research.repository';
 import * as learning from '../../../services/research/learning.service';
+import { getCollectorHealth } from '../../../services/research/collectorHealth.service';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 
 jest.mock('server-only', () => ({}), { virtual: true });
@@ -24,6 +26,9 @@ jest.mock('../../../services/research/learning.service', () => ({
   getResearchModels: jest.fn(),
   getLearningStatus: jest.fn(),
   runLearningCycle: jest.fn(),
+}));
+jest.mock('../../../services/research/collectorHealth.service', () => ({
+  getCollectorHealth: jest.fn(),
 }));
 
 const now = Date.UTC(2026, 8, 9, 12);
@@ -95,6 +100,7 @@ describe('research App Router endpoints', () => {
     learning.getLearningStatus.mockResolvedValue({ active: null, candidate: null });
     learning.getResearchModels.mockResolvedValue({ active: null, candidate: null });
     learning.runLearningCycle.mockResolvedValue({ lastRun: { status: 'insufficient-data' } });
+    getCollectorHealth.mockResolvedValue({ status: 'unknown', collectors: [] });
   });
   afterEach(() => {
     process.env = originalEnvironment;
@@ -144,6 +150,7 @@ describe('research App Router endpoints', () => {
       ['export', exportData],
       ['models', models],
       ['analysis', analysis],
+      ['collector-health', collectorHealth],
     ]) {
       const response = await handler(request(name));
       expect(response.status).toBe(401);
@@ -152,6 +159,7 @@ describe('research App Router endpoints', () => {
     expect(repository.getResearchStatus).not.toHaveBeenCalled();
     expect(learning.getLearningStatus).not.toHaveBeenCalled();
     expect(learning.getResearchModels).not.toHaveBeenCalled();
+    expect(getCollectorHealth).not.toHaveBeenCalled();
   });
 
   test('returns no-store status and forwards evidence and forecast pagination', async () => {
@@ -206,6 +214,16 @@ describe('research App Router endpoints', () => {
     expect(learning.runLearningCycle).not.toHaveBeenCalled();
     expect(learning.getLearningStatus).not.toHaveBeenCalled();
     expect(learning.getResearchModels).toHaveBeenCalledTimes(1);
+  });
+
+  test('collector health polling is uncached and cannot trigger training or model analysis', async () => {
+    const response = await collectorHealth(request('collector-health'));
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ status: 'unknown', collectors: [] });
+    expect(getCollectorHealth).toHaveBeenCalledTimes(1);
+    expect(learning.runLearningCycle).not.toHaveBeenCalled();
+    expect(learning.getLearningStatus).not.toHaveBeenCalled();
+    expect(learning.getResearchModels).not.toHaveBeenCalled();
   });
 
   test('analysis uses only saved evidence and rejects client-supplied models or training rows', async () => {

@@ -3,7 +3,7 @@ import Select from 'react-select';
 import { formatTime } from '../utils/format.utils';
 import './KalshiEventControl.scss';
 
-const scheduleClassNames = {
+export const scheduleClassNames = {
   control: ({ isFocused, isDisabled }) =>
     'schedule-select-control' +
     (isFocused ? ' schedule-select-focused' : '') +

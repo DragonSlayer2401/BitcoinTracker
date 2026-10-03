@@ -6,6 +6,7 @@ const WEBSOCKET_URL = 'wss://ws-feed.exchange.coinbase.com';
 const CHANNELS = ['matches', 'heartbeat', 'ticker', 'level2_batch'];
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const MAXIMUM_MESSAGE_BYTES = 20_000_000;
+const MAXIMUM_RECENT_TICKERS = 2000;
 
 export function createCoinbaseStream({
   onUpdate = () => {},
@@ -27,12 +28,14 @@ export function createCoinbaseStream({
   let connectionAttemptAt = null;
   let isSubscribed = false;
   let ticker = null;
+  let recentTickers = [];
   let liquidity = book.getSnapshot(now());
 
   function clearMarket() {
     book.reset();
     trades.reset();
     ticker = null;
+    recentTickers = [];
     liquidity = book.getSnapshot(now());
     isSubscribed = false;
     connectedAt = null;
@@ -53,12 +56,16 @@ export function createCoinbaseStream({
     liquidity = book.getSnapshot(timestamp);
     const flow = trades.getSnapshot(timestamp, liquidity);
     const tradeQuality = trades.getQuality(timestamp);
-    const isTickerFresh =
-      ticker &&
-      timestamp >= ticker.receivedAt &&
-      timestamp - ticker.time <= 5000 &&
-      timestamp - ticker.receivedAt <= 5000 &&
-      ticker.time <= timestamp + 2000;
+    // A slightly leading exchange clock must not replace the last usable quote.
+    // Preserve its original timestamps and wait until both are at or before capture.
+    const eligibleTicker = recentTickers.findLast(
+      (quote) =>
+        quote.time <= timestamp &&
+        quote.receivedAt <= timestamp &&
+        timestamp - quote.time <= 5000 &&
+        timestamp - quote.receivedAt <= 5000,
+    );
+    const isTickerFresh = Boolean(eligibleTicker);
     const reason =
       transportStatus !== 'connected'
         ? transportReason
@@ -76,7 +83,7 @@ export function createCoinbaseStream({
     return {
       status:
         transportStatus === 'connected' ? (reason === null ? 'live' : 'warming') : transportStatus,
-      ticker: isTickerFresh && transportStatus === 'connected' ? { ...ticker } : null,
+      ticker: isTickerFresh && transportStatus === 'connected' ? { ...eligibleTicker } : null,
       quality: {
         available: reason === null,
         reason,
@@ -150,6 +157,8 @@ export function createCoinbaseStream({
       )
         throw new Error('Live price timestamps are delayed or out of order.');
       ticker = nextTicker;
+      recentTickers.push(nextTicker);
+      if (recentTickers.length > MAXIMUM_RECENT_TICKERS) recentTickers.shift();
     }
   }
 

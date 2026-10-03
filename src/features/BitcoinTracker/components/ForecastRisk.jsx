@@ -4,9 +4,11 @@ import useRiskTrend from '../hooks/useRiskTrend';
 import { formatPercent, formatPrice, formatTime } from '../utils/format.utils';
 import { getReversalObservations, getReversalRisk } from '../utils/reversalRisk.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
+import KalshiPurchaseValue from './KalshiPurchaseValue';
 
 export default function ForecastRisk({ forecast, fixedForecast, ticker, now, stream, conditions }) {
   const [show, setShow] = useState(false);
+  const [showPurchaseValue, setShowPurchaseValue] = useState(false);
   const risk = getReversalRisk({ forecast, fixedForecast, ticker, now });
   const usesKalshi = fixedForecast?.outcomeDefinition === KALSHI_OUTCOME_DEFINITION;
   const getOutcomeLabel = (side) => (side === 'above' ? 'Yes' : 'No');
@@ -20,8 +22,21 @@ export default function ForecastRisk({ forecast, fixedForecast, ticker, now, str
     now,
   });
   const hasFixedRisk = Number.isFinite(risk.fixedFailureProbability);
+  const hasSavedProbabilities =
+    [fixedForecast?.aboveProbability, fixedForecast?.belowProbability].every(
+      (probability) => Number.isFinite(probability) && probability >= 0 && probability <= 1,
+    ) && Math.abs(fixedForecast.aboveProbability + fixedForecast.belowProbability - 1) <= 0.000001;
+  const savedLossRisk =
+    hasFixedRisk && hasSavedProbabilities
+      ? fixedForecast[`${risk.fixedFailureSide}Probability`]
+      : null;
+  const riskChange = Number.isFinite(savedLossRisk)
+    ? Number(((risk.fixedFailureProbability - savedLossRisk) * 100).toFixed(1))
+    : null;
+  const changeLabel =
+    riskChange === null ? '' : ` · ${riskChange > 0 ? '+' : ''}${riskChange.toFixed(1)} pp`;
   const baseLabel = hasFixedRisk
-    ? `Fixed-call risk · ${formatPercent(risk.fixedFailureProbability)}`
+    ? `Fixed loss risk · ${formatPercent(risk.fixedFailureProbability)}${changeLabel}`
     : risk.available && Number.isFinite(risk.currentSideFlipProbability)
       ? `Reversal risk · ${formatPercent(risk.currentSideFlipProbability)}`
       : 'Forecast risk';
@@ -37,14 +52,18 @@ export default function ForecastRisk({ forecast, fixedForecast, ticker, now, str
         variant="link"
         size="sm"
         className="p-0 text-nowrap"
+        title={riskChange === null ? undefined : 'Percentage-point change from the saved loss risk'}
         onClick={() => setShow(true)}
-        aria-label={`${buttonLabel}, view estimated deadline risk`}
+        aria-label={`${buttonLabel}${riskChange === null ? '' : ' from capture'}, view estimated deadline risk`}
       >
         {buttonLabel}
       </Button>
       <Modal
         show={show}
-        onHide={() => setShow(false)}
+        onHide={() => {
+          setShow(false);
+          setShowPurchaseValue(false);
+        }}
         className="tracker-modal"
         centered
         scrollable
@@ -84,6 +103,22 @@ export default function ForecastRisk({ forecast, fixedForecast, ticker, now, str
                     </strong>{' '}
                     call.
                   </p>
+                  {riskChange !== null ? (
+                    <p className="small">
+                      Saved loss risk <strong>{formatPercent(savedLossRisk)}</strong> → current{' '}
+                      <strong>{formatPercent(risk.fixedFailureProbability)}</strong>.{' '}
+                      {riskChange === 0
+                        ? 'Unchanged at the displayed precision since capture.'
+                        : `${riskChange > 0 ? 'Increased' : 'Decreased'} by ${Math.abs(riskChange).toFixed(1)} percentage points since capture.`}{' '}
+                      This compares the same saved outcome using the current Yes/No estimate; the
+                      fixed prediction has not changed.
+                    </p>
+                  ) : (
+                    <p className="small text-secondary">
+                      The original saved probabilities are unavailable, so a change since capture
+                      cannot be calculated.
+                    </p>
+                  )}
                   <p className="small text-secondary">
                     {trend
                       ? Math.abs(trend.percentagePoints) < 1
@@ -97,7 +132,7 @@ export default function ForecastRisk({ forecast, fixedForecast, ticker, now, str
               )}
               <p className="small">
                 {usesKalshi
-                  ? `${risk.referenceLabel} ${formatPrice(risk.referencePrice)} is ${risk.currentSide} the saved target.`
+                  ? `${risk.referenceLabel} ${formatPrice(risk.referencePrice)} is ${risk.currentSide === 'above' ? 'at or above' : 'below'} the saved target after rounding to cents.`
                   : `Currently ${risk.currentSide} the saved target.`}
                 {risk.isAgainstFixedCall &&
                   (usesKalshi
@@ -157,9 +192,36 @@ export default function ForecastRisk({ forecast, fixedForecast, ticker, now, str
               ? 'A settlement average that rounds to the target counts as Yes.'
               : 'The model does not assign a separate probability to an exact-price tie.'}
           </p>
+          {usesKalshi && (
+            <div className="border-top mt-3 pt-3">
+              <Button
+                type="button"
+                variant="outline-secondary"
+                size="sm"
+                aria-expanded={showPurchaseValue}
+                onClick={() => setShowPurchaseValue((value) => !value)}
+              >
+                {showPurchaseValue ? 'Hide purchase value' : 'Compare purchase value'}
+              </Button>
+              {show && showPurchaseValue && (
+                <KalshiPurchaseValue
+                  contract={fixedForecast?.kalshiMarket}
+                  aboveProbability={risk.available ? risk.aboveProbability : null}
+                  now={now}
+                />
+              )}
+            </div>
+          )}
         </Modal.Body>
         <Modal.Footer>
-          <Button type="button" variant="outline-secondary" onClick={() => setShow(false)}>
+          <Button
+            type="button"
+            variant="outline-secondary"
+            onClick={() => {
+              setShow(false);
+              setShowPurchaseValue(false);
+            }}
+          >
             Close forecast risk
           </Button>
         </Modal.Footer>

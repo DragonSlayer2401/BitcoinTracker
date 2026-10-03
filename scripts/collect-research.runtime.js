@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +9,7 @@ import { createDerivativesStream } from '../src/services/derivatives/derivatives
 import { createKalshiBenchmarkStream } from '../src/services/kalshi/benchmarkStream/benchmarkStream.service';
 import { createResearchInputSnapshot } from '../src/features/BitcoinTracker/utils/researchExperiments.utils';
 import { collectForwardResearchLabels, getCollectorAnalysis } from './collect-research.analysis';
+import { createCollectorBackgroundTasks } from './collect-research.background';
 import {
   fetchCoinbaseCandles,
   fetchCoinbaseTicker,
@@ -17,6 +19,10 @@ import {
   getResearchDatabaseConfiguration,
 } from '../src/services/research/research.repository';
 import { createLearningService } from '../src/services/research/learning.service';
+import { createPaperTradingRepository } from '../src/services/research/paperTrading/paperTrading.repository';
+import { createPaperTradingService } from '../src/services/research/paperTrading/paperTrading.service';
+import { createTradingAdvisorRepository } from '../src/services/research/tradingAdvisor/tradingAdvisor.repository';
+import { createTradingAdvisorService } from '../src/services/research/tradingAdvisor/tradingAdvisor.service';
 import { getResearchForecast } from '../src/features/BitcoinTracker/utils/researchForecast.utils';
 import { getKalshiMarketConditions } from '../src/features/BitcoinTracker/utils/kalshi/marketConditions.utils';
 import {
@@ -30,6 +36,37 @@ import {
   fetchKalshiBenchmark,
 } from '../src/services/kalshi/kalshi.service';
 import { isKalshiContract } from '../src/features/BitcoinTracker/utils/kalshi/contract.utils';
+import {
+  COLLECTOR_HEARTBEAT_VERSION,
+  COLLECTOR_HEALTH_POLICY,
+  CURRENT_COLLECTOR_CODE_VERSION,
+  CURRENT_COLLECTOR_RESEARCH_VERSION,
+  COLLECTOR_FAILURE_MESSAGES,
+  getCollectorFailureCode,
+} from '../src/features/BitcoinTracker/utils/collectorHealth.utils';
+
+/** Stop waiting without starting a competing operation against the same state file or database. */
+export async function waitForCollectorTask(task, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      task,
+      new Promise((resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              Object.assign(new Error('Collector operation timed out.'), {
+                code: 'COLLECTOR_OPERATION_TIMEOUT',
+              }),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function getFreshStreamTicker(snapshot, now) {
   const ticker = snapshot?.ticker;
@@ -39,7 +76,7 @@ function getFreshStreamTicker(snapshot, now) {
     now - ticker.receivedAt <= 5000 &&
     Number.isFinite(ticker.time) &&
     now - ticker.time <= 5000 &&
-    ticker.time <= now + 2000
+    ticker.time <= now
     ? ticker
     : null;
 }
@@ -49,11 +86,19 @@ export function parseCollectorOptions(args, projectRoot = process.cwd()) {
     once: false,
     help: false,
     report: false,
+    paperTrading: false,
+    paperReport: false,
+    tradingAdvisor: false,
+    advisorReport: false,
     statePath: path.join(projectRoot, 'data/kalshi-collector-state.json'),
   };
   for (const argument of args) {
     if (argument === '--once') options.once = true;
     else if (argument === '--report') options.report = true;
+    else if (argument === '--paper-trading') options.paperTrading = true;
+    else if (argument === '--paper-report') options.paperReport = true;
+    else if (argument === '--trading-advisor') options.tradingAdvisor = true;
+    else if (argument === '--advisor-report') options.advisorReport = true;
     else if (argument === '--help') options.help = true;
     else if (argument.startsWith('--state-file=')) {
       const selected = path.resolve(projectRoot, argument.slice('--state-file='.length));
@@ -69,6 +114,18 @@ export function parseCollectorOptions(args, projectRoot = process.cwd()) {
       options.statePath = selected;
     } else throw new Error('Unknown collector option. Use --help for supported options.');
   }
+  if (
+    Number(options.once) +
+      Number(options.report) +
+      Number(options.paperReport) +
+      Number(options.advisorReport) >
+      1 ||
+    ((options.paperTrading || options.tradingAdvisor) &&
+      (options.once || options.report || options.paperReport || options.advisorReport))
+  )
+    throw new Error(
+      'Use --paper-trading and/or --trading-advisor for continuous collection, or a report option by itself.',
+    );
   return options;
 }
 
@@ -89,11 +146,33 @@ export async function runResearchCollector({
   now = Date.now,
   sleep = (milliseconds) => delay(milliseconds, undefined, { signal }),
   log = (message) => console.log(message),
+  operationTimeoutMs = 30_000,
+  shutdownTimeoutMs = 5000,
+  analyzeResearch = (options) => getCollectorAnalysis({ repository, ...options }),
+  updateResearchModels = (options) => learningService.runLearningCycle(options),
+  stopBackgroundTasks = async () => {},
+  paperTradingService = null,
+  tradingAdvisorService = null,
 }) {
   const releaseLock = await acquireCollectorLock(statePath);
   let stream;
   let futuresStream;
   let benchmarkStream;
+  const collectorId = randomUUID();
+  const startedAt = now();
+  let shutdownStatus = 'stopped';
+  let lastEvidenceAt = null;
+  let healthInputs = null;
+  let healthMarket = null;
+  let lastMarketQuoteAt = null;
+  let hasRunningHeartbeat = false;
+  let lastSuccessfulTickAt = null;
+  let lastFailureAt = null;
+  let failureCode = null;
+  let storageFailures = 0;
+  let nextStorageAttemptAt = 0;
+  let pendingStateAdvance = null;
+  const savedCandidatePredictions = new Map();
   const tasks = new Map();
   const warnings = new Map();
   const warn = (key, message) => {
@@ -117,21 +196,96 @@ export async function runResearchCollector({
     benchmark: -Infinity,
     labels: -Infinity,
     comparison: -Infinity,
+    health: -Infinity,
   };
   const refresh = (name, task, message) => {
     if (tasks.has(name)) return tasks.get(name);
     lastRefresh[name] = now();
     const pending = task()
       .then(() => warnings.delete(name))
-      .catch(() => warn(name, message))
+      .catch((error) => warn(name, typeof message === 'function' ? message(error) : message))
       .finally(() => tasks.delete(name));
     tasks.set(name, pending);
     return pending;
   };
+  const publishHeartbeat = (status) => {
+    if (!repository.writeCollectorHeartbeat) return Promise.resolve();
+    return refresh(
+      'health',
+      async () => {
+        const heartbeatAt = now();
+        const observed = (time) =>
+          Number.isSafeInteger(time) && time > 0 && time <= heartbeatAt ? time : null;
+        await repository.writeCollectorHeartbeat({
+          version: COLLECTOR_HEARTBEAT_VERSION,
+          collectorId,
+          codeVersion: CURRENT_COLLECTOR_CODE_VERSION,
+          researchVersion: CURRENT_COLLECTOR_RESEARCH_VERSION,
+          startedAt,
+          heartbeatAt,
+          status,
+          feeds: {
+            benchmarkAt: observed(healthInputs?.benchmark?.current?.time),
+            spotAt: observed(healthInputs?.ticker?.time),
+            futuresAt: observed(healthInputs?.derivatives?.quality?.lastTradeAt),
+            marketAt: observed(healthMarket?.receivedAt),
+          },
+          lastEvidenceAt,
+          progress: { lastSuccessfulTickAt, lastFailureAt, failureCode },
+          recording: {
+            loadedCandidateIds: (models.challengers?.candidates ?? []).map((model) => model.id),
+            savedCandidateIds: (models.challengers?.candidates ?? [])
+              .filter((model) => savedCandidatePredictions.has(model.id))
+              .map((model) => model.id),
+            lastPredictionAt: observed(Math.max(0, ...savedCandidatePredictions.values())),
+            lastMarketQuoteAt: observed(lastMarketQuoteAt),
+          },
+        });
+      },
+      'Collector health could not be saved; recording continues and the heartbeat will be retried.',
+    );
+  };
   try {
+    publishHeartbeat('starting');
     const store = await createCollectorStateStore({
       statePath,
-      persistRows: (rows) => repository.persistEvidenceRows(rows),
+      assertOwnership: releaseLock.assertOwned,
+      persistRows: async (rows) => {
+        const result = await repository.persistEvidenceRows(rows);
+        for (const row of rows) {
+          if (Number.isSafeInteger(row.recordedAt) && row.recordedAt > 0 && row.recordedAt <= now())
+            lastEvidenceAt = Math.max(lastEvidenceAt ?? 0, row.recordedAt);
+          if (row.event !== 'decision') continue;
+          for (const variant of Object.values(row.researchExperiment?.variants ?? {})) {
+            if (variant.available && variant.modelId)
+              savedCandidatePredictions.set(variant.modelId, row.recordedAt);
+          }
+          if (row.researchExperiment?.variants?.['market-blend']?.appliedMarket)
+            lastMarketQuoteAt = row.recordedAt;
+        }
+        const proofEventIds = rows
+          .filter((row) => row.event === 'decision')
+          .map((row) => row.eventId);
+        if (proofEventIds.length && learningService.enrollChallengerCandidates) {
+          // Enrollment only inspects committed evidence. Its failure must not turn a
+          // successful forecast write into a failed or reconstructed observation.
+          refresh(
+            'enrollment',
+            async () => {
+              await learningService.enrollChallengerCandidates({
+                now: now(),
+                collectorId,
+                codeVersion: CURRENT_COLLECTOR_CODE_VERSION,
+                researchVersion: CURRENT_COLLECTOR_RESEARCH_VERSION,
+                candidateIds: (models.challengers?.candidates ?? []).map((model) => model.id),
+                proofEventIds,
+              });
+            },
+            'New-model recording verification failed; normal forecasts continue and verification will retry at the next saved checkpoint.',
+          );
+        }
+        return result;
+      },
     });
     stream = createStream();
     stream.start();
@@ -139,46 +293,57 @@ export async function runResearchCollector({
     futuresStream.start();
     benchmarkStream = createBenchmarkStream();
     benchmarkStream.start();
-    await Promise.all([
-      refresh(
-        'ticker',
-        async () => {
-          restTicker = await loadTicker();
-        },
-        'Coinbase ticker is unavailable; waiting for a fresh quote.',
-      ),
-      refresh(
-        'candles',
-        async () => {
-          candles = await loadCandles();
-        },
-        'Coinbase candle history is unavailable; estimates will wait for valid history.',
-      ),
-      refresh(
-        'learning',
-        async () => {
-          models = await learningService.getLearningStatus();
-        },
-        'Model status is unavailable; the current pressure baseline will be used.',
-      ),
-      ...[
+    await waitForCollectorTask(
+      Promise.all([
         refresh(
-          'markets',
+          'ticker',
           async () => {
-            markets = (await loadMarkets()).markets;
+            restTicker = await loadTicker();
           },
-          'Kalshi markets are unavailable; research waits for official targets and deadlines.',
+          'Coinbase ticker is unavailable; waiting for a fresh quote.',
         ),
         refresh(
-          'benchmark',
+          'candles',
           async () => {
-            benchmark = await loadBenchmark();
-            benchmarkStream.seed(benchmark);
+            candles = await loadCandles();
           },
-          'The official benchmark is unavailable; forecasts identify Coinbase as a proxy.',
+          'Coinbase candle history is unavailable; estimates will wait for valid history.',
         ),
-      ],
-    ]);
+        refresh(
+          'learning',
+          async () => {
+            models = learningService.getResearchModels
+              ? await learningService.getResearchModels()
+              : await learningService.getLearningStatus();
+          },
+          'Model status is unavailable; the current pressure baseline will be used.',
+        ),
+        ...[
+          refresh(
+            'markets',
+            async () => {
+              markets = (await loadMarkets()).markets;
+            },
+            'Kalshi markets are unavailable; research waits for official targets and deadlines.',
+          ),
+          refresh(
+            'benchmark',
+            async () => {
+              benchmark = await loadBenchmark();
+              benchmarkStream.seed(benchmark);
+            },
+            'The official benchmark is unavailable; forecasts identify Coinbase as a proxy.',
+          ),
+        ],
+      ]),
+      operationTimeoutMs,
+    ).catch((error) => {
+      if (error.code !== 'COLLECTOR_OPERATION_TIMEOUT') throw error;
+      warn(
+        'startup',
+        'Some startup tasks are still waiting. Available feeds will continue; pending tasks are not duplicated.',
+      );
+    });
     const smokeDeadline = now() + 10_000;
     if (once) {
       while (!signal?.aborted && now() < smokeDeadline) {
@@ -194,9 +359,14 @@ export async function runResearchCollector({
     }
     while (!signal?.aborted) {
       const observedAt = now();
-      const snapshot = stream.getSnapshot(observedAt);
-      const streamTicker = getFreshStreamTicker(snapshot, observedAt);
-      const ticker = streamTicker ?? restTicker;
+      const receivedSnapshot = stream.getSnapshot(observedAt);
+      const streamTicker = getFreshStreamTicker(receivedSnapshot, observedAt);
+      // An exchange clock can lead local receipt. Exclude an ineligible ticker from
+      // both the calculation and its archived stream snapshot until that time arrives.
+      const snapshot = { ...receivedSnapshot, ticker: streamTicker };
+      const causalRestTicker =
+        restTicker?.time <= observedAt && restTicker?.receivedAt <= observedAt ? restTicker : null;
+      const ticker = streamTicker ?? causalRestTicker;
       const kalshiMarket = markets.find(
         (market) =>
           isKalshiContract(market) &&
@@ -211,7 +381,71 @@ export async function runResearchCollector({
         stream: snapshot,
         derivatives: futuresStream.getSnapshot(observedAt),
       };
+      healthInputs = inputs;
+      healthMarket = kalshiMarket;
+      if (
+        !hasRunningHeartbeat ||
+        observedAt - lastRefresh.health >= COLLECTOR_HEALTH_POLICY.heartbeatIntervalMs
+      ) {
+        publishHeartbeat('running');
+        hasRunningHeartbeat = true;
+      }
       const capturedModels = models;
+      // Both prospective experiments capture the same production forecast contract. Each owns
+      // its own cadence, immutable policy, account and execution evidence.
+      for (const [taskName, service] of [
+        ['paper-trading', paperTradingService],
+        ['trading-advisor', tradingAdvisorService],
+      ]) {
+        if (!service) continue;
+        refresh(
+          taskName,
+          () =>
+            service.advance({
+              market: kalshiMarket,
+              getForecast: () => {
+                const capturedInput = {
+                  ...inputs,
+                  kalshiMarket,
+                  target: kalshiMarket?.target,
+                  expiresAt: kalshiMarket?.expiresAt,
+                  now: observedAt,
+                  horizonMinutes: (kalshiMarket?.expiresAt - observedAt) / 60_000,
+                };
+                const estimate = getResearchForecast(
+                  capturedInput,
+                  capturedModels,
+                  kalshiMarket?.startsAt,
+                );
+                const researchInputSnapshot = createResearchInputSnapshot(
+                  capturedInput,
+                  capturedModels,
+                  kalshiMarket?.startsAt,
+                  estimate,
+                );
+                return {
+                  available: estimate.available && researchInputSnapshot.timing.replayable,
+                  reason: estimate.reason ?? null,
+                  aboveProbability: estimate.aboveProbability,
+                  capturedAt: observedAt,
+                  modelVersion: estimate.modelVersion,
+                  modelId: estimate.learning?.modelId ?? null,
+                  researchInputSnapshot,
+                };
+              },
+            }),
+          (error) => {
+            // Expose a known category for diagnosis, never raw database paths or network errors.
+            const category =
+              {
+                ADVISOR_RECORD_INVALID: 'adviser-record-invalid',
+                ADVISOR_STORAGE_CORRUPT: 'adviser-integrity-check',
+                ADVISOR_LEASE_LOST: 'adviser-lease-lost',
+              }[error?.code] ?? getCollectorFailureCode(error);
+            return `${taskName === 'trading-advisor' ? 'Trading adviser' : 'Paper trading'} could not advance (${category}). Saved decisions and capital reservations are retained; forecast research continues.`;
+          },
+        );
+      }
       if (
         once &&
         !getResearchForecast(
@@ -230,68 +464,97 @@ export async function runResearchCollector({
           'Collector smoke check could not obtain fresh, valid price and candle inputs with a supported contract.',
         );
       }
-      try {
-        const result = await store.advance({
-          now: observedAt,
-          ticker,
-          stream: inputs.stream,
-          markets: [...markets, ...settledMarkets.values()],
-          benchmark: inputs.benchmark,
-          getEstimate: ({ target, now: time, expiresAt, kalshiMarket: recordedMarket }) => {
-            const capturedInput = {
-              ...inputs,
+      if (observedAt >= nextStorageAttemptAt)
+        try {
+          pendingStateAdvance = store.advance({
+            now: observedAt,
+            ticker,
+            stream: inputs.stream,
+            markets: [...markets, ...settledMarkets.values()],
+            benchmark: inputs.benchmark,
+            getEstimate: ({
               target,
               now: time,
               expiresAt,
-              ...(recordedMarket ? { kalshiMarket: recordedMarket } : {}),
-              horizonMinutes: (expiresAt - time) / 60_000,
-            };
-            const estimate = getResearchForecast(
-              capturedInput,
-              capturedModels,
-              expiresAt - 900_000,
-            );
-            return {
-              ...estimate,
-              researchInputSnapshot: createResearchInputSnapshot(
+              kalshiMarket: recordedMarket,
+              kalshiQuote,
+            }) => {
+              const capturedInput = {
+                ...inputs,
+                target,
+                now: time,
+                expiresAt,
+                ...(recordedMarket ? { kalshiMarket: recordedMarket } : {}),
+                kalshiQuote,
+                horizonMinutes: (expiresAt - time) / 60_000,
+              };
+              const estimate = getResearchForecast(
                 capturedInput,
                 capturedModels,
                 expiresAt - 900_000,
-                estimate,
-              ),
-            };
-          },
-          getConditions: ({
-            target,
-            now: time,
-            expiresAt,
-            forecast,
-            kalshiMarket: recordedMarket,
-          }) =>
-            getKalshiMarketConditions({
-              ...inputs,
+              );
+              return {
+                ...estimate,
+                researchInputSnapshot: createResearchInputSnapshot(
+                  capturedInput,
+                  capturedModels,
+                  expiresAt - 900_000,
+                  estimate,
+                ),
+              };
+            },
+            getConditions: ({
               target,
               now: time,
-              horizonMinutes: (expiresAt - time) / 60_000,
+              expiresAt,
               forecast,
-              ...(recordedMarket ? { kalshiMarket: recordedMarket } : {}),
-            }),
-        });
-        warnings.delete('storage');
-        const status = `${result.status.phase}:${result.status.expiresAt ?? result.status.nextStartAt}`;
-        if (status !== lastStatus || result.rowsWritten) {
-          log(
-            `Research ${result.status.phase}; ${result.rowsWritten} event(s) saved. ${result.status.nextStartAt ? `Next contract boundary ${new Date(result.status.nextStartAt).toISOString()}.` : 'Waiting for an official Kalshi contract.'}`,
+              kalshiMarket: recordedMarket,
+            }) =>
+              getKalshiMarketConditions({
+                ...inputs,
+                target,
+                now: time,
+                horizonMinutes: (expiresAt - time) / 60_000,
+                forecast,
+                ...(recordedMarket ? { kalshiMarket: recordedMarket } : {}),
+              }),
+          });
+          const result = await waitForCollectorTask(pendingStateAdvance, operationTimeoutMs);
+          pendingStateAdvance = null;
+          lastSuccessfulTickAt = now();
+          failureCode = null;
+          storageFailures = 0;
+          nextStorageAttemptAt = 0;
+          warnings.delete('storage');
+          const status = `${result.status.phase}:${result.status.expiresAt ?? result.status.nextStartAt}`;
+          if (status !== lastStatus || result.rowsWritten) {
+            log(
+              `Research ${result.status.phase}; ${result.rowsWritten} event(s) saved. ${result.status.nextStartAt ? `Next contract boundary ${new Date(result.status.nextStartAt).toISOString()}.` : 'Waiting for an official Kalshi contract.'}`,
+            );
+            lastStatus = status;
+          }
+        } catch (error) {
+          if (error.code !== 'COLLECTOR_OPERATION_TIMEOUT') pendingStateAdvance = null;
+          lastFailureAt = now();
+          failureCode = getCollectorFailureCode(error);
+          if (
+            once ||
+            [
+              'COLLECTOR_OPERATION_TIMEOUT',
+              'COLLECTOR_STATE_INVALID',
+              'COLLECTOR_LOCK_LOST',
+            ].includes(error.code)
+          )
+            throw error;
+          storageFailures++;
+          // Keep retries within a checkpoint's five-second grace, using only the next tick's data.
+          nextStorageAttemptAt =
+            now() + Math.min(5000, 1000 * 2 ** Math.min(storageFailures - 1, 3));
+          warn(
+            'storage',
+            `Research recording failed (${failureCode}). ${COLLECTOR_FAILURE_MESSAGES[failureCode]} No replacement forecast is invented.`,
           );
-          lastStatus = status;
         }
-      } catch (error) {
-        if (once) throw error;
-        warn(
-          'storage',
-          'Research storage failed. Original pending events are retained and will be retried; no replacement forecast is invented.',
-        );
-      }
       if (once) {
         await collectForwardResearchLabels({
           repository,
@@ -299,7 +562,7 @@ export async function runResearchCollector({
           now: observedAt,
           statePath,
         });
-        const analysis = await getCollectorAnalysis({ repository, now: observedAt });
+        const analysis = await analyzeResearch({ now: observedAt });
         await writeCollectorState(`${statePath}.comparison.json`, analysis);
         const status = await repository.getResearchStatus();
         log(
@@ -415,7 +678,7 @@ export async function runResearchCollector({
         refresh(
           'comparison',
           async () => {
-            const analysis = await getCollectorAnalysis({ repository, now: now() });
+            const analysis = await analyzeResearch({ now: now() });
             await writeCollectorState(`${statePath}.comparison.json`, analysis);
             log(
               `Research comparisons updated; replay ${analysis.replay.matched} matched, ${analysis.replay.failed} failed; forward labels ${analysis.forwardLabels.observed} observed / ${analysis.forwardLabels.missing} missing. Report: ${statePath}.comparison.json`,
@@ -428,19 +691,53 @@ export async function runResearchCollector({
         refresh(
           'learning',
           async () => {
-            models = await learningService.runLearningCycle({ now: now() });
+            const report = await updateResearchModels({ now: now() });
+            // Reports contain outcome statistics, not forecasting inputs. Snapshot only
+            // frozen artifacts so collector and browser use the same compact contract.
+            models = {
+              active: report.active,
+              candidate: report.candidate,
+              earlyCandidate: report.earlyCandidate,
+              challengers: {
+                active: report.challengers?.active ?? null,
+                candidates: report.challengers?.candidates ?? [],
+              },
+            };
           },
           'Research analysis could not complete; the previously loaded model remains in use.',
         );
       }
       await sleep(1000);
     }
+  } catch (error) {
+    shutdownStatus = signal?.aborted ? 'stopped' : 'error';
+    throw error;
   } finally {
     benchmarkStream?.stop();
     futuresStream?.stop();
     stream?.stop();
-    await Promise.allSettled([...tasks.values()]);
-    await releaseLock();
+    let canReleaseLock = true;
+    try {
+      await waitForCollectorTask(stopBackgroundTasks(), shutdownTimeoutMs);
+      await waitForCollectorTask(
+        Promise.allSettled([
+          ...tasks.values(),
+          ...(pendingStateAdvance ? [pendingStateAdvance] : []),
+        ]),
+        shutdownTimeoutMs,
+      );
+      await waitForCollectorTask(publishHeartbeat(shutdownStatus), shutdownTimeoutMs);
+      if (paperTradingService)
+        await waitForCollectorTask(paperTradingService.stop(shutdownStatus), shutdownTimeoutMs);
+      if (tradingAdvisorService)
+        await waitForCollectorTask(tradingAdvisorService.stop(shutdownStatus), shutdownTimeoutMs);
+    } catch {
+      canReleaseLock = false;
+      log(
+        'Collector shutdown is waiting on an unfinished operation. Its state lock was retained; stop this process before removing only its lock file.',
+      );
+    }
+    if (canReleaseLock) await releaseLock();
   }
 }
 
@@ -448,7 +745,7 @@ export async function runCollectorCommand(args) {
   const options = parseCollectorOptions(args);
   if (options.help) {
     console.log(
-      'Usage: npm run research:collect -- [--once | --report] [--state-file=data/kalshi-collector-state.json]\nRequires Node 24. Records real Kalshi 12/9/6/3/1-minute checkpoints, paired variants, replay inputs, forward BRTI labels and official results. --once checks one current recorder step and local comparisons; it does not imply a completed outcome. --report analyzes saved comparisons and replays the latest 100 captured inputs, without opening market feeds or training models.',
+      'Usage: npm run research:collect -- [--once | --report | --paper-report | --advisor-report | --paper-trading --trading-advisor] [--state-file=data/kalshi-collector-state.json]\nRequires Node 24. Records real Kalshi 12/9/6/3/1-minute checkpoints, paired variants, replay inputs, forward BRTI labels and official results. --once checks one current recorder step and local comparisons; it does not imply a completed outcome. --report analyzes saved comparisons and replays the latest 100 captured inputs, without opening market feeds or training models. --paper-trading records the original entry-and-hold experiment. --trading-advisor records position-aware buy/hold/sell advice and delayed simulated execution in a separate $100 account; these two collection flags may be combined. --paper-report and --advisor-report print their respective saved results without market requests, fitting, or starting collection.',
     );
     return;
   }
@@ -457,12 +754,29 @@ export async function runCollectorCommand(args) {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   let client;
+  let background;
   try {
     const configuration = getResearchDatabaseConfiguration();
     if (configuration.mode === 'local-database')
       await mkdir(path.dirname(fileURLToPath(configuration.url)), { recursive: true });
     client = createClient(configuration);
     const repository = createResearchRepository({ client, mode: configuration.mode });
+    const paperTradingService =
+      options.paperTrading || options.paperReport
+        ? createPaperTradingService({ repository: createPaperTradingRepository({ client }) })
+        : null;
+    const tradingAdvisorService =
+      options.tradingAdvisor || options.advisorReport
+        ? createTradingAdvisorService({ repository: createTradingAdvisorRepository({ client }) })
+        : null;
+    if (options.advisorReport) {
+      console.log(JSON.stringify(await tradingAdvisorService.getReport(), null, 2));
+      return;
+    }
+    if (options.paperReport) {
+      console.log(JSON.stringify(await paperTradingService.getReport(), null, 2));
+      return;
+    }
     if (options.report) {
       const analysis = await getCollectorAnalysis({
         repository,
@@ -473,11 +787,17 @@ export async function runCollectorCommand(args) {
       if (analysis.replay.failed) process.exitCode = 1;
       return;
     }
+    background = createCollectorBackgroundTasks();
     await runResearchCollector({
       ...options,
       repository,
       learningService: createLearningService(repository),
       signal: controller.signal,
+      analyzeResearch: () => background.run('analysis'),
+      updateResearchModels: () => background.run('learning'),
+      stopBackgroundTasks: () => background.close(),
+      paperTradingService,
+      tradingAdvisorService,
     });
   } catch (error) {
     if (!controller.signal.aborted) {
@@ -485,6 +805,7 @@ export async function runCollectorCommand(args) {
       process.exitCode = 1;
     }
   } finally {
+    await background?.close();
     client?.close();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);

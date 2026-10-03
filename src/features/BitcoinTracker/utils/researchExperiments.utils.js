@@ -1,13 +1,9 @@
 import { getResearchForecast } from './researchForecast.utils';
+import { RESEARCH_EXPERIMENT_V5, getResearchVariantNames } from './researchVariantConfig.utils';
 
-export const RESEARCH_EXPERIMENT_VERSION = 'kalshi-ablation-v1';
+export const RESEARCH_EXPERIMENT_VERSION = RESEARCH_EXPERIMENT_V5;
 export const RESEARCH_INPUT_SNAPSHOT_VERSION = 'kalshi-input-replay-v1';
-export const RESEARCH_VARIANT_NAMES = Object.freeze([
-  'settlement-only',
-  'spot-only',
-  'futures-only',
-  'combined',
-]);
+export const RESEARCH_VARIANT_NAMES = getResearchVariantNames(RESEARCH_EXPERIMENT_VERSION);
 
 const observationTimes = new Set([
   'time',
@@ -44,6 +40,9 @@ const modelTimes = new Set([
   'activatedAt',
   'retiredAt',
   'evaluatedAt',
+  'startedAt',
+  'primaryCutoffAt',
+  'cutoffAt',
 ]);
 const outcomeFields = new Set([
   'outcome',
@@ -57,16 +56,26 @@ const outcomeFields = new Set([
 ]);
 const validTime = (value) => Number.isSafeInteger(value) && value >= 0;
 
-function getCanonicalValue(value) {
-  if (Array.isArray(value)) return value.map(getCanonicalValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, getCanonicalValue(value[key])]),
+function hasMatchingReplayValues(actual, expected) {
+  if (typeof actual !== typeof expected) return false;
+  if (typeof actual === 'number') {
+    // Browser and Node math can differ in their last floating-point digits.
+    // Compare without rounding or changing either original prediction.
+    return (
+      Number.isFinite(actual) && Number.isFinite(expected) && Math.abs(actual - expected) <= 1e-12
     );
   }
-  return value;
+  if (actual === expected) return true;
+  if (!actual || !expected || typeof actual !== 'object') return false;
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+  if (Array.isArray(actual) && actual.length !== expected.length) return false;
+  const keys = Object.keys(actual);
+  return (
+    keys.length === Object.keys(expected).length &&
+    keys.every(
+      (key) => Object.hasOwn(expected, key) && hasMatchingReplayValues(actual[key], expected[key]),
+    )
+  );
 }
 
 function getTimingAssessment(input, models, capturedAt, windowStartAt) {
@@ -103,6 +112,7 @@ function getTimingAssessment(input, models, capturedAt, windowStartAt) {
   })) {
     inspect(model, `models.${name}`, modelTimes, false);
   }
+  inspect(models?.challengers, 'models.challengers', modelTimes, false);
 
   if (input?.ticker && !validTime(input.ticker.receivedAt))
     limitations.push('The spot quote has no local receipt timestamp.');
@@ -171,7 +181,7 @@ export function replayResearchInputSnapshot(snapshot) {
   if (
     snapshot?.version !== RESEARCH_INPUT_SNAPSHOT_VERSION ||
     !snapshot.input ||
-    snapshot.expectedExperiment?.version !== RESEARCH_EXPERIMENT_VERSION ||
+    !getResearchVariantNames(snapshot.expectedExperiment?.version).length ||
     snapshot.expectedExperiment.capturedAt !== snapshot.capturedAt
   ) {
     throw new Error('Unsupported or incomplete research input snapshot.');
@@ -187,11 +197,11 @@ export function replayResearchInputSnapshot(snapshot) {
       `Research snapshot cannot be replayed safely: ${timing.errors.join(' ') || snapshot.timing?.errors?.join(' ') || 'Capture validation failed.'}`,
     );
   }
-  const forecast = getResearchForecast(snapshot.input, snapshot.models, snapshot.windowStartAt);
-  if (
-    JSON.stringify(getCanonicalValue(forecast.researchExperiment)) !==
-    JSON.stringify(getCanonicalValue(snapshot.expectedExperiment))
-  ) {
+  // Replay uses the captured experiment generation, never today's expanded variant set.
+  const forecast = getResearchForecast(snapshot.input, snapshot.models, snapshot.windowStartAt, {
+    researchVersion: snapshot.expectedExperiment.version,
+  });
+  if (!hasMatchingReplayValues(forecast.researchExperiment, snapshot.expectedExperiment)) {
     throw new Error('Research replay differs from the saved variants or production prediction.');
   }
   return forecast;

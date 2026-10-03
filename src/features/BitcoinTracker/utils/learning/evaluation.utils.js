@@ -263,14 +263,29 @@ export function scoreLearningRows(rows) {
   const score = scoreProbabilities(rows, 0.5);
   const directional = rows.filter((row) => row.probability !== 0.5);
   const reversals = rows.filter(
-    (row) => row.currentSide !== 0.5 && row.currentSide !== row.outcome,
+    (row) => [0, 1].includes(row.currentSide) && row.currentSide !== row.outcome,
   );
   const alarms = rows.filter(
     (row) =>
-      row.currentSide !== 0.5 &&
+      [0, 1].includes(row.currentSide) &&
       row.probability !== 0.5 &&
       Number(row.probability > 0.5) !== row.currentSide,
   );
+  const reversalsCaught = reversals.filter(
+    (row) => row.probability !== 0.5 && Number(row.probability > 0.5) === row.outcome,
+  ).length;
+  const falseReversalWarnings = alarms.filter(
+    (row) => Number(row.probability > 0.5) !== row.outcome,
+  ).length;
+  // Compare only matching directional calls. Neutral forecasts must not change one
+  // side's denominator while leaving the other side's accuracy untouched.
+  const matchedDirectional = directional.filter((row) => [0, 1].includes(row.currentSide));
+  const modelCorrect = matchedDirectional.filter(
+    (row) => Number(row.probability > 0.5) === row.outcome,
+  ).length;
+  const currentSideCorrect = matchedDirectional.filter(
+    (row) => row.currentSide === row.outcome,
+  ).length;
   return {
     ...score,
     // Exact 50/50 is a published neutral estimate, not a directional correct/incorrect call.
@@ -289,14 +304,20 @@ export function scoreLearningRows(rows) {
       : null,
     reversals: reversals.length,
     reversalAlerts: alarms.length,
-    reversalRecall: reversals.length
-      ? reversals.filter(
-          (row) => row.probability !== 0.5 && Number(row.probability > 0.5) === row.outcome,
-        ).length / reversals.length
-      : null,
-    reversalFalseAlarmRate: alarms.length
-      ? alarms.filter((row) => Number(row.probability > 0.5) !== row.outcome).length / alarms.length
-      : null,
+    reversalsCaught,
+    falseReversalWarnings,
+    reversalRecall: reversals.length ? reversalsCaught / reversals.length : null,
+    reversalFalseAlarmRate: alarms.length ? falseReversalWarnings / alarms.length : null,
+    currentSideComparison: {
+      examples: matchedDirectional.length,
+      modelCorrect,
+      currentSideCorrect,
+      modelAccuracy: matchedDirectional.length ? modelCorrect / matchedDirectional.length : null,
+      currentSideAccuracy: matchedDirectional.length
+        ? currentSideCorrect / matchedDirectional.length
+        : null,
+      additionalCorrect: matchedDirectional.length ? modelCorrect - currentSideCorrect : null,
+    },
     currentSideAccuracy: rows.length
       ? rows.reduce(
           (sum, row) =>
@@ -352,6 +373,20 @@ export function analyzeForecastEvidence(events, now = Date.now()) {
       matchedModel: scoreLearningRows(matchedMarketRows),
     },
     byHorizon: countsByHorizon,
+    byCheckpoint: [12, 9, 6, 3, 1].map((checkpointMinutes) => ({
+      checkpointMinutes,
+      label: `${checkpointMinutes} minute${checkpointMinutes === 1 ? '' : 's'} remaining`,
+      ...scoreLearningRows(
+        getIndependentRows(
+          reportRows.filter(
+            (row) =>
+              row.decision.checkpointMinutes === checkpointMinutes &&
+              row.horizonMinutes <= checkpointMinutes &&
+              row.horizonMinutes >= checkpointMinutes - 5 / 60 - 1e-9,
+          ),
+        ),
+      ),
+    })),
     byInputSource: inputPipelines.map((pipeline) => ({
       ...pipeline,
       ...scoreLearningRows(

@@ -305,6 +305,161 @@ describe('trading chart options', () => {
   });
 
   test.each(['line', 'candles'])(
+    '%s keeps a live price marker separate from observed prices and forming candles',
+    (view) => {
+      const input = optionsFor({
+        view,
+        candleMinutes: 5,
+        candles: [...candles.slice(0, -1), { ...candles.at(-1), isPartial: true }],
+      });
+      const baseline = getPriceChartOption(input).option;
+      const currentReading = { time: NOW, price: 50_234.56 };
+      const option = getPriceChartOption({
+        ...input,
+        currentReading,
+        currentPriceStatus: 'live',
+      }).option;
+      const mark = option.series[0].markLine.data.find(
+        (item) => item.name === 'Current BRTI price',
+      );
+      expect(mark).toMatchObject({
+        yAxis: currentReading.price,
+        lineStyle: { color: '#2563eb', type: 'dashed' },
+        label: {
+          show: true,
+          position: 'end',
+          formatter: '$50,234.56',
+          color: '#ffffff',
+          backgroundColor: '#2563eb',
+          borderColor: '#2563eb',
+        },
+      });
+      expect(option.yAxis[0].min).toBeLessThan(currentReading.price);
+      expect(option.yAxis[0].max).toBeGreaterThan(currentReading.price);
+      expect(option.series[0].data).toEqual(baseline.series[0].data);
+
+      const next = getPriceChartOption({
+        ...input,
+        endTime: NOW + 1000,
+        currentReading: { time: NOW + 1000, price: 50_250.12 },
+        currentPriceStatus: 'live',
+      }).option;
+      expect(next.series[0].markLine.data.find((item) => item.name === mark.name)).toMatchObject({
+        yAxis: 50_250.12,
+        label: { formatter: '$50,250.12', backgroundColor: '#2563eb' },
+      });
+      expect(next.series[0].data).toEqual(baseline.series[0].data);
+      expect(next.dataZoom[0]).toEqual(option.dataZoom[0]);
+    },
+  );
+
+  test.each(['line', 'candles'])(
+    '%s historical zoom retains the current price box without moving time bounds or indicator scales',
+    (view) => {
+      const zoomRange = { startTime: NOW - 18 * MINUTE, endTime: NOW - 15 * MINUTE };
+      const input = optionsFor({
+        view,
+        zoomRange,
+        showMacd: true,
+        showRsi: true,
+        chartHeight: 240,
+      });
+      const baseline = getPriceChartOption(input).option;
+      const option = getPriceChartOption({
+        ...input,
+        currentReading: { time: NOW, price: 50_234.56 },
+        currentPriceStatus: 'live',
+      }).option;
+      expect(baseline.yAxis[0].max).toBeLessThan(50_234.56);
+      expect(option.yAxis[0].max).toBeGreaterThan(50_234.56);
+      expect(option.yAxis[0].min).toBeLessThan(50_234.56);
+      expect(option.dataZoom[0]).toEqual(baseline.dataZoom[0]);
+      expect(option.dataZoom[0]).toMatchObject({
+        startValue: zoomRange.startTime,
+        endValue: zoomRange.endTime,
+      });
+      const getAxisBounds = (axes) =>
+        axes.map(({ min, max, gridIndex }) => ({ min, max, gridIndex }));
+      expect(getAxisBounds(option.xAxis)).toEqual(getAxisBounds(baseline.xAxis));
+      expect(getAxisBounds(option.yAxis.slice(1))).toEqual(getAxisBounds(baseline.yAxis.slice(1)));
+      expect(option.series[0].data).toEqual(baseline.series[0].data);
+      for (const id of ['macd-histogram', 'macd', 'macd-signal', 'rsi']) {
+        expect(getSeries(option, id).data).toEqual(getSeries(baseline, id).data);
+        expect(getSeries(option, id).markLine?.data).not.toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: 'Current BRTI price' })]),
+        );
+      }
+      const chart = init(null, null, { renderer: 'svg', ssr: true, width: 720, height: 240 });
+      try {
+        chart.setOption(option);
+        const svg = chart.renderToSVGString();
+        expect(svg).toMatch(/<text\b[^>]*fill="#ffffff"[^>]*>\$50,234\.56<\/text>/);
+        const shapes = [...svg.matchAll(/<(?:path|rect)\b[^>]*>/g)].map((match) => match[0]);
+        expect(
+          shapes.some(
+            (shape) => shape.includes('fill="#2563eb"') && shape.includes('stroke="#2563eb"'),
+          ),
+        ).toBe(true);
+      } finally {
+        chart.dispose();
+      }
+    },
+  );
+
+  test('labels a stale price as the last observation and renders a muted filled box', () => {
+    const option = getPriceChartOption(
+      optionsFor({
+        currentReading: { time: NOW - MINUTE, price: 50_234.56 },
+        currentPriceStatus: 'stale',
+        chartHeight: 240,
+      }),
+    ).option;
+    expect(option.series[0].markLine.data).toContainEqual(
+      expect.objectContaining({
+        name: 'Last observed BRTI price',
+        yAxis: 50_234.56,
+        lineStyle: expect.objectContaining({ color: '#5b665e', type: 'dashed' }),
+        label: expect.objectContaining({
+          formatter: '$50,234.56',
+          position: 'end',
+          backgroundColor: '#5b665e',
+          color: '#ffffff',
+        }),
+      }),
+    );
+    expect(option.series[0].markLine.data.some((item) => item.name === 'Current BRTI price')).toBe(
+      false,
+    );
+    const chart = init(null, null, { renderer: 'svg', ssr: true, width: 720, height: 240 });
+    try {
+      chart.setOption(option);
+      const svg = chart.renderToSVGString();
+      expect(svg).toContain('$50,234.56');
+      expect(svg).toMatch(/<(?:path|rect)\b[^>]*fill="#5b665e"[^>]*stroke="#5b665e"/);
+    } finally {
+      chart.dispose();
+    }
+  });
+
+  test('ignores absent, invalid and future current readings without changing the price scale', () => {
+    const baseline = getPriceChartOption(optionsFor()).option;
+    const invalidReadings = [
+      null,
+      {},
+      ...[0, -1, NaN, Infinity, 1_000_000_001].map((price) => ({ price, time: NOW })),
+      ...[0, -1, NaN, Infinity, NOW + 1].map((time) => ({ price: 50_234.56, time })),
+    ];
+    for (const currentReading of invalidReadings) {
+      const option = getPriceChartOption(
+        optionsFor({ currentReading, currentPriceStatus: 'live' }),
+      ).option;
+      expect(option.series[0].markLine.data).toEqual(baseline.series[0].markLine.data);
+      expect(option.yAxis[0].min).toBe(baseline.yAxis[0].min);
+      expect(option.yAxis[0].max).toBe(baseline.yAxis[0].max);
+    }
+  });
+
+  test.each(['line', 'candles'])(
     '%s horizontal drawings show their exact price in a matching right-axis box across zoom',
     (view) => {
       const drawing = {

@@ -176,6 +176,7 @@ describe('prospective forecast evidence', () => {
       expect.objectContaining({ target: 49750 }),
       undefined,
       NOW,
+      { researchVersion: undefined },
     );
   });
 
