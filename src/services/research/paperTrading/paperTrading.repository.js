@@ -1,6 +1,10 @@
 import 'server-only';
 import { createHash } from 'node:crypto';
-import { getResearchWriteTransaction, runResearchSchemaStatements } from '../research.connection';
+import {
+  getResearchReadTransaction,
+  getResearchWriteTransaction,
+  runResearchSchemaStatements,
+} from '../research.connection';
 import {
   ResearchDataError,
   getCanonicalResearchJson,
@@ -199,9 +203,11 @@ export function createPaperTradingRepository({ client, now = Date.now }) {
   async function readState(policyId, options) {
     if (!isResearchIdentifier(policyId)) reject('A paper policy identity is required.');
     await initialize();
-    const transaction = await client.transaction('read');
+    const transaction = await getResearchReadTransaction(client);
     try {
-      return await readStateFrom(transaction, policyId, options);
+      const state = await readStateFrom(transaction, policyId, options);
+      await transaction.commit();
+      return state;
     } finally {
       transaction.close();
     }

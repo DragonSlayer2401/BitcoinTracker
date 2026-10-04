@@ -73,6 +73,11 @@ Current release minimums are:
 - At least 30 actual candidate uses on the test set.
 - 120 subsequent shadow windows, including at least 60 candidate uses.
 
+The shadow cohort consists of the first 120 eligible independent decisions, selected before
+checking their outcomes. Missing or delayed outcomes keep their original places; later contracts
+and alternate checkpoints cannot replace them. An explicitly unobserved outcome or conflicting
+record fails the cohort. An incomplete or unusable label leaves validation pending.
+
 These are evidence requirements, not promises that this amount of data is sufficient to discover an edge. Candidates must improve accuracy over the current model and the current-side benchmark, reduce probability error, and avoid worse calibration. When at least 30 matched Kalshi quote observations exist, performance is also compared against their contemporaneous YES bid/ask midpoint. Prospective comparisons and uncertainty checks must pass before activation.
 
 Artifacts include their supported horizon, target-distance and feature-availability domain. Unsupported inputs fall back to the settlement model. Conditional final-minute forecasts with observed average samples also retain the settlement model instead of applying a classifier trained for a different information state.

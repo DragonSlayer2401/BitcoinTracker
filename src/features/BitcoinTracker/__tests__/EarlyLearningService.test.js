@@ -9,6 +9,7 @@ import {
   evaluateEarlyActiveModel,
 } from '../utils/learning/earlyTraining.utils';
 import { EARLY_MODEL_VERSION } from '../utils/learning/earlyModel.utils';
+import { evaluateFullActiveModel } from '../utils/learning/fullModelMonitoring.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '../utils/kalshi/contract.utils';
 
 jest.mock('server-only', () => ({}), { virtual: true });
@@ -75,6 +76,10 @@ jest.mock('../utils/learning/earlyTraining.utils', () => ({
   trainEarlyCandidate: jest.fn(),
   evaluateEarlyShadowCandidate: jest.fn(),
   evaluateEarlyActiveModel: jest.fn(),
+}));
+jest.mock('../utils/learning/fullModelMonitoring.utils', () => ({
+  evaluateFullActiveModel: jest.fn(),
+  FULL_MODEL_MONITORING_REQUIREMENTS: { minimumWindows: 120, minimumModelUses: 60 },
 }));
 
 const start = Date.UTC(2026, 8, 11);
@@ -169,6 +174,10 @@ beforeEach(() => {
   evaluateEarlyActiveModel.mockReturnValue({
     status: 'monitoring',
     reason: 'Collecting later outcomes.',
+  });
+  evaluateFullActiveModel.mockReturnValue({
+    status: 'monitoring',
+    reason: 'Collecting later full-model outcomes.',
   });
 });
 
@@ -368,6 +377,74 @@ test('an already active full model cannot be replaced by early influence or trig
   expect(status.early.candidate).toBeNull();
   expect(trainEarlyCandidate).not.toHaveBeenCalled();
   expect(store.activateModelArtifact).not.toHaveBeenCalled();
+});
+
+test('read-only responses suppress a degraded full model before durable retirement', async () => {
+  const full = model('full', 'outcome-logistic-kalshi-v2');
+  const store = createStore(rows(87), [full], {
+    ...full,
+    activation: { modelId: full.id, activatedAt: now - 1000 },
+  });
+  evaluateFullActiveModel.mockReturnValue({
+    status: 'disabled',
+    reason: 'Full model deteriorated.',
+  });
+  const service = createLearningService(store);
+  expect((await service.getResearchModels()).active).toBeNull();
+  const status = await service.getLearningStatus({ now });
+  expect(status.active).toBeNull();
+  expect(status.full).toMatchObject({ active: null, monitoring: { status: 'disabled' } });
+  expect(status.models[0].active).toBe(false);
+  expect(store.retireModelArtifact).not.toHaveBeenCalled();
+  expect(store.activateModelArtifact).not.toHaveBeenCalled();
+});
+
+test('full deterioration retires only the active artifact and survives a service restart', async () => {
+  const full = model('full', 'outcome-logistic-kalshi-v2');
+  const replacement = model('replacement', 'outcome-logistic-kalshi-v2', start + 60_000);
+  const store = createStore(rows(87), [full, replacement], {
+    ...full,
+    activation: { modelId: full.id, activatedAt: now - 1000 },
+  });
+  evaluateFullActiveModel.mockReturnValue({
+    status: 'disabled',
+    reason: 'Full model deteriorated.',
+  });
+  evaluateShadowCandidate.mockReturnValue(passedShadow(replacement));
+  const status = await createLearningService(store).runLearningCycle({ now });
+  expect(status.lastRun).toMatchObject({ status: 'disabled', modelId: full.id });
+  expect(status.full.monitoring.status).toBe('disabled');
+  expect(store.retireModelArtifact).toHaveBeenCalledWith(full.id, {
+    retiredAt: now,
+    reason: 'Full model deteriorated.',
+  });
+  expect((await createLearningService(store).getResearchModels()).active).toBeNull();
+  expect(store.activateModelArtifact).not.toHaveBeenCalled();
+  expect(trainOutcomeCandidate).not.toHaveBeenCalled();
+  expect(trainEarlyCandidate).not.toHaveBeenCalled();
+  expect(mockChallengerService.runChallengerCycle).not.toHaveBeenCalled();
+});
+
+test('a failed full retirement cannot proceed to replacement activation or retraining', async () => {
+  const full = model('full', 'outcome-logistic-kalshi-v2');
+  const replacement = model('replacement', 'outcome-logistic-kalshi-v2', start + 60_000);
+  const store = createStore(rows(87), [full, replacement], {
+    ...full,
+    activation: { modelId: full.id, activatedAt: now - 1000 },
+  });
+  evaluateFullActiveModel.mockReturnValue({
+    status: 'disabled',
+    reason: 'Full model deteriorated.',
+  });
+  evaluateShadowCandidate.mockReturnValue(passedShadow(replacement));
+  store.retireModelArtifact.mockRejectedValueOnce(new Error('Retirement write failed.'));
+  const service = createLearningService(store);
+  await expect(service.runLearningCycle({ now })).rejects.toThrow('Retirement write failed.');
+  expect((await service.getResearchModels()).active).toBeNull();
+  expect(store.releaseLearningLease).toHaveBeenCalledTimes(1);
+  expect(store.activateModelArtifact).not.toHaveBeenCalled();
+  expect(trainOutcomeCandidate).not.toHaveBeenCalled();
+  expect(trainEarlyCandidate).not.toHaveBeenCalled();
 });
 
 test('passes the existing lease to the challenger cycle and releases it afterward', async () => {

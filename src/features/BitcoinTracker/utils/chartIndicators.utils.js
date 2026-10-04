@@ -10,6 +10,9 @@ export const CHART_INDICATOR_PERIODS = Object.freeze({
   rsi: 14,
 });
 const candleFields = [
+  'source',
+  'volume',
+  'sampleUnit',
   'time',
   'endTime',
   'firstSampleAt',
@@ -29,7 +32,7 @@ const isInterval = (value) => CHART_CANDLE_INTERVAL_MINUTES.includes(value);
 
 function hasValidCandleObservations(candle, intervalMinutes) {
   const duration = intervalMinutes * MINUTE;
-  return Boolean(
+  const hasValidPrices = Boolean(
     candle &&
     isTime(candle.time) &&
     candle.time % duration === 0 &&
@@ -37,7 +40,22 @@ function hasValidCandleObservations(candle, intervalMinutes) {
     candle.endTime === candle.time + duration &&
     ['open', 'high', 'low', 'close'].every((field) => isPrice(candle[field])) &&
     candle.low <= Math.min(candle.open, candle.close) &&
-    candle.high >= Math.max(candle.open, candle.close) &&
+    candle.high >= Math.max(candle.open, candle.close),
+  );
+  if (!hasValidPrices) return false;
+  if (candle.source === 'coinbase') {
+    return (
+      Number.isFinite(candle.volume) &&
+      candle.volume >= 0 &&
+      candle.sampleUnit === 'minute candles' &&
+      candle.expectedSampleCount === intervalMinutes &&
+      Number.isSafeInteger(candle.sampleCount) &&
+      candle.sampleCount > 0 &&
+      candle.sampleCount <= intervalMinutes
+    );
+  }
+  return Boolean(
+    (candle.source === undefined || candle.source === 'brti') &&
     isTime(candle.firstSampleAt) &&
     candle.firstSampleAt % SECOND === 0 &&
     isTime(candle.lastSampleAt) &&
@@ -59,18 +77,19 @@ function hasCompleteCandleObservations(candle) {
     candle.isPartial !== true &&
     candle.isForming !== true &&
     candle.sampleCount === candle.expectedSampleCount &&
-    candle.firstSampleAt === candle.time + SECOND &&
-    candle.lastSampleAt === candle.endTime
+    (candle.source === 'coinbase' ||
+      (candle.firstSampleAt === candle.time + SECOND && candle.lastSampleAt === candle.endTime))
   );
 }
 
-/** Combine observed one-minute BRTI candles in (bucket start, bucket end], never filling gaps. */
+/** Combine observed one-minute candles, retaining the source's actual coverage unit and gaps. */
 export function aggregateChartCandles(oneMinuteCandles, intervalMinutes = 1, now) {
   if (!Array.isArray(oneMinuteCandles) || !isInterval(intervalMinutes) || !isTime(now)) return [];
   const observations = new Map();
   for (const candle of oneMinuteCandles) {
     if (!isTime(candle?.time) || candle.time % MINUTE !== 0) continue;
-    const valid = hasValidCandleObservations(candle, 1) && candle.lastSampleAt <= now;
+    const lastObservationAt = candle.source === 'coinbase' ? candle.endTime : candle.lastSampleAt;
+    const valid = hasValidCandleObservations(candle, 1) && lastObservationAt <= now;
     if (!valid) {
       observations.set(candle.time, null);
       continue;
@@ -93,9 +112,12 @@ export function aggregateChartCandles(oneMinuteCandles, intervalMinutes = 1, now
     bucket.sampleCount += candle.sampleCount;
     buckets.set(endTime, bucket);
   }
-  return [...buckets.entries()].map(([endTime, bucket]) => {
+  return [...buckets.entries()].flatMap(([endTime, bucket]) => {
     const first = bucket.candles[0];
     const last = bucket.candles.at(-1);
+    const isCoinbase = first.source === 'coinbase';
+    // Index seconds and exchange candles cannot establish one another's coverage or prices.
+    if (bucket.candles.some((candle) => (candle.source === 'coinbase') !== isCoinbase)) return [];
     const isComplete =
       endTime <= now &&
       bucket.candles.length === intervalMinutes &&
@@ -103,14 +125,19 @@ export function aggregateChartCandles(oneMinuteCandles, intervalMinutes = 1, now
     return {
       time: endTime - duration,
       endTime,
-      firstSampleAt: first.firstSampleAt,
-      lastSampleAt: last.lastSampleAt,
+      ...(isCoinbase
+        ? {
+            source: 'coinbase',
+            sampleUnit: 'minute candles',
+            volume: bucket.candles.reduce((total, candle) => total + candle.volume, 0),
+          }
+        : { firstSampleAt: first.firstSampleAt, lastSampleAt: last.lastSampleAt }),
       open: first.open,
       high: Math.max(...bucket.candles.map((candle) => candle.high)),
       low: Math.min(...bucket.candles.map((candle) => candle.low)),
       close: last.close,
       sampleCount: bucket.sampleCount,
-      expectedSampleCount: intervalMinutes * 60,
+      expectedSampleCount: isCoinbase ? intervalMinutes : intervalMinutes * 60,
       intervalMinutes,
       isComplete,
       isPartial: !isComplete,
@@ -178,12 +205,19 @@ export function getChartIndicators(candles, { intervalMinutes = 1 } = {}) {
     return { points, periods: CHART_INDICATOR_PERIODS };
   let state = createIndicatorState();
   let previousEndTime = null;
+  let previousSource = null;
   for (const candle of candles) {
     const isFinal =
       hasValidCandleObservations(candle, intervalMinutes) && hasCompleteCandleObservations(candle);
-    if (!isFinal || (previousEndTime !== null && candle.time !== previousEndTime))
+    const source = candle?.source === 'coinbase' ? 'coinbase' : 'brti';
+    if (
+      !isFinal ||
+      (previousEndTime !== null && candle.time !== previousEndTime) ||
+      (previousSource !== null && source !== previousSource)
+    )
       state = createIndicatorState();
     previousEndTime = isFinal ? candle.endTime : null;
+    previousSource = isFinal ? source : null;
     if (!isTime(candle?.time)) continue;
     const point = {
       time: candle.time,

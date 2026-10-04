@@ -749,6 +749,32 @@ describe('Paired settlement experiments and input replay', () => {
   });
 
   test.each([
+    'expectedSettlementAverage',
+    'settlementStandardDeviation',
+    'settlementLowerBound',
+    'settlementUpperBound',
+  ])('accepts propagated dollar rounding in %s but rejects a changed range', (field) => {
+    const values = input();
+    for (const researchVersion of [RESEARCH_EXPERIMENT_V1, RESEARCH_EXPERIMENT_V5]) {
+      const forecast = getLatestResearchForecast(values, {}, START, { researchVersion });
+      const snapshot = createResearchInputSnapshot(values, {}, START, forecast);
+      const original = snapshot.expectedExperiment.variants.combined[field];
+      // Observed browser captures differ from Node by up to $1.6e-10 in an $84,000 range,
+      // with roughly 2.6e-13 relative variation in the calculated standard deviation.
+      const difference = Math.min(1.6e-10, Math.abs(original) * 2.6e-13);
+      expect(difference).toBeGreaterThan(1e-12);
+      snapshot.expectedExperiment.variants.combined[field] += difference;
+      const saved = JSON.stringify(snapshot);
+      const replay = replayResearchInputSnapshot(snapshot);
+      expect(replay.researchExperiment.variants.combined[field]).toBe(original);
+      expect(JSON.stringify(snapshot)).toBe(saved);
+
+      snapshot.expectedExperiment.variants.combined[field] = original + 1e-7;
+      expect(() => replayResearchInputSnapshot(snapshot)).toThrow(/differs/);
+    }
+  });
+
+  test.each([
     [
       'market identity',
       (experiment) => {
@@ -759,6 +785,18 @@ describe('Paired settlement experiments and input replay', () => {
       'deadline',
       (experiment) => {
         experiment.expiresAt += 1;
+      },
+    ],
+    [
+      'target, even by a tiny dollar amount',
+      (experiment) => {
+        experiment.target += 1e-10;
+      },
+    ],
+    [
+      'observed reference price, even by a tiny dollar amount',
+      (experiment) => {
+        experiment.variants.combined.referencePrice += 1e-10;
       },
     ],
     [

@@ -40,13 +40,26 @@ export function createTradingAdvisorService({
     return result;
   }
 
-  async function readBook(ticker) {
+  async function readBook(ticker, deadline = null) {
     const requestedAt = now();
+    let timeout;
     try {
-      return { ...(await loadBook(ticker)), requestedAt };
+      const request = loadBook(ticker);
+      const book =
+        deadline === null
+          ? await request
+          : await Promise.race([
+              request,
+              new Promise((resolve) => {
+                timeout = setTimeout(() => resolve(null), Math.max(1, deadline - requestedAt));
+              }),
+            ]);
+      return book ? { ...book, requestedAt } : null;
     } catch {
       // A missing observation is saved as wait/no-fill, never another favorable attempt.
       return null;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -69,7 +82,14 @@ export function createTradingAdvisorService({
           requestedAt: now(),
           lease,
         }));
-      const book = canRead ? await readBook(advice.contract.ticker) : null;
+      // Bound the whole execution request, including quota/database waits. A late result
+      // is ignored rather than keeping capital reserved or fetching another favorable book.
+      const book = canRead
+        ? await readBook(
+            advice.contract.ticker,
+            Math.min(advice.evaluatedAt + policy.maximumFillDelayMs + 1, advice.contract.expiresAt),
+          )
+        : null;
       await writeFrozen(
         'saveExecution',
         {
@@ -181,7 +201,15 @@ export function createTradingAdvisorService({
     try {
       if (pendingWrite) {
         const { method, args } = pendingWrite;
-        await repository[method]({ ...args, lease });
+        // Another fenced writer may have closed this intention while its original
+        // request was delayed. Keep that committed result instead of retrying a
+        // conflicting observation forever; the account and execution commit together.
+        const executionAlreadyResolved =
+          method === 'saveExecution' &&
+          !(await repository.readState(policy.id)).account.pendingIntents.some(
+            (intent) => intent.id === args.adviceId,
+          );
+        if (!executionAlreadyResolved) await repository[method]({ ...args, lease });
         pendingWrite = null;
       }
       if (now() - lastHeartbeatAt >= 10000) {
@@ -288,6 +316,15 @@ export function createTradingAdvisorService({
           }
         : null;
       const performance = account.performance;
+      const valuation = state.risk?.valuation ?? null;
+      const hasCurrentValuation = Boolean(
+        valuation &&
+        valuation.accountVersion === account.version &&
+        Number.isFinite(valuation.validUntil) &&
+        asOf < valuation.validUntil &&
+        valuation.observedAt <= asOf &&
+        asOf - valuation.observedAt < 30000,
+      );
       return {
         asOf,
         startedAt: state.startedAt,
@@ -295,6 +332,11 @@ export function createTradingAdvisorService({
         collector: collector ?? { status: 'not-started', heartbeatAt: null },
         policy: savedPolicy,
         portfolio,
+        risk: {
+          valuation,
+          history: state.risk?.history ?? null,
+          isCurrent: hasCurrentValuation,
+        },
         latestAdvice,
         recentActivity: [
           ...state.advice.map((advice) => ({

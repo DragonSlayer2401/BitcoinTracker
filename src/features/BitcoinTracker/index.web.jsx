@@ -11,7 +11,7 @@ import { createKalshiForecastBatch } from './utils/kalshi/forecastBatch.utils';
 import BitcoinPriceSummary from './components/BitcoinPriceSummary';
 import TrackerHeader from './components/TrackerHeader';
 import Icon from './components/Icon';
-import PriceChart from './components/PriceChart';
+import CoinbaseChart from './components/CoinbaseChart';
 import { getBenchmarkChartData } from './utils/benchmarkChart.utils';
 import MarketData from './components/MarketData';
 import ForecastPanel from './components/ForecastPanel';
@@ -300,21 +300,6 @@ export default function BitcoinTracker() {
       }),
     [candles, ticker, target, now, horizonMinutes, forecast],
   );
-  // The trading chart follows the open event even while research views an older saved call.
-  const currentMarketForecast = useMemo(
-    () =>
-      currentMarket?.ticker === kalshiMarket?.ticker
-        ? forecast
-        : currentMarket && now
-          ? getResearchEstimate({
-              target: currentMarket.target,
-              now,
-              expiresAt: currentMarket.expiresAt,
-              kalshiMarket: currentMarket,
-            })
-          : null,
-    [currentMarket, kalshiMarket, forecast, now, getResearchEstimate],
-  );
   const evidenceWarning = useForecastEvidence({
     forecasts,
     candles,
@@ -501,12 +486,13 @@ export default function BitcoinTracker() {
             hasMarketError={kalshiQuery.isError}
             chart={
               <>
-                <BitcoinPriceSummary benchmarkData={benchmarkData} />
-                <PriceChart
-                  benchmarkData={benchmarkData}
-                  forecast={currentMarketForecast}
-                  target={currentMarket?.target ?? null}
+                <BitcoinPriceSummary benchmarkData={benchmarkData} compact />
+                <CoinbaseChart
+                  candles={candles}
+                  ticker={ticker}
                   now={now}
+                  isQuoteFresh={isQuoteFresh && !hasQuoteError}
+                  target={currentMarket?.target ?? null}
                   deadline={currentMarket?.expiresAt ?? null}
                 />
               </>

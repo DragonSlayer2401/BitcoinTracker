@@ -13,12 +13,13 @@ export default function ChartReadout({
   showMacd,
   showRsi,
   showEma,
+  source = 'brti',
 }) {
   const isCandle = view === 'candles';
   const description = point
     ? isCandle
       ? getCandleDescription(point)
-      : `${formatDateTime(point.time)} · ${formatPrice(point.price)} · CF Benchmarks BRTI`
+      : `${formatDateTime(point.time)} · ${formatPrice(point.price)} · ${source === 'coinbase' ? 'Coinbase BTC/USD minute close' : 'CF Benchmarks BRTI'}`
     : 'No observed reading at the crosshair.';
   const price = isCandle ? point?.close : point?.price;
   const comparisonPrice = comparison?.close ?? comparison?.price;

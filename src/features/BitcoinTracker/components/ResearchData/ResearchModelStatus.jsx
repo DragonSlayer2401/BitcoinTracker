@@ -31,6 +31,9 @@ export default function ResearchModelStatus({ report }) {
     modelDescription =
       `Learned model ${report.active.id}. ` +
       'It passed checks on later recorded windows before activation; unsupported conditions still use the settlement model.';
+  } else if (report?.full?.monitoring?.status === 'disabled') {
+    modelDescription =
+      'Kalshi settlement-average model. The full learned model is suspended after its latest outcome check.';
   } else if (report?.early?.monitoring?.status === 'disabled') {
     modelDescription =
       'Kalshi settlement-average model. The early adjustment is suspended after its latest outcome check.';
@@ -46,6 +49,11 @@ export default function ResearchModelStatus({ report }) {
       </p>
       <EarlyModelStatus early={report?.early} isInUse={isEarlyModelInUse} />
       <h3 className="h6">Full model learning</h3>
+      {report?.full?.monitoring && (
+        <p className="small" role="status">
+          Full model outcome check: {report.full.monitoring.reason}
+        </p>
+      )}
       <p className="small text-secondary">
         {report?.training?.reason || 'Collecting saved forecasts and market conditions.'}
       </p>

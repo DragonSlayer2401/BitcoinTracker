@@ -18,7 +18,7 @@ const benchmark = {
 describe('BRTI price summary', () => {
   test('uses the index for the headline and fifteen-minute change', () => {
     render(<BitcoinPriceSummary benchmarkData={getBenchmarkChartData(benchmark, NOW)} />);
-    expect(screen.getByRole('heading', { name: 'Bitcoin index price' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Kalshi reference index' })).toBeInTheDocument();
     expect(screen.getByText('CF Benchmarks BRTI · via Kalshi')).toBeInTheDocument();
     expect(screen.getByText('$50,100.00')).toBeInTheDocument();
     expect(screen.getByText(/0\.2%/)).toBeInTheDocument();

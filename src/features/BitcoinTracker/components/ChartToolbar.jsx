@@ -7,6 +7,7 @@ export default function ChartToolbar({
   onCandleMinutesChange,
   windowMinutes,
   onWindowMinutesChange,
+  historyMinutes = [15, 30, 60, 120, 240],
   showMacd,
   showRsi,
   showEma,
@@ -51,7 +52,7 @@ export default function ChartToolbar({
         <div>
           <span className="chart-option-label">History</span>
           <ButtonGroup size="sm" aria-label="Chart history">
-            {[15, 30, 60, 120, 240].map((minutes) => (
+            {historyMinutes.map((minutes) => (
               <Button
                 key={minutes}
                 variant={windowMinutes === minutes ? 'chart-active' : 'chart'}

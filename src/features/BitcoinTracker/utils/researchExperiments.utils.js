@@ -55,14 +55,27 @@ const outcomeFields = new Set([
   'result',
 ]);
 const validTime = (value) => Number.isSafeInteger(value) && value >= 0;
+const calculatedDollarFields = new Set([
+  'expectedSettlementAverage',
+  'settlementStandardDeviation',
+  'settlementLowerBound',
+  'settlementUpperBound',
+]);
 
-function hasMatchingReplayValues(actual, expected) {
+function hasMatchingReplayValues(actual, expected, field = '') {
   if (typeof actual !== typeof expected) return false;
   if (typeof actual === 'number') {
-    // Browser and Node math can differ in their last floating-point digits.
-    // Compare without rounding or changing either original prediction.
+    // Browser and Node Math implementations can differ after volatility is converted to
+    // dollar ranges. Permit tiny propagated rounding only on those calculated outputs,
+    // capped at one millionth of a cent. Quotes, targets, probabilities and times keep
+    // their existing strict comparison; neither the saved nor replayed value is rounded.
+    const tolerance = calculatedDollarFields.has(field)
+      ? Math.max(1e-12, Math.min(1e-8, Math.max(Math.abs(actual), Math.abs(expected)) * 1e-12))
+      : 1e-12;
     return (
-      Number.isFinite(actual) && Number.isFinite(expected) && Math.abs(actual - expected) <= 1e-12
+      Number.isFinite(actual) &&
+      Number.isFinite(expected) &&
+      Math.abs(actual - expected) <= tolerance
     );
   }
   if (actual === expected) return true;
@@ -73,7 +86,8 @@ function hasMatchingReplayValues(actual, expected) {
   return (
     keys.length === Object.keys(expected).length &&
     keys.every(
-      (key) => Object.hasOwn(expected, key) && hasMatchingReplayValues(actual[key], expected[key]),
+      (key) =>
+        Object.hasOwn(expected, key) && hasMatchingReplayValues(actual[key], expected[key], key),
     )
   );
 }

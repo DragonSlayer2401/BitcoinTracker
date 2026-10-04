@@ -27,6 +27,10 @@ import { KALSHI_OUTCOME_DEFINITION as DEADLINE_OUTCOME_DEFINITION } from '../uti
 import { KALSHI_DERIVATIVES_MODEL_VERSION } from '../utils/kalshi/forecast.utils';
 import { getDerivativesForecast } from '../utils/derivativesForecast.utils';
 import { createLearningService as createContractLearningService } from '@/services/research/learning.service';
+import {
+  evaluateFullActiveModel,
+  FULL_MODEL_MONITORING_REQUIREMENTS,
+} from '../utils/learning/fullModelMonitoring.utils';
 
 // All learning fixtures represent actual Kalshi contracts.
 const contractOptions = { outcomeDefinition: DEADLINE_OUTCOME_DEFINITION };
@@ -852,6 +856,120 @@ describe('prospective shadow promotion', () => {
       return rows;
     }).flat();
   }
+  test('a missing original outcome holds its slot instead of using a later resolved contract', () => {
+    const model = artifact();
+    const events = shadowEvents(model);
+    const now = events.at(-1).recordedAt;
+    const missingOutcome = events[1];
+    const incomplete = events.filter((event) => event !== missingOutcome);
+    const pending = evaluateShadowCandidate(model, incomplete, { now });
+    expect(pending).toMatchObject({
+      evaluationComplete: false,
+      eligibleForPromotion: false,
+      eligibleWindows: 120,
+      resolvedWindows: 119,
+      independentWindows: 119,
+      callCoverage: 119 / 120,
+    });
+    const resolved = evaluateShadowCandidate(model, [...incomplete, missingOutcome], { now });
+    const originalCohort = evaluateShadowCandidate(model, events.slice(0, 240), { now });
+    expect(resolved.eligibleForPromotion).toBe(true);
+    expect(resolved).toEqual(originalCohort);
+    expect(resolved.lastDeadlineAt).toBe(events[239].expiresAt);
+  });
+  test('a future-published original outcome cannot be replaced while waiting for its publication', () => {
+    const model = artifact();
+    const events = shadowEvents(model);
+    const now = events.at(-1).recordedAt;
+    events[1].recordedAt = now + MINUTE;
+    expect(evaluateShadowCandidate(model, events, { now })).toMatchObject({
+      evaluationComplete: false,
+      eligibleForPromotion: false,
+      eligibleWindows: 120,
+      resolvedWindows: 119,
+    });
+    expect(evaluateShadowCandidate(model, events, { now: now + MINUTE })).toMatchObject({
+      evaluationComplete: true,
+      eligibleForPromotion: true,
+      eligibleWindows: 120,
+      resolvedWindows: 120,
+    });
+  });
+  test('a missing selected checkpoint does not use a different resolved checkpoint in that window', () => {
+    const model = artifact();
+    const events = shadowEvents(model, 120);
+    const decisionIndex = events.findIndex(
+      (event) => event.event === 'decision' && Math.floor(event.windowStartAt / 900_000) % 5 === 0,
+    );
+    const decision = events[decisionIndex];
+    const outcome = events[decisionIndex + 1];
+    const capturedAt = decision.capturedAt + 3 * MINUTE;
+    const alternate = {
+      ...decision,
+      forecastId: `${decision.forecastId}-alternate`,
+      eventId: `${decision.forecastId}-alternate:decision`,
+      capturedAt,
+      recordedAt: capturedAt,
+      inputObservedAt: capturedAt,
+      featureCutoffAt: capturedAt,
+      learningFeatures: { ...decision.learningFeatures, featureCutoffAt: capturedAt },
+    };
+    alternate.shadowPrediction = {
+      modelId: model.id,
+      featureCutoffAt: capturedAt,
+      aboveProbability: predictOutcomeCandidate(model, alternate.learningFeatures),
+    };
+    const withAlternate = [
+      ...events.filter((event) => event !== outcome),
+      alternate,
+      {
+        ...outcome,
+        forecastId: alternate.forecastId,
+        eventId: `${alternate.forecastId}:outcome`,
+      },
+    ];
+    expect(
+      evaluateShadowCandidate(model, withAlternate, { now: events.at(-1).recordedAt }),
+    ).toMatchObject({
+      evaluationComplete: false,
+      eligibleForPromotion: false,
+      eligibleWindows: 120,
+      resolvedWindows: 119,
+    });
+  });
+  test.each(['unobserved', 'conflicting'])(
+    'a terminal %s original outcome fails the cohort instead of accepting later contracts',
+    (failure) => {
+      const model = artifact();
+      const events = shadowEvents(model);
+      const now = events.at(-1).recordedAt;
+      if (failure === 'unobserved') events[1].outcomeStatus = 'unobserved';
+      else events.push({ ...events[1], observedPrice: events[1].observedPrice + 1 });
+      const result = evaluateShadowCandidate(model, events, { now });
+      expect(result).toMatchObject({
+        evaluationComplete: true,
+        eligibleForPromotion: false,
+        eligibleWindows: 120,
+        resolvedWindows: 119,
+        independentWindows: 119,
+      });
+      expect(result.reasons[0]).toMatch(/conflicting evidence or a terminal unobserved outcome/);
+    },
+  );
+  test('an invalid original outcome cannot be dropped from the prospective cohort', () => {
+    const model = artifact();
+    const events = shadowEvents(model);
+    events[1].observedPrice++;
+    expect(evaluateShadowCandidate(model, events, { now: events.at(-1).recordedAt })).toMatchObject(
+      {
+        evaluationComplete: false,
+        eligibleForPromotion: false,
+        eligibleWindows: 120,
+        resolvedWindows: 119,
+        independentWindows: 119,
+      },
+    );
+  });
   test('requires newly captured background predictions and rejects retrospective backfill', () => {
     const model = artifact();
     const events = shadowEvents(model);
@@ -937,5 +1055,259 @@ describe('prospective shadow promotion', () => {
     expect(result.fallbackUses).toBe(70);
     expect(result.eligibleForPromotion).toBe(false);
     expect(result.reasons.join(' ')).toContain('At least 60');
+  });
+});
+
+describe('full-model deterioration monitoring', () => {
+  function activeModel() {
+    const model = artifact();
+    model.activation = {
+      modelId: model.id,
+      activatedAt: START + MINUTE,
+      shadowEvaluation: {
+        modelId: model.id,
+        evaluatedAt: START + MINUTE - 1,
+        eligibleForPromotion: true,
+      },
+    };
+    return model;
+  }
+
+  function activeEvents(model, length = 120, options = {}) {
+    return Array.from({ length }, (_, index) => {
+      const settings = typeof options === 'function' ? options(index) : options;
+      const outcome = settings.outcome ?? index % 2;
+      const rows = eventsFor(index, {
+        start: model.activation.activatedAt + MINUTE,
+        probability: settings.baseline ?? 0.55,
+        outcome,
+      });
+      const decision = rows[0];
+      decision.learningFeatures.values = featureValues(settings.wrong ? 1 - outcome : outcome);
+      // Use the production application path so monitoring must accept its real metadata
+      // contract, rather than a second hand-written version of the learning payload.
+      const forecast = applyOutcomeModel(
+        {
+          ...BASE,
+          aboveProbability: decision.aboveProbability,
+          belowProbability: decision.belowProbability,
+        },
+        {
+          learningFeatures: decision.learningFeatures,
+          target: decision.target,
+          expiresAt: decision.expiresAt,
+          now: decision.capturedAt,
+        },
+        model,
+      );
+      decision.modelVersion = forecast.modelVersion;
+      decision.aboveProbability = forecast.aboveProbability;
+      decision.belowProbability = forecast.belowProbability;
+      decision.learning = forecast.learning;
+      return rows;
+    }).flat();
+  }
+
+  test('uses the existing full release sample minimums and scores real matched calls', () => {
+    expect(FULL_MODEL_MONITORING_REQUIREMENTS).toMatchObject({
+      minimumWindows: 120,
+      minimumModelUses: 60,
+      maximumBrierDeterioration: 0.005,
+      maximumAccuracyDeterioration: 0.05,
+    });
+    const model = activeModel();
+    const events = activeEvents(model);
+    const result = evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt });
+    expect(result).toMatchObject({
+      status: 'healthy',
+      modelUses: 120,
+      callCoverage: 1,
+      candidate: { callAccuracy: 1 },
+      baseline: { callAccuracy: 0.5 },
+    });
+    expect(result.uncertainty.brierDifference[1]).toBeLessThan(0);
+    expect(model.retirement).toBeUndefined();
+  });
+
+  test('a later one-sided losing regime stops the model instead of being hidden by earlier wins', () => {
+    const model = activeModel();
+    const events = activeEvents(model, 240, (index) => ({
+      wrong: index >= 120,
+      outcome: 1,
+    }));
+    const saved = JSON.stringify(events);
+    const result = evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt });
+    expect(result).toMatchObject({
+      status: 'disabled',
+      independentWindows: 120,
+      candidate: { callAccuracy: 0 },
+      baseline: { callAccuracy: 1 },
+      firstWindowAt: events[240].windowStartAt,
+    });
+    expect(result.uncertainty.brierDifference[0]).toBeGreaterThan(0.005);
+    expect(JSON.stringify(events)).toBe(saved);
+    expect(model.retirement).toBeUndefined();
+  });
+
+  test('a noisy point estimate above the deterioration margin does not prove deterioration', () => {
+    const model = activeModel();
+    model.model.coefficients[4] = Math.log(0.55 / 0.45);
+    const events = activeEvents(model, 120, (index) => ({ baseline: 0.5, wrong: index < 66 }));
+    const result = evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt });
+    expect(result.candidate.brier - result.baseline.brier).toBeGreaterThan(0.005);
+    expect(result.uncertainty.brierDifference[0]).toBeLessThan(0.005);
+    expect(result.status).toBe('healthy');
+  });
+
+  test('a proven accuracy loss can stop the model even when Brier deterioration is small', () => {
+    const model = activeModel();
+    model.model.coefficients[4] = Math.log(0.5001 / 0.4999);
+    const events = activeEvents(model, 120, { baseline: 0.5001, outcome: 1, wrong: true });
+    const result = evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt });
+    expect(result.candidate.brier - result.baseline.brier).toBeLessThan(0.005);
+    expect(result.status).toBe('disabled');
+    expect(result.reason).toMatch(/directional accuracy/);
+  });
+
+  test('a missing selected outcome does not admit an older resolved contract', () => {
+    const model = activeModel();
+    const events = activeEvents(model, 121, { wrong: true });
+    const now = events.at(-1).recordedAt;
+    const missing = events.at(-1);
+    const result = evaluateFullActiveModel(
+      model,
+      events.filter((row) => row !== missing),
+      {
+        now,
+      },
+    );
+    expect(result).toMatchObject({
+      status: 'monitoring',
+      eligibleWindows: 120,
+      resolvedWindows: 119,
+      independentWindows: 119,
+    });
+    expect(evaluateFullActiveModel(model, events, { now }).status).toBe('disabled');
+  });
+
+  test.each([
+    ['missing learning metadata', (row) => delete row.learning],
+    ['another model ID', (row) => (row.learning.modelId = 'another-model')],
+    ['another model version', (row) => (row.modelVersion = 'another-version')],
+    ['an invented learned probability', (row) => (row.learning.aboveProbability = 0.5)],
+    ['an invented baseline probability', (row) => (row.learning.baselineAboveProbability = 0.5)],
+    [
+      'an invented production probability',
+      (row) => {
+        row.aboveProbability = 0.5;
+        row.belowProbability = 0.5;
+      },
+    ],
+  ])('%s cannot masquerade as matched evidence', (_, mutate) => {
+    const model = activeModel();
+    const events = activeEvents(model, 121);
+    mutate(events.at(-2));
+    expect(evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt })).toMatchObject(
+      {
+        status: 'monitoring',
+        eligibleWindows: 120,
+        resolvedWindows: 120,
+        independentWindows: 119,
+      },
+    );
+  });
+
+  test('pre-activation, manual, and different-pipeline calls cannot qualify a check', () => {
+    const model = activeModel();
+    const beforeActivation = activeEvents(model);
+    model.activation.activatedAt = beforeActivation.at(-1).recordedAt;
+    const manual = activeEvents(model);
+    manual.forEach((row) => (row.cohort = 'manual'));
+    const otherPipeline = activeEvents(model);
+    otherPipeline.forEach((row) => {
+      if (row.learningFeatures) row.learningFeatures.referenceSource = 'cf-brti';
+    });
+    expect(
+      evaluateFullActiveModel(model, [...beforeActivation, ...manual, ...otherPipeline], {
+        now: otherPipeline.at(-1).recordedAt,
+      }),
+    ).toMatchObject({ status: 'monitoring', eligibleWindows: 0 });
+  });
+
+  test('future-published official outcomes are not scored before their publication', () => {
+    const model = activeModel();
+    const events = activeEvents(model);
+    const now = events.at(-1).recordedAt;
+    events.at(-1).recordedAt = now + MINUTE;
+    expect(evaluateFullActiveModel(model, events, { now })).toMatchObject({
+      status: 'monitoring',
+      resolvedWindows: 119,
+    });
+    expect(evaluateFullActiveModel(model, events, { now: now + MINUTE }).status).toBe('healthy');
+  });
+
+  test('a still-open next contract does not prevent monitoring the latest closed windows', () => {
+    const model = activeModel();
+    const events = activeEvents(model, 121);
+    const now = events.at(-2).capturedAt;
+    expect(evaluateFullActiveModel(model, events, { now })).toMatchObject({
+      status: 'healthy',
+      independentWindows: 120,
+      lastDeadlineAt: events[239].expiresAt,
+    });
+  });
+
+  test.each([50, 60])(
+    'baseline fallbacks retain coverage but %i actual model uses are required',
+    (uses) => {
+      const model = activeModel();
+      const events = activeEvents(model);
+      for (let index = uses * 2; index < events.length; index += 2) {
+        const decision = events[index];
+        decision.capturedAt += 6 * MINUTE;
+        decision.inputObservedAt = decision.capturedAt;
+        decision.featureCutoffAt = decision.capturedAt;
+        decision.recordedAt = decision.capturedAt;
+        decision.learningFeatures.featureCutoffAt = decision.capturedAt;
+        decision.aboveProbability = decision.learningFeatures.baselineAboveProbability;
+        decision.belowProbability = 1 - decision.aboveProbability;
+        decision.modelVersion = decision.learningFeatures.baselineModelVersion;
+        delete decision.learning;
+      }
+      expect(
+        evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt }),
+      ).toMatchObject({
+        status: uses >= 60 ? 'healthy' : 'monitoring',
+        callCoverage: 1,
+        modelUses: uses,
+        fallbackUses: 120 - uses,
+      });
+    },
+  );
+
+  test('an unactivated or future-activated artifact cannot be reported healthy', () => {
+    const model = activeModel();
+    const events = activeEvents(model);
+    const now = events.at(-1).recordedAt;
+    model.activation.activatedAt = now + 1;
+    expect(evaluateFullActiveModel(model, events, { now }).status).toBe('monitoring');
+    delete model.activation;
+    expect(evaluateFullActiveModel(model, events, { now }).status).toBe('monitoring');
+  });
+
+  test.each([
+    ['another model', (evaluation) => (evaluation.modelId = 'another-model')],
+    ['missing evaluation time', (evaluation) => delete evaluation.evaluatedAt],
+    ['evaluation after activation', (evaluation) => (evaluation.evaluatedAt = START + 2 * MINUTE)],
+  ])('a promotion certificate with %s is not monitoring evidence', (_, mutate) => {
+    const model = activeModel();
+    const events = activeEvents(model);
+    mutate(model.activation.shadowEvaluation);
+    expect(evaluateFullActiveModel(model, events, { now: events.at(-1).recordedAt })).toMatchObject(
+      {
+        status: 'monitoring',
+        independentWindows: 0,
+      },
+    );
   });
 });

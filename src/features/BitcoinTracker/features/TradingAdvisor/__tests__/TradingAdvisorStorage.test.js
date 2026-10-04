@@ -83,6 +83,93 @@ test('wait observations preserve adviser inputs without duplicating full model s
   expect((await repository.readState(policy.id)).account.performance.waitCount).toBe(1);
 });
 
+test('records prospective account marks without changing cash or rewriting earlier evidence', async () => {
+  const advice = await saveAdvice();
+  let state = await repository.readState(policy.id);
+  expect(state.risk.valuation).toMatchObject({
+    complete: true,
+    executableEquity: 100,
+    totalMarkedPnl: 0,
+    accountVersion: state.account.version,
+    sourceId: advice.id,
+    sourceKind: 'advice',
+  });
+  expect(state.risk.history.completeCount).toBe(1);
+  const initialMark = state.risk.valuation;
+  const execution = await fill(advice);
+  state = await repository.readState(policy.id);
+  expect(state.risk.valuation.sourceId).toBe(execution.id);
+  expect(state.risk.valuation.accountVersion).toBe(state.account.version);
+  expect(state.risk.valuation.executableEquity).toBeLessThan(100);
+  expect(state.risk.valuation.executableEquity).toBeCloseTo(
+    state.account.cash + state.risk.valuation.liquidationValue,
+    6,
+  );
+  expect(state.risk.valuation.unrealizedPnl).toBeLessThan(0);
+  expect(state.account.realizedPnl).toBe(0);
+  expect(state.risk.history.maxDrawdown).toBeGreaterThan(0);
+  const marks = await repository.readEvidencePage(policy.id, { kind: 'valuations' });
+  expect(marks).toHaveLength(2);
+  expect(marks[0].value).toEqual(initialMark);
+  const restarted = createTradingAdvisorRepository({ client, now: () => clock });
+  expect((await restarted.readState(policy.id)).risk).toEqual(state.risk);
+  await expect(client.execute('DELETE FROM advisor_valuations')).rejects.toThrow('append-only');
+});
+
+test('valuation persistence failure rolls back the related reservation and advice together', async () => {
+  await client.execute(`CREATE TRIGGER fail_test_valuation BEFORE INSERT ON advisor_valuations
+    BEGIN SELECT RAISE(ABORT, 'test valuation failure'); END`);
+  await expect(saveAdvice()).rejects.toThrow('test valuation failure');
+  const state = await repository.readState(policy.id);
+  expect(state.account.cash).toBe(100);
+  expect(state.account.pendingIntents).toHaveLength(0);
+  expect(state.advice).toHaveLength(0);
+  expect(state.risk).toBeNull();
+});
+
+test('thin exit depth leaves the account value unknown without hiding its committed capital', async () => {
+  const advice = await saveAdvice();
+  await fill(advice);
+  clock = advice.evaluatedAt + policy.cadenceMs;
+  await saveAdvice(0.85, { ...bookAt(clock), noAsks: [{ price: 0.55, quantity: 1 }] });
+  const state = await repository.readState(policy.id);
+  expect(state.risk.valuation).toMatchObject({
+    complete: false,
+    executableEquity: null,
+    unrealizedPnl: null,
+    unpricedPositionCount: 1,
+    worstCaseFinalCash: state.account.cash,
+  });
+  expect(state.risk.valuation.committedCapitalAtRisk).toBeGreaterThan(0);
+  expect(state.risk.history.incompleteCount).toBe(1);
+  expect(state.risk.history.maxDrawdown).toBeGreaterThan(0);
+});
+
+test('a partial sale cannot reuse consumed bids to inflate the remaining position value', async () => {
+  const entry = await saveAdvice();
+  await fill(entry);
+  clock = entry.evaluatedAt + policy.cadenceMs;
+  const exitBook = {
+    ...bookAt(clock),
+    yesAsks: [{ price: 0.9, quantity: 100 }],
+    noAsks: [
+      { price: 0.2, quantity: 3 },
+      { price: 0.8, quantity: 100 },
+    ],
+  };
+  const exit = await saveAdvice(0.3, exitBook);
+  expect(exit).toMatchObject({ action: 'sell', quantity: 3 });
+  await fill(exit, { ...exitBook, requestedAt: clock + 2000, receivedAt: clock + 2000 });
+  const state = await repository.readState(policy.id);
+  expect(state.account.positions[0].quantity).toBe(entry.quantity - 3);
+  expect(state.risk.valuation.complete).toBe(false);
+  expect(state.risk.valuation.executableEquity).toBeNull();
+  expect(state.risk.valuation.positions[0].status).toBe('book_unavailable');
+  clock = exit.evaluatedAt + policy.cadenceMs;
+  await saveAdvice(0.3, { ...bookAt(clock), noAsks: [{ price: 0.8, quantity: 100 }] });
+  expect((await repository.readState(policy.id)).risk.valuation.complete).toBe(true);
+});
+
 test('a lease fences other writers and expiration never authorizes an old writer', async () => {
   expect(await repository.acquireLease(policy.id, 'another-owner')).toBeNull();
   const old = lease;
@@ -117,6 +204,39 @@ test('execution claims are durable and an interrupted expired attempt becomes on
   expect((await repository.readState(policy.id)).account.cash).toBe(100);
   await repository.saveExecution({ adviceId: advice.id, book: null, recordedAt: clock, lease });
   expect((await repository.readState(policy.id)).account.performance.noFillCount).toBe(1);
+});
+
+test('expired response recovery still rejects another owner or an unrelated request claim', async () => {
+  const advice = await saveAdvice();
+  clock += 2000;
+  await repository.claimExecutionAttempt({ adviceId: advice.id, requestedAt: clock, lease });
+  const originalToken = lease.token;
+  const requestedAt = clock;
+  clock += 61000;
+  const book = { ...bookAt(clock), requestedAt };
+  lease = await repository.acquireLease(policy.id, 'another-owner');
+  await expect(
+    repository.saveExecution({
+      adviceId: advice.id,
+      book,
+      recordedAt: clock,
+      observationAttemptToken: originalToken,
+      lease,
+    }),
+  ).rejects.toThrow('original durable request claim');
+  await renew();
+  await expect(
+    repository.saveExecution({
+      adviceId: advice.id,
+      book,
+      recordedAt: clock,
+      observationAttemptToken: 'unrelated-token',
+      lease,
+    }),
+  ).rejects.toThrow('original durable request claim');
+  const state = await repository.readState(policy.id);
+  expect(state.account.pendingIntents).toHaveLength(1);
+  expect(state.account.performance.noFillCount).toBe(0);
 });
 
 test('fills once, sells a partial position with proportional costs, settles the remainder and scores paired holding', async () => {

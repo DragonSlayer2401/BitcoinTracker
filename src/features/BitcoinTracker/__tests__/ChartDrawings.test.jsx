@@ -13,6 +13,7 @@ import ChartDrawingControls from '../components/ChartDrawingControls';
 import useChartDrawings from '../hooks/useChartDrawings';
 import {
   CHART_DRAWINGS_STORAGE_KEY,
+  COINBASE_CHART_DRAWINGS_STORAGE_KEY,
   DEFAULT_DRAWING_COLOR,
   getValidatedChartDrawing,
   getValidatedChartDrawings,
@@ -117,6 +118,47 @@ test('persists a symbol-wide bounded collection and restores it through reload',
   const restored = renderHook(() => useChartDrawings());
   expect(restored.result.current.drawings).toEqual(saved.drawings);
   expect(restored.result.current.warning).toBeNull();
+});
+
+test('saves, restores and clears Coinbase drawings without modifying saved BRTI lines', () => {
+  writeChartDrawings([horizontal()]);
+  const savedIndex = localStorage.getItem(CHART_DRAWINGS_STORAGE_KEY);
+  const view = renderHook(() => useChartDrawings(COINBASE_CHART_DRAWINGS_STORAGE_KEY));
+  expect(view.result.current.drawings).toEqual([]);
+  act(() => view.result.current.addDrawing(vertical()));
+  const savedSpot = JSON.parse(localStorage.getItem(COINBASE_CHART_DRAWINGS_STORAGE_KEY));
+  expect(savedSpot.symbol).toBe('COINBASE:BTC-USD');
+  expect(savedSpot.drawings).toEqual([vertical()]);
+  view.unmount();
+
+  const restored = renderHook(() => useChartDrawings(COINBASE_CHART_DRAWINGS_STORAGE_KEY));
+  expect(restored.result.current.drawings).toEqual([vertical()]);
+  act(() => restored.result.current.clearDrawings());
+  expect(readChartDrawings(undefined, NOW, COINBASE_CHART_DRAWINGS_STORAGE_KEY).drawings).toEqual(
+    [],
+  );
+  act(() => restored.result.current.undoLast());
+  expect(readChartDrawings(undefined, NOW, COINBASE_CHART_DRAWINGS_STORAGE_KEY).drawings).toEqual([
+    vertical(),
+  ]);
+  expect(localStorage.getItem(CHART_DRAWINGS_STORAGE_KEY)).toBe(savedIndex);
+});
+
+test('synchronizes only the matching chart symbol across tabs', () => {
+  const view = renderHook(() => useChartDrawings(COINBASE_CHART_DRAWINGS_STORAGE_KEY));
+  act(() => view.result.current.addDrawing(horizontal()));
+  act(() => {
+    writeChartDrawings([vertical()]);
+    window.dispatchEvent(new StorageEvent('storage', { key: CHART_DRAWINGS_STORAGE_KEY }));
+  });
+  expect(view.result.current.drawings).toEqual([horizontal()]);
+  expect(view.result.current.canUndo).toBe(true);
+  act(() => {
+    writeChartDrawings([trend()], undefined, NOW, COINBASE_CHART_DRAWINGS_STORAGE_KEY);
+    window.dispatchEvent(new StorageEvent('storage', { key: COINBASE_CHART_DRAWINGS_STORAGE_KEY }));
+  });
+  expect(view.result.current.drawings).toEqual([trend()]);
+  expect(view.result.current.canUndo).toBe(false);
 });
 
 test('updates and deletes by identity, and Undo reverses edit, delete, and Clear', () => {

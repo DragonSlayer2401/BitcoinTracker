@@ -85,6 +85,11 @@ depth or timely data instead produce WAIT with an explanation; missing evidence 
 hold recommendation. A fresh recommendation is invalidated when its contract closes or its
 observation expires. The UI must not display an old BUY/SELL as an actionable current instruction.
 
+Account, position and performance panels show the report's snapshot time. A failed refresh,
+missing or future timestamp, or snapshot at least 30 seconds old marks those values as outdated
+and suppresses actionable advice. Cached values remain visible as last-known information until
+a successful, timely refresh replaces them.
+
 ## Conditional sell limits
 
 For owned contracts, a fee-aware search supplies a minimum sale price at which net proceeds would
@@ -110,6 +115,11 @@ Fees are refreshed. There is no series of retries selecting a favorable snapshot
 expired attempts become no-fills. All fills are simulations from observed depth, not exchange
 confirmations; displayed orders may disappear before a real order executes.
 
+The execution request has an overall deadline bounded by the saved fill window and contract
+close. A hung or late response becomes a no-fill and releases its cash or quantity reservation;
+a later response cannot retry that execution. If storage fails after an observation was captured
+on time, recovery retains that exact observation and capture time rather than fetching a new book.
+
 Sale proceeds credit cash. Each partial sale realizes its proportion of original purchase cost
 and entry fee, plus its own exit fee; only the remaining quantity and cost basis stay open. Exact
 official Kalshi outcomes resolve remaining positions. Unknown outcomes stay unresolved rather
@@ -124,6 +134,48 @@ an earlier decision. Neither early profit nor a high win rate automatically prom
 The hold comparison evaluates exits for each actual entered position. If the adviser sells and
 later reenters the same event, those hypothetical holds can overlap. It is not a separately
 budget-constrained buy-and-hold account and does not by itself prove that the entries are useful.
+
+## Account value and sampled risk
+
+The **Account risk** dialog shows prospective `advisor-valuation-v1` observations. The collector
+reuses the book already archived for each advice or execution and values the resulting holdings
+in the same transaction as that account update. Settlement/comparison updates also record a mark;
+holdings without a matching usable book remain unpriced. Report requests only read those marks.
+No extra exchange requests, new bankroll, retroactive prices or policy changes are introduced.
+
+```text
+estimated account value = available cash + reserved buy cash + net liquidation value
+net liquidation value = proceeds from selling every held contract - exit fees and slippage
+unrealized P&L = net liquidation value - remaining entry cost (including entry fees)
+total marked P&L = estimated account value - initial bankroll
+capital still at risk = remaining entry cost + reserved buy cash
+cash left if all exposure loses = available cash
+```
+
+Reserved sell contracts remain owned and are counted once. Each complete sale estimate uses the
+whole held quantity and the displayed bid depth, with the same fees/slippage as the existing
+adviser. It does not assume a last trade or midpoint is executable. After a partial sale,
+remaining holdings wait for a new book rather than reuse bids consumed by that simulated sale.
+All BTC exposures count toward the worst case; opposite sides and related events receive no assumed diversification
+benefit. A pending buy is still cash in the current valuation, but its maximum reserved cost
+counts as potential loss. These are simulated estimates, not guaranteed sale proceeds.
+
+If any holding has stale/missing prices, unknown fees, insufficient depth or an expired contract
+awaiting official settlement, complete account value and unrealized P&L remain unknown. Known
+individual estimates remain labeled separately. An old or mismatched-account mark is not made
+current by refreshing the report. Current totals disappear when the quote, fees or contract
+expire, and never remain current more than 30 seconds after the mark.
+
+Sampled drawdown measures decline from the higher of the original bankroll and the highest
+complete observed account value. The dialog shows when tracking started, the last complete mark,
+and complete/incomplete counts. Missing marks never reset the peak or become zero-value holdings.
+This is not a continuous maximum drawdown or reconstructed history before deployment. The
+existing realized P&L and realized drawdown remain separate.
+
+These measurements support later profit/risk-based policy comparisons. They do not size trades
+from an unvalidated probability, automatically liquidate holdings or change the frozen `$5`
+realized-loss entry trigger. Configurable sizing, portfolio drawdown stops, partial-order fills,
+and prospective trading-policy promotion require separately versioned implementation/evidence.
 
 ## Storage and ownership
 
@@ -144,7 +196,12 @@ currently owned execution request as a failed attempt. Capital and owned quantit
 atomically. Hashes and immutability detect ordinary corruption/conflicts but are not protection
 against an administrator rewriting the database and its checks.
 
+`advisor_valuations` is append-only and references its original advice or event by source ID.
+`advisor_risk_state` stores the latest hashed mark and accumulated sampled-risk statistics for
+bounded report reads. Valuation persistence and account/evidence changes commit or roll back
+together. Existing account balances, losses and old observations are preserved.
+
 Future work includes real portfolio reconciliation, user-confirmed transactions, resting-order
 lifecycles, execution-quality validation, policy comparisons on unseen periods, calibrated sizing,
-and mark-to-market risk reporting. Real order routing requires a separate explicitly authorized
+and executable portfolio risk controls. Real order routing requires a separate explicitly authorized
 phase. Existing forecast research and chronological validation continue independently.

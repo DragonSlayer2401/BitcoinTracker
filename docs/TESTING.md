@@ -21,17 +21,28 @@ If Windows prevents Turbopack from spawning its Sass worker, use `pnpm exec next
 7. Browser migration deletes old records and upload queues before sync starts, retains Kalshi records, rolls back failed IndexedDB transactions and exposes storage failures. Server migration is idempotent and rejects old writers.
 8. Real checkpoint collection records missing captures without inventing inputs. Overlapping events/checkpoints remain grouped across chronological splits; candidates cannot activate using future labels or unsupported inputs.
 9. History and research reports show only Kalshi outcomes, honest sample counts and absent scores when no results exist.
-10. At desktop and mobile widths, verify React Select keyboard interaction, visible countdown, ECharts hover/keyboard point inspection, focus return from modals, no horizontal overflow, and no hydration warnings.
+10. At desktop and mobile widths, verify React Select keyboard interaction, visible countdown, native chart controls and keyboard access, focus return from modals, no horizontal overflow, and no hydration warnings.
 
-## BRTI chart behavior to verify
+## Coinbase chart behavior to verify
 
-The chart tests include `BenchmarkChart.test.js`, `ChartIndicators.test.js`, `TradingChartOptions.test.js`, `PriceChart.test.jsx`, `ChartDrawings.test.jsx`, and `ChartDrawingInteraction.test.jsx`. Numerical tests check known EMA/MACD/RSI values, candle boundaries, sample coverage, and initialization after missing or partial candles.
+The chart tests cover completed Coinbase OHLC, indicator initialization, the live ticker marker,
+Kalshi target overlays, separate drawing storage, and source-specific history behavior. Existing
+BRTI tests retain coverage for its per-second observation rules. Dashboard tests ensure the target
+tracks the current event while saved research retains its original contract.
 
-1. Open Tools and switch between line and 1/3/5/15-minute candles and each history duration. Confirm display settings, comparison, and drawing placement belong to Tools, saved drawings belong to the separate Drawings manager, and zoom/pan/reset work directly beneath the plot without opening a popup. Confirm observed OHLC and sample counts remain accurate, missing periods stay empty, partial/forming candles are labeled, and stale history never appears live.
-2. Toggle MACD, RSI, and EMA. Confirm separate MACD and RSI headings, value readouts, backgrounds, and dividers, with each panel disappearing when disabled. Check linked crosshairs and zoom, a stable price readout above the plot, and correct inspected prices using both pointer and keyboard controls. Historical line inspection must use a candle that closed at or before the inspected reading, with its close timestamp displayed. Indicators must stay blank until enough complete, consecutive candles exist; zooming must not restart initialization. Longer candle intervals may not have enough history even in the four-hour view.
-3. Inspect an observation, open Tools to pin it, then inspect another and verify the dollar and percentage differences. Confirm the pinned value stays fixed as new readings arrive, Clear comparison in Tools removes it, and changing view or candle interval resets it.
-4. Choose horizontal/vertical or two-point trend placement from Tools; the popup should close for chart interaction. Open Drawings to enter exact prices and local times, edit labels/colors, delete individual lines, clear all drawings, and undo. Verify deletion and clearing survive reloads, plus the 50-drawing limit, visible storage errors, and synchronization with another tab without undo overwriting that tab's edits. Confirm drawing mode pauses pan/zoom and Escape cancels placement.
-5. Expand and restore the chart without losing selected settings, drawings, comparison, or zoom. Confirm Tools, Drawings, and direct zoom controls work in both dashboard and expanded views. At desktop and mobile widths, inspect the compact chart header, popup scrolling, readable panels, keyboard access, modal focus return, and absence of horizontal page overflow.
-6. Confirm chart-only changes do not modify captured forecasts, probabilities, research inputs, or settlement rules. Additional history requests occur only for longer history selections; zooming and drawing do not trigger them.
+1. Check one-minute candles, line view, 3/5/15-minute aggregation, MACD/RSI/EMA and 15m/30m/1h/2h/3h
+   history. Gaps remain gaps; no fabricated BRTI sample counts or incomplete exchange candles.
+2. Verify the amber target line and price label match the current Kalshi strike, remain visible
+   during zoom, update on event rollover, and disappear when no valid target exists. The current
+   Coinbase price has a separate marker; overlapping labels must remain legible.
+3. Confirm the source note and separate BRTI headline distinguish spot chart prices from the
+   settlement index. No BRTI average or forecast-range overlay appears on the Coinbase chart.
+4. Use drawings, exact editing, clear/undo and reload. Coinbase drawings must never read or
+   overwrite old BRTI drawings. Expand/restore must retain the chart's zoom and drawing state.
+5. At desktop and mobile widths, inspect candle readability, indicator separation, hover values,
+   keyboard controls, visible target/countdown, modal focus return and absence of horizontal page
+   overflow. The main chart should fill its desktop panel rather than shrink into a price strip.
+6. Changing chart controls must make no new market requests, especially no
+   `/api/kalshi/benchmark/history` calls. Model inputs, collection and settlement remain unchanged.
 
 Public API smoke checks require network access. Entitled benchmark tests require configured Kalshi credentials and access; report that verification separately. Passing tests proves software behavior, not forecast accuracy.

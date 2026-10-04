@@ -1,7 +1,11 @@
 import 'server-only';
 import { createHash, randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { getResearchWriteTransaction, runResearchSchemaStatements } from '../research.connection';
+import {
+  getResearchReadTransaction,
+  getResearchWriteTransaction,
+  runResearchSchemaStatements,
+} from '../research.connection';
 import {
   ResearchDataError,
   getCanonicalResearchJson,
@@ -23,6 +27,10 @@ import {
   applyAdvisorAdvice,
   applyAdvisorEvent,
 } from './tradingAdvisor.ledger';
+import {
+  getAdvisorValuation,
+  getAdvisorRiskHistory,
+} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorValuation.utils';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const clean = (value) => JSON.parse(JSON.stringify(value));
@@ -81,12 +89,22 @@ const statements = [
     ON advisor_events(policy_id, recorded_at DESC)`,
   `CREATE TABLE IF NOT EXISTS advisor_heartbeats (
     policy_id TEXT PRIMARY KEY REFERENCES advisor_policies(id), payload TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS advisor_valuations (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+    policy_id TEXT NOT NULL REFERENCES advisor_policies(id), observed_at INTEGER NOT NULL,
+    payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS advisor_valuations_policy_time
+    ON advisor_valuations(policy_id, observed_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS advisor_risk_state (
+    policy_id TEXT PRIMARY KEY REFERENCES advisor_policies(id),
+    payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
   ...[
     'advisor_policies',
     'advisor_advice',
     'advisor_inputs',
     'advisor_attempts',
     'advisor_events',
+    'advisor_valuations',
   ].flatMap((table) =>
     ['UPDATE', 'DELETE'].map(
       (operation) =>
@@ -120,18 +138,20 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     }
   }
   async function initialize() {
-    initialization ??= retryLocalBusy(() => runResearchSchemaStatements(client, statements)).catch(
-      (error) => {
-        initialization = null;
-        throw error;
-      },
-    );
+    initialization ??= retryLocalBusy(() =>
+      runResearchSchemaStatements(client, statements, { retryBusy: false }),
+    ).catch((error) => {
+      initialization = null;
+      throw error;
+    });
     await initialization;
   }
   function write(operation) {
     const result = pendingWrite.then(async () => {
       await initialize();
-      const transaction = await retryLocalBusy(() => getResearchWriteTransaction(client));
+      const transaction = await retryLocalBusy(() =>
+        getResearchWriteTransaction(client, { retryBusy: false }),
+      );
       try {
         const result = await operation(transaction);
         await transaction.commit();
@@ -158,6 +178,50 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     await transaction.execute({
       sql: 'UPDATE advisor_accounts SET payload = ?, content_hash = ? WHERE policy_id = ?',
       args: [entry.payload, entry.contentHash, policyId],
+    });
+  }
+  // Marks use the already archived observation and post-mutation holdings. They do not
+  // change the frozen trading policy, spend cash, or request another market snapshot.
+  async function saveValuation(transaction, policyId, account, source, sourceKind) {
+    const policy = decode(await one(transaction, 'advisor_policies', 'id', policyId));
+    const observedAt = source.evaluatedAt ?? source.recordedAt;
+    // A partial sale consumed this observation's bids. Remaining holdings need a new
+    // independent book before those bids can support another complete sale estimate.
+    const hasConsumedExitDepth =
+      source.kind === 'fill' &&
+      source.action === 'sell' &&
+      account.positions.some((position) => position.id === source.positionId);
+    const valuation = {
+      ...getAdvisorValuation({
+        portfolio: getAdvisorPortfolio(account, observedAt),
+        books: source.book && !hasConsumedExitDepth ? [source.book] : [],
+        now: observedAt,
+        policy,
+      }),
+      id: `${source.id}:valuation`,
+      sourceId: source.id,
+      sourceKind,
+      policyId,
+      accountVersion: account.version,
+    };
+    const previous = decode(await one(transaction, 'advisor_risk_state', 'policy_id', policyId));
+    const history = getAdvisorRiskHistory(
+      previous?.history ?? null,
+      valuation,
+      policy.initialBankroll,
+    );
+    const entry = encode(valuation);
+    const state = encode({ valuation, history });
+    await transaction.execute({
+      sql: `INSERT INTO advisor_valuations(id, policy_id, observed_at, payload, content_hash)
+        VALUES (?, ?, ?, ?, ?)`,
+      args: [valuation.id, policyId, observedAt, entry.payload, entry.contentHash],
+    });
+    await transaction.execute({
+      sql: `INSERT INTO advisor_risk_state(policy_id, payload, content_hash) VALUES (?, ?, ?)
+        ON CONFLICT(policy_id) DO UPDATE SET payload = excluded.payload,
+          content_hash = excluded.content_hash`,
+      args: [policyId, state.payload, state.contentHash],
     });
   }
   async function requireLease(transaction, policyId, lease) {
@@ -226,7 +290,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
   }
   async function readStateOnce(policyId) {
     // A read transaction prevents mixing a new account with older advice during a commit.
-    const transaction = await client.transaction('read');
+    const transaction = await getResearchReadTransaction(client);
     try {
       const saved = await one(transaction, 'advisor_policies', 'id', policyId);
       const policy = decode(saved);
@@ -239,6 +303,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
           advice: [],
           events: [],
           attempts: [],
+          risk: null,
         };
       }
       const account = await accountFrom(transaction, policyId);
@@ -265,6 +330,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         advice: adviceRows.rows.map(decode),
         events: eventRows.rows.map(decode),
         attempts,
+        risk: decode(await one(transaction, 'advisor_risk_state', 'policy_id', policyId)),
       };
       await transaction.commit();
       return state;
@@ -362,6 +428,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
           args: [value.id, 'gzip-json', gzipSync(inputs.payload), inputs.contentHash],
         });
       await saveAccount(transaction, value.policyId, next);
+      await saveValuation(transaction, value.policyId, next, value, 'advice');
       return value;
     });
   }
@@ -418,6 +485,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
       ],
     });
     await saveAccount(transaction, value.policyId, next);
+    await saveValuation(transaction, value.policyId, next, value, 'event');
     return value;
   }
   async function saveExecution({
@@ -440,14 +508,19 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
       }
       if (!isResearchTimestamp(recordedAt) || recordedAt > now()) reject('Invalid execution time.');
       const attempt = decode(await one(transaction, 'advisor_attempts', 'advice_id', adviceId));
+      const executionWindowExpired =
+        recordedAt > advice.evaluatedAt + advice.policy.maximumFillDelayMs ||
+        recordedAt >= advice.contract.expiresAt;
       // A failed network observation is frozen evidence too. Its original owner may retry
       // persisting that exact failure after renewing its lease, without fetching a new price.
+      // A response received after the original lease may only resolve an expired window
+      // as no-fill; it must not leave its reservation permanently stuck in the retry queue.
       const ownsFrozenObservation = Boolean(
         attempt &&
         attempt.leaseToken === observationAttemptToken &&
         attempt.owner === lease.owner &&
         recordedAt >= attempt.requestedAt &&
-        recordedAt <= attempt.leaseExpiresAt,
+        (recordedAt <= attempt.leaseExpiresAt || executionWindowExpired),
       );
       if (book && (!ownsFrozenObservation || book.requestedAt < attempt.requestedAt))
         reject('Execution price needs its original durable request claim.');
@@ -629,7 +702,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     { afterSequence = 0, limit = 100, kind = 'advice' } = {},
   ) {
     if (
-      !['advice', 'events'].includes(kind) ||
+      !['advice', 'events', 'valuations'].includes(kind) ||
       !Number.isSafeInteger(afterSequence) ||
       afterSequence < 0 ||
       !Number.isSafeInteger(limit) ||

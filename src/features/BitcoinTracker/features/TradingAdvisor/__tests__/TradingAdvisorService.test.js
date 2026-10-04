@@ -50,6 +50,31 @@ test('reporting does not enroll an experiment or fetch prices', async () => {
   expect((await repository.readState(policy.id)).policy).toBeNull();
 });
 
+test('reports saved account valuations without fetching quotes or making an old mark current', async () => {
+  await advance();
+  const calls = loadBook.mock.calls.length;
+  let report = await service.getReport();
+  expect(report.risk.isCurrent).toBe(true);
+  expect(report.risk.valuation.executableEquity).toBe(100);
+  clock += 30000;
+  report = await service.getReport();
+  expect(report.risk.isCurrent).toBe(false);
+  expect(report.risk.valuation.observedAt).toBe(clock - 30000);
+  expect(report.risk.history.observationCount).toBe(1);
+  expect(loadBook).toHaveBeenCalledTimes(calls);
+});
+
+test('an open-position mark expires with its book before the report-age ceiling', async () => {
+  await advance();
+  clock += policy.minimumFillDelayMs;
+  await advance();
+  expect((await service.getReport()).risk.isCurrent).toBe(true);
+  clock += 15000;
+  const report = await service.getReport();
+  expect(report.risk.isCurrent).toBe(false);
+  expect(clock - report.risk.valuation.observedAt).toBeLessThan(30000);
+});
+
 test('records advice, performs one delayed fill, holds, and compares completed settlement with holding', async () => {
   await advance();
   let report = await service.getReport();
@@ -157,6 +182,129 @@ test('a failed execution request retries its frozen no-fill after a transient wr
   expect(report.latestAdvice.executionStatus).toBe('no-fill');
 });
 
+test.each([
+  [16000, false],
+  [61000, false],
+  [61000, true],
+])(
+  'an execution response after %i ms (failed request: %p) releases the buy reservation without another observation',
+  async (delay, fails) => {
+    await advance();
+    clock += policy.minimumFillDelayMs;
+    loadBook.mockImplementationOnce(async () => {
+      clock += delay;
+      if (fails) throw new Error('late network failure');
+      return bookAt(clock);
+    });
+    const executeOnly = () =>
+      service.advance({ market: null, getForecast: () => forecastAt(clock) });
+    if (delay > 60000) {
+      await expect(executeOnly()).rejects.toMatchObject({ code: 'ADVISOR_LEASE_LOST' });
+      clock += 1000;
+    }
+    await executeOnly();
+    const report = await service.getReport();
+    expect(report.portfolio).toMatchObject({ cash: 100, reservedCapital: 0, pendingIntents: [] });
+    expect(report.performance).toMatchObject({ fillCount: 0, noFillCount: 1 });
+    expect(report.recentActivity.find((row) => row.kind === 'no-fill')).toMatchObject({
+      reason: 'execution_window_expired',
+    });
+    expect(loadBook).toHaveBeenCalledTimes(2);
+  },
+);
+
+test('a sell response after lease expiry releases the reserved quantity without selling it', async () => {
+  await advance();
+  clock += 2000;
+  await advance();
+  clock += 13000;
+  probability = 0.2;
+  await advance();
+  const reserved = await service.getReport();
+  expect(reserved.latestAdvice.action).toBe('sell');
+  expect(reserved.portfolio.positions[0].availableQuantity).toBe(0);
+  clock += 2000;
+  loadBook.mockImplementationOnce(async () => {
+    clock += 61000;
+    return bookAt(clock);
+  });
+  const executeOnly = () => service.advance({ market: null, getForecast: () => forecastAt(clock) });
+  await expect(executeOnly()).rejects.toMatchObject({ code: 'ADVISOR_LEASE_LOST' });
+  clock += 1000;
+  await executeOnly();
+  const report = await service.getReport();
+  expect(report.portfolio.cash).toBe(reserved.portfolio.cash);
+  expect(report.portfolio.pendingIntents).toEqual([]);
+  expect(report.portfolio.positions[0]).toMatchObject({
+    quantity: reserved.portfolio.positions[0].quantity,
+    availableQuantity: reserved.portfolio.positions[0].quantity,
+    costBasis: reserved.portfolio.positions[0].costBasis,
+  });
+  expect(report.performance).toMatchObject({ fillCount: 1, noFillCount: 1, exitCount: 0 });
+  expect(loadBook).toHaveBeenCalledTimes(4);
+});
+
+test('an execution request that never resolves expires and ignores its eventual late response', async () => {
+  await advance();
+  jest.useFakeTimers();
+  try {
+    let completeRequest;
+    let requestStarted;
+    const started = new Promise((resolve) => {
+      requestStarted = resolve;
+    });
+    loadBook.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          completeRequest = resolve;
+          requestStarted();
+        }),
+    );
+    clock += policy.minimumFillDelayMs;
+    const executing = service.advance({ market: null, getForecast: () => forecastAt(clock) });
+    await started;
+    const remaining = policy.maximumFillDelayMs - policy.minimumFillDelayMs + 1;
+    clock += remaining;
+    await jest.advanceTimersByTimeAsync(remaining);
+    await executing;
+    expect((await service.getReport()).portfolio).toMatchObject({
+      cash: 100,
+      reservedCapital: 0,
+      pendingIntents: [],
+    });
+    completeRequest(bookAt(clock));
+    await Promise.resolve();
+    expect((await service.getReport()).performance).toMatchObject({ fillCount: 0, noFillCount: 1 });
+    expect(loadBook).toHaveBeenCalledTimes(2);
+    expect(jest.getTimerCount()).toBe(0);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a captured in-window fill survives a storage failure lasting beyond the original lease', async () => {
+  await advance();
+  const save = repository.saveExecution;
+  const spy = jest
+    .spyOn(repository, 'saveExecution')
+    .mockImplementationOnce(async () => {
+      clock += 61000;
+      throw new Error('storage response delayed');
+    })
+    .mockImplementation(save);
+  clock += 2000;
+  await expect(advance()).rejects.toThrow('storage response delayed');
+  const captured = spy.mock.calls[0][0];
+  await service.advance({ market: null, getForecast: () => forecastAt(clock) });
+  const retried = spy.mock.calls[1][0];
+  expect(retried.recordedAt).toBe(captured.recordedAt);
+  expect(retried.book).toEqual(captured.book);
+  expect(retried.observationAttemptToken).toBe(captured.observationAttemptToken);
+  expect(retried.lease.token).not.toBe(captured.lease.token);
+  expect((await service.getReport()).performance).toMatchObject({ fillCount: 1, noFillCount: 0 });
+  expect(loadBook).toHaveBeenCalledTimes(2);
+});
+
 test('an unknown successful commit is retried idempotently without a second fill', async () => {
   await advance();
   const save = repository.saveExecution;
@@ -231,6 +379,52 @@ test('another collector cannot abandon an execution while its original request i
   resolveBook(bookAt(clock));
   await executing;
   expect((await service.getReport()).performance.fillCount).toBe(1);
+});
+
+test('the original collector resumes after another writer expires its delayed execution', async () => {
+  await advance();
+  let resolveBook;
+  let requestStarted;
+  const started = new Promise((resolve) => {
+    requestStarted = resolve;
+  });
+  loadBook.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveBook = resolve;
+        requestStarted();
+      }),
+  );
+  clock += 2000;
+  const executing = service.advance({ market: null, getForecast: () => forecastAt(clock) });
+  const failedLease = expect(executing).rejects.toMatchObject({ code: 'ADVISOR_LEASE_LOST' });
+  await started;
+  clock += 61000;
+  const second = createTradingAdvisorService({
+    repository,
+    loadBook,
+    loadMarket,
+    now: () => clock,
+    owner: 'service-two',
+  });
+  await second.advance({ market: null, getForecast: () => forecastAt(clock) });
+  const resolved = await service.getReport();
+  const originalEvent = resolved.recentActivity.find((row) => row.kind === 'no-fill');
+  expect(resolved.portfolio).toMatchObject({ cash: 100, reservedCapital: 0, pendingIntents: [] });
+  resolveBook(bookAt(clock));
+  await failedLease;
+  clock += 1000;
+  await service.advance({ market: null, getForecast: () => forecastAt(clock) });
+  const recovered = await service.getReport();
+  expect(recovered.recentActivity.find((row) => row.kind === 'no-fill')).toEqual(originalEvent);
+  expect(recovered.performance).toMatchObject({ fillCount: 0, noFillCount: 1 });
+  expect(loadBook).toHaveBeenCalledTimes(2);
+  // The old retry must not prevent the next ordinary observation from being saved.
+  probability = 0.5;
+  clock += 10000;
+  await advance();
+  expect((await service.getReport()).performance.adviceCount).toBe(2);
+  expect((await service.getReport()).latestAdvice.action).toBe('wait');
 });
 
 test('restart after a durable request claim records an expired no-fill and never fetches a replacement', async () => {

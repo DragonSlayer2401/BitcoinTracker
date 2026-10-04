@@ -62,6 +62,34 @@
     border-bottom: 1px solid var(--tracker-border);
     padding-bottom: 8px;
   }
+  .advisor-target {
+    color: #f0c577;
+    font-variant-numeric: tabular-nums;
+  }
+  .price-summary-compact {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--tracker-border);
+
+    > div:last-of-type {
+      flex: 1;
+    }
+    .section-title {
+      font-size: 12px;
+      color: var(--tracker-muted);
+    }
+    .current-price {
+      font-size: 22px;
+      letter-spacing: -0.5px;
+    }
+    .price-change {
+      font-size: 11px;
+      padding: 3px 6px;
+    }
+  }
   .advisor-action-call {
     border: 1px solid var(--tracker-border);
     background: linear-gradient(120deg, #1c2821, #17201d);
@@ -159,7 +187,20 @@
       min-height: 0;
     }
     .advisor-workspace {
+      grid-template-columns: minmax(0, 2.2fr) minmax(350px, 1fr);
+      grid-template-areas: 'chart account' 'chart action' 'positions positions';
       grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+    .advisor-account-values {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      dd {
+        font-size: 18px;
+        line-height: 1.25;
+      }
+    }
+    .advisor-account-time {
+      font-size: 11px;
     }
     .advisor-action,
     .advisor-chart {
@@ -171,20 +212,8 @@
       overflow: auto;
       scrollbar-width: thin;
     }
-    .advisor-chart .price-summary {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 8px;
-      align-items: center;
-    }
-    .advisor-chart .price-summary > p {
-      grid-column: 1 / -1;
-    }
-    .advisor-chart .price-summary .current-price {
-      font-size: 30px;
-    }
-    .advisor-chart .market-chart.trading-chart .price-chart-canvas {
-      height: clamp(170px, calc(100svh - 570px), 440px);
+    .advisor-chart {
+      overflow: hidden;
     }
   }
   @media (max-width: 1199.98px) {

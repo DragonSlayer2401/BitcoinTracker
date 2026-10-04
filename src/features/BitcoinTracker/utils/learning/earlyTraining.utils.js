@@ -1,13 +1,9 @@
 import { KALSHI_OUTCOME_DEFINITION } from '../kalshi/contract.utils';
-import { isLearningFeatureSnapshot } from './features.utils';
 import {
   getVerifiedLearningRows,
   groupOverlappingWindows,
-  getIndependentRows,
   getWindowRepresentative,
   scoreLearningRows,
-  collectLearningEvents,
-  hasContemporaneousInputs,
 } from './evaluation.utils';
 import {
   selectLearningPipelineRows,
@@ -17,7 +13,7 @@ import {
   getModelApplicability,
   getPairedBootstrapUncertainty,
 } from './training.utils';
-import { matchesOutcomeModelPipeline } from './model.utils';
+import { getProspectiveLearningCohort } from './prospectiveCohort.utils';
 import { fitLogistic, logit } from './statistics.utils';
 import {
   EARLY_MODEL_VERSION,
@@ -132,56 +128,6 @@ export function trainEarlyCandidate(events, { now = Date.now() } = {}) {
   }
 }
 
-function getProspectiveRows(model, events, now, startsAfter) {
-  const { rows } = getVerifiedLearningRows(events, now);
-  const { decisions, outcomes, conflicts } = collectLearningEvents(events, now);
-  // Select chronological decisions before consulting outcome availability. A slow official
-  // result must hold its original cohort slot rather than letting a later winner replace it.
-  const eligible = [...decisions.values()]
-    .filter(
-      (decision) =>
-        decision.cohort === 'kalshi-background' &&
-        hasContemporaneousInputs(decision) &&
-        Number.isFinite(decision.aboveProbability) &&
-        decision.aboveProbability >= 0 &&
-        decision.aboveProbability <= 1 &&
-        Number.isFinite(decision.belowProbability) &&
-        decision.belowProbability >= 0 &&
-        decision.belowProbability <= 1 &&
-        Math.abs(decision.aboveProbability + decision.belowProbability - 1) <= 1e-6 &&
-        matchesOutcomeModelPipeline(model, decision.learningFeatures) &&
-        isLearningFeatureSnapshot(decision.learningFeatures, {
-          target: decision.target,
-          expiresAt: decision.expiresAt,
-          cutoffAt: decision.inputObservedAt,
-          outcomeDefinition: model.outcomeDefinition,
-        }) &&
-        decision.learningFeatures.settlementKnownFraction === 0 &&
-        decision.windowStartAt > startsAfter &&
-        decision.capturedAt > startsAfter,
-    )
-    .map((decision) => ({
-      id: decision.forecastId,
-      windowStartAt: decision.windowStartAt,
-      capturedAt: decision.capturedAt,
-      expiresAt: decision.expiresAt,
-      horizonMinutes: (decision.expiresAt - decision.capturedAt) / 60_000,
-      outcomeDefinition: model.outcomeDefinition,
-      learningFeatures: decision.learningFeatures,
-      decision,
-    }));
-  return {
-    prospective: getIndependentRows(eligible),
-    resolved: new Map(rows.map((row) => [row.id, row])),
-    terminalFailures: new Set([
-      ...conflicts,
-      ...[...outcomes.entries()]
-        .filter(([, outcome]) => outcome.outcomeStatus === 'unobserved')
-        .map(([id]) => id),
-    ]),
-  };
-}
-
 function compareWithBaseline(rows, probabilities, { includeUncertainty = true } = {}) {
   const baselineRows = rows.map((row) => ({
     ...row,
@@ -236,7 +182,7 @@ export function evaluateEarlyShadowCandidate(model, events, { now = Date.now() }
       independentWindows: 0,
       reasons: ['A valid early candidate is required.'],
     };
-  const cohort = getProspectiveRows(model, events, now, model.shadowStartsAt);
+  const cohort = getProspectiveLearningCohort(model, events, now, model.shadowStartsAt);
   const prospective = cohort.prospective.slice(0, EARLY_LEARNING_REQUIREMENTS.minimumShadowWindows);
   const resolved = prospective.map((row) => cohort.resolved.get(row.id)).filter(Boolean);
   const scored = resolved.filter((row) => {
@@ -334,7 +280,7 @@ export function evaluateEarlyActiveModel(model, events, { now = Date.now() } = {
       callCoverage: 0,
       thresholds: EARLY_MONITORING_THRESHOLDS,
     };
-  const cohort = getProspectiveRows(model, events, now, activation.activatedAt);
+  const cohort = getProspectiveLearningCohort(model, events, now, activation.activatedAt);
   const prospective = cohort.prospective.slice(
     -EARLY_LEARNING_REQUIREMENTS.minimumMonitoringWindows,
   );

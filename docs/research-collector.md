@@ -198,7 +198,7 @@ loaded code generation, and BRTI, spot, futures and contract freshness. The moda
 every 30 seconds using a separate read-only endpoint. These checks query the shared research
 database; they do not contact Kalshi, fit models or activate candidates.
 
-The current collector identifies itself as `kalshi-collector-2026-10-03-v2` and records
+The current collector identifies itself as `kalshi-collector-2026-10-03-v4` and records
 `kalshi-ablation-v5` experiments. It writes a heartbeat at startup, every 30 seconds while running,
 and on a clean stop or reported error. A heartbeat more than 90 seconds old becomes **Heartbeat
 overdue**; this can mean the process stopped, lost connectivity, or cannot write to the database.
@@ -260,6 +260,34 @@ the same stored report. Its polling does not make additional Kalshi requests. Se
 
 Prediction research and its chronological model validation continue independently. Paper profit
 does not automatically activate a prediction model or approve a strategy for live execution.
+
+## Full-model deterioration monitoring
+
+An activated full outcome classifier is checked against the baseline probability saved at each
+original capture. The check selects the latest 120 independent background contract windows that
+started after activation and have reached their scheduled close. Selection happens before official
+outcomes are inspected. Every selected outcome and recorded prediction must verify; missing labels
+hold their slots instead of being replaced with older resolved contracts. Manual forecasts do not
+qualify, and at least 60 windows must actually apply a learned probability adjustment. Valid
+out-of-domain baseline fallbacks retain coverage without counting as learned adjustments.
+
+The full model is stopped when the paired 95% bootstrap interval lies entirely beyond either
+declared deterioration margin: more than 0.005 additional Brier error, or more than five percentage
+points lower directional accuracy, compared with the matching saved baseline. Both metrics use
+the same captures and official outcomes. A one-sided market regime is included; it is not dropped
+for lacking both result classes. Incomplete evidence is reported as monitoring, never a passed
+health check. A complete check within the limits means deterioration has not been established,
+not that the model has proved itself profitable.
+
+Read endpoints immediately suppress a deteriorated model so forecasts use their baseline. The
+leased analysis cycle records its retirement durably, and the same cycle does not train or
+activate a replacement. A failed retirement write also cannot proceed to replacement activation.
+Existing artifacts, saved forecasts and outcomes remain unchanged. Subsequent replacements still
+need their own original validation; retirement is not approval. The learning report exposes this
+under `full.monitoring`.
+
+These rolling checks are operational fallback rules. Repeated monitoring is not a one-time
+statistical guarantee, and prediction accuracy or Brier error is not trading profitability.
 
 ## Durable state
 

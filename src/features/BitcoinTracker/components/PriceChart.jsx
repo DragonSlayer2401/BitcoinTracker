@@ -18,6 +18,7 @@ import { formatCountdown, formatDateTime, formatPrice, formatTime } from '../uti
 import { getBenchmarkSettlement } from '../utils/benchmarkChart.utils';
 import { getCandleDescription, getPriceChartOption } from '../utils/priceChart.utils';
 import { aggregateChartCandles, getChartIndicators } from '../utils/chartIndicators.utils';
+import { COINBASE_CHART_DRAWINGS_STORAGE_KEY } from '../utils/chartDrawings.utils';
 import useBenchmarkChartHistory from '../hooks/useBenchmarkChartHistory';
 import useChartDrawings from '../hooks/useChartDrawings';
 import useChartDrawingInteraction from '../hooks/useChartDrawingInteraction';
@@ -43,6 +44,8 @@ const MINUTE = 60_000;
 const CHART_OPTIONS = { renderer: 'svg' };
 const REPLACED_CHART_OPTIONS = ['series', 'grid', 'xAxis', 'yAxis'];
 const EMPTY_READINGS = [];
+const COINBASE_HISTORY_MINUTES = [15, 30, 60, 120, 180];
+const EMPTY_SETTLEMENT = getBenchmarkSettlement([], null, 0);
 
 function nearestObservationIndex(points, time, maximumDistance) {
   let best = -1;
@@ -57,7 +60,19 @@ function nearestObservationIndex(points, time, maximumDistance) {
   return best;
 }
 
-export default function PriceChart({ benchmarkData, forecast, target, now = 0, deadline }) {
+export default function PriceChart({
+  benchmarkData,
+  chartData,
+  forecast,
+  target,
+  now = 0,
+  deadline,
+}) {
+  const isCoinbase = chartData?.source === 'coinbase';
+  const source = isCoinbase ? 'coinbase' : 'brti';
+  const sourceLabel = isCoinbase ? 'Coinbase BTC/USD' : 'BRTI';
+  const displayedForecast = isCoinbase ? null : forecast;
+  const displayedDeadline = isCoinbase ? null : deadline;
   const [windowMinutes, setWindowMinutes] = useState(60);
   const [view, setView] = useState('candles');
   const [candleMinutes, setCandleMinutes] = useState(1);
@@ -75,7 +90,9 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
   const wasExpanded = useRef(false);
   const canvasRef = useRef(null);
   const chartId = useId();
-  const drawingState = useChartDrawings();
+  const drawingState = useChartDrawings(
+    isCoinbase ? COINBASE_CHART_DRAWINGS_STORAGE_KEY : undefined,
+  );
   const { draftDrawing, isChoosingEnd } = useChartDrawingInteraction({
     chart,
     activeTool,
@@ -84,7 +101,12 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
   });
   const endTime = Number.isFinite(now) ? now : 0;
   const startTime = endTime - windowMinutes * MINUTE;
-  const history = useBenchmarkChartHistory(benchmarkData, windowMinutes, endTime);
+  const history = useBenchmarkChartHistory(
+    isCoinbase ? chartData : benchmarkData,
+    windowMinutes,
+    endTime,
+    !isCoinbase,
+  );
   const allReadings = history.chartData?.readings || EMPTY_READINGS;
   const allCandles = history.chartData?.candles || EMPTY_READINGS;
   const aggregatedCandles = useMemo(
@@ -103,13 +125,13 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
   const candles = useMemo(
     () =>
       aggregatedCandles.filter(
-        (candle) => candle.time >= startTime && candle.firstSampleAt <= endTime,
+        (candle) => candle.time >= startTime && (candle.firstSampleAt ?? candle.time) <= endTime,
       ),
     [aggregatedCandles, startTime, endTime],
   );
   const settlement = useMemo(
-    () => getBenchmarkSettlement(allReadings, deadline, endTime),
-    [allReadings, deadline, endTime],
+    () => (isCoinbase ? EMPTY_SETTLEMENT : getBenchmarkSettlement(allReadings, deadline, endTime)),
+    [allReadings, deadline, endTime, isCoinbase],
   );
   const annotations = useMemo(
     () => (draftDrawing ? [...drawingState.drawings, draftDrawing] : drawingState.drawings),
@@ -129,12 +151,13 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
       getPriceChartOption({
         readings,
         candles,
+        source,
         view,
-        forecast,
+        forecast: displayedForecast,
         target,
         startTime,
         endTime,
-        deadline,
+        deadline: displayedDeadline,
         settlement,
         zoomRange,
         indicators,
@@ -152,12 +175,13 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
     [
       readings,
       candles,
+      source,
       view,
-      forecast,
+      displayedForecast,
       target,
       startTime,
       endTime,
-      deadline,
+      displayedDeadline,
       settlement,
       zoomRange,
       indicators,
@@ -185,7 +209,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
       : nearestObservationIndex(
           observations,
           inspectedTime,
-          view === 'candles' ? (candleMinutes * MINUTE) / 2 : 1000,
+          view === 'candles' ? (candleMinutes * MINUTE) / 2 : isCoinbase ? MINUTE / 2 : 1000,
         );
   const inspectedPoint = observations[inspectedIndex];
   const inspectedCandle =
@@ -205,11 +229,13 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
     ? ''
     : view === 'candles'
       ? getCandleDescription(inspectedPoint)
-      : `${formatDateTime(inspectedPoint.time)} · ${formatPrice(inspectedPoint.price)} · CF Benchmarks BRTI`;
+      : `${formatDateTime(inspectedPoint.time)} · ${formatPrice(inspectedPoint.price)} · ${isCoinbase ? 'Coinbase BTC/USD minute close' : 'CF Benchmarks BRTI'}`;
   const lastPoint = readings.at(-1);
   const isPriceRising = !lastPoint || lastPoint.price >= readings[0].price;
   const status = history.chartData?.status || 'unavailable';
-  const description = `Latest displayed BRTI ${formatPrice(lastPoint?.price)} at ${formatDateTime(lastPoint?.time)}. Kalshi target ${formatPrice(target)}. ${status === 'live' ? 'Live BRTI readings.' : 'BRTI is unavailable or stale; displayed history is not a live quote.'} ${hasModelInterval ? `The vertical interval at the actual deadline is the live model's 80% settlement-average range (${formatCountdown(deadline - endTime)} remaining), ${formatPrice(forecast.kalshi.settlementLowerBound)} to ${formatPrice(forecast.kalshi.settlementUpperBound)}. It is not the recorded prediction or an observed future price.` : 'The live model range is currently unavailable.'}`;
+  const description = isCoinbase
+    ? `Coinbase spot candles and minute closes. ${status === 'live' ? 'The current-price line shows the latest Coinbase quote.' : 'The last-price line is stale; displayed history is not a live quote.'} Kalshi target ${formatPrice(target)} is a reference level. Kalshi settles using CF Benchmarks BRTI, not Coinbase prices.`
+    : `Latest displayed BRTI ${formatPrice(lastPoint?.price)} at ${formatDateTime(lastPoint?.time)}. Kalshi target ${formatPrice(target)}. ${status === 'live' ? 'Live BRTI readings.' : 'BRTI is unavailable or stale; displayed history is not a live quote.'} ${hasModelInterval ? `The vertical interval at the actual deadline is the live model's 80% settlement-average range (${formatCountdown(deadline - endTime)} remaining), ${formatPrice(forecast.kalshi.settlementLowerBound)} to ${formatPrice(forecast.kalshi.settlementUpperBound)}. It is not the recorded prediction or an observed future price.` : 'The live model range is currently unavailable.'}`;
 
   useEffect(() => {
     if (wasExpanded.current && !isExpanded) expandButtonRef.current?.focus();
@@ -375,6 +401,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
         candleMinutes={candleMinutes}
         onCandleMinutesChange={changeInterval}
         windowMinutes={windowMinutes}
+        historyMinutes={isCoinbase ? COINBASE_HISTORY_MINUTES : undefined}
         onWindowMinutesChange={changeHistory}
         showMacd={enabledIndicators.macd}
         showRsi={enabledIndicators.rsi}
@@ -412,14 +439,28 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
       <div className="chart-header d-flex justify-content-between align-items-center gap-2 mb-1">
         <div className="d-flex flex-wrap align-items-baseline gap-2">
           <h2 id={`${chartId}-heading`} className="section-title mb-0">
-            BRTI price activity
+            {isCoinbase ? 'Coinbase BTC/USD' : 'BRTI price activity'}
           </h2>
           <span
             className={`chart-source ${status === 'live' ? 'text-secondary' : 'text-warning'}`}
             title={history.chartData?.reason || undefined}
           >
-            CF Benchmarks · {view === 'candles' ? `${candleMinutes}m candles` : 'Index readings'} ·{' '}
-            {status === 'live' ? 'Live' : status === 'stale' ? 'Stale history' : 'Unavailable'}
+            {isCoinbase ? '' : 'CF Benchmarks · '}
+            {view === 'candles'
+              ? `${candleMinutes}m candles`
+              : isCoinbase
+                ? 'Minute closes'
+                : 'Index readings'}{' '}
+            ·{' '}
+            {status === 'live'
+              ? isCoinbase
+                ? 'Live quote'
+                : 'Live'
+              : status === 'stale'
+                ? isCoinbase
+                  ? 'Delayed'
+                  : 'Stale history'
+                : 'Unavailable'}
           </span>
         </div>
         <div className="d-flex align-items-center gap-1">
@@ -438,7 +479,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
             variant="chart"
             size="sm"
             aria-label={isExpanded ? 'Restore chart' : 'Expand chart'}
-            className="chart-expand-button"
+            className={isCoinbase ? undefined : 'chart-expand-button'}
             ref={expandButtonRef}
             title={isExpanded ? 'Restore chart' : 'Expand chart'}
             onClick={() => {
@@ -447,7 +488,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
               setIsExpanded((value) => !value);
             }}
           >
-            {isExpanded ? '↙' : '⛶'}
+            {isCoinbase ? (isExpanded ? 'Restore' : 'Expand') : isExpanded ? '↙' : '⛶'}
           </Button>
         </div>
       </div>
@@ -494,6 +535,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
             showMacd={enabledIndicators.macd}
             showRsi={enabledIndicators.rsi}
             showEma={enabledIndicators.ema}
+            source={source}
           />
           <div
             className={`price-chart-frame position-relative ${activeTool !== 'select' ? 'drawing-active' : ''}`}
@@ -508,7 +550,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
               role="img"
               tabIndex={0}
               aria-describedby={`${chartId}-instructions`}
-              aria-label={`Bitcoin BRTI ${view === 'candles' ? 'candles' : 'price'} over the last ${windowMinutes} minutes. Visible range ${formatDateTime(visibleRange.startTime)} to ${formatDateTime(visibleRange.endTime)}. ${description}`}
+              aria-label={`Bitcoin ${sourceLabel} ${view === 'candles' ? 'candles' : 'price'} over the last ${windowMinutes} minutes. Visible range ${formatDateTime(visibleRange.startTime)} to ${formatDateTime(visibleRange.endTime)}. ${description}`}
               className="price-chart-canvas"
             >
               <ReactEChartsCore
@@ -532,7 +574,11 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
                 step="1"
                 value={Math.max(0, inspectedIndex)}
                 aria-label={
-                  view === 'candles' ? 'Inspect BRTI candles' : 'Inspect historical BRTI readings'
+                  view === 'candles'
+                    ? `Inspect ${sourceLabel} candles`
+                    : isCoinbase
+                      ? 'Inspect historical Coinbase closes'
+                      : 'Inspect historical BRTI readings'
                 }
                 aria-valuetext={pointDescription}
                 aria-describedby={`${chartId}-instructions`}
@@ -558,15 +604,17 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
           )}
           <figcaption className="chart-legend d-flex flex-wrap align-items-center gap-3 small text-secondary">
             <span>
-              <i className="legend-line" /> BRTI
+              <i className="legend-line" />{' '}
+              {isCoinbase ? 'Coinbase spot · Kalshi settles on BRTI' : 'BRTI'}
               {view === 'candles' ? ' · dim candles are partial' : ''}
             </span>
             {hasTarget && (
               <span>
-                <i className="legend-line target" /> Target {formatPrice(target)}
+                <i className="legend-line target" /> {isCoinbase ? 'Kalshi target' : 'Target'}{' '}
+                {formatPrice(target)}
               </span>
             )}
-            {Number.isFinite(deadline) && deadline > startTime && (
+            {!isCoinbase && Number.isFinite(deadline) && deadline > startTime && (
               <span title={formatDateTime(deadline)}>
                 <i className="legend-area settlement" /> Final minute · {formatTime(deadline)}
               </span>
@@ -589,8 +637,14 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
           <span id={`${chartId}-instructions`} className="visually-hidden">
             Hover or tap the chart to inspect values in the fixed readout above. Use this slider's
             arrow keys to compare each{' '}
-            {view === 'candles' ? 'candle and its observed sample coverage' : 'BRTI reading'}. Pin
-            one observation to compare it with another. Scroll or pinch to zoom, drag to pan.
+            {view === 'candles'
+              ? isCoinbase
+                ? 'candle and its observed minute coverage'
+                : 'candle and its observed sample coverage'
+              : isCoinbase
+                ? 'Coinbase minute close'
+                : 'BRTI reading'}
+            . Pin one observation to compare it with another. Scroll or pinch to zoom, drag to pan.
             Drawing tools place horizontal and vertical lines with one click, or a trend line with
             two clicks. Tools contains drawing placement, indicators, and comparison controls.
             Drawings lists saved lines with exact editing, individual deletion, and Clear all
@@ -602,7 +656,9 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
       ) : (
         <>
           <div className="chart-empty d-flex align-items-center justify-content-center text-secondary">
-            Waiting for CF Benchmarks BRTI history…
+            {isCoinbase
+              ? 'Waiting for Coinbase BTC/USD candles…'
+              : 'Waiting for CF Benchmarks BRTI history…'}
           </div>
           <div className="chart-inspection d-flex justify-content-end">{zoomControls}</div>
         </>
@@ -611,7 +667,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
   );
   return (
     <section
-      className={`market-chart trading-chart ${isPriceRising ? 'trend-up' : 'trend-down'}`}
+      className={`market-chart trading-chart ${isCoinbase ? 'coinbase-price-chart' : ''} ${isPriceRising ? 'trend-up' : 'trend-down'}`}
       aria-labelledby={`${chartId}-heading`}
       onKeyDown={handleKeyDown}
     >
@@ -627,7 +683,7 @@ export default function PriceChart({ benchmarkData, forecast, target, now = 0, d
           >
             <Modal.Body className="bitcoin-tracker p-3" onKeyDown={handleKeyDown}>
               <div
-                className={`market-chart trading-chart expanded-chart ${isPriceRising ? 'trend-up' : 'trend-down'}`}
+                className={`market-chart trading-chart expanded-chart ${isCoinbase ? 'coinbase-price-chart' : ''} ${isPriceRising ? 'trend-up' : 'trend-down'}`}
               >
                 {content}
               </div>

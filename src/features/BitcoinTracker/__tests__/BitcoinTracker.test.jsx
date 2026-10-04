@@ -5,7 +5,7 @@ import { Provider } from 'react-redux';
 import { useGetCandlesQuery, useGetTickerQuery } from '@/services/coinbase/coinbase.api';
 import { useGetKalshiMarketsQuery, useGetKalshiBenchmarkQuery } from '@/services/kalshi/kalshi.api';
 import BitcoinTracker from '../index.web';
-import PriceChart from '../components/PriceChart';
+import CoinbaseChart from '../components/CoinbaseChart';
 import trackerReducer from '../state/slices/trackerSlice';
 import { formatPercent } from '../utils/format.utils';
 import {
@@ -24,7 +24,9 @@ jest.mock('@/services/kalshi/kalshi.api', () => ({
   useGetKalshiBenchmarkQuery: jest.fn(),
 }));
 
-jest.mock('../components/PriceChart', () => jest.fn(() => null));
+jest.mock('../components/CoinbaseChart', () =>
+  jest.fn(() => <section aria-label="Coinbase BTC/USD chart" />),
+);
 jest.mock('../hooks/useCoinbaseStream', () => () => mockStream);
 jest.mock('../hooks/useResearchSync', () => () => ({ warning: null, lastSyncedAt: null }));
 jest.mock('../hooks/useResearchLearning', () => {
@@ -292,7 +294,7 @@ describe('BitcoinTracker interactions', () => {
       }),
     );
     const { rerenderTracker } = await renderTracker({ openResearch: false });
-    const headline = within(screen.getByRole('region', { name: 'Bitcoin index price' }));
+    const headline = within(screen.getByRole('region', { name: 'Kalshi reference index' }));
     expect(headline.getByText('$50,123.45')).toBeInTheDocument();
     expect(screen.getByText('BRTI live')).toBeInTheDocument();
     quoteQuery = createQuery(createMarket(NOW, 51_000).ticker);
@@ -328,7 +330,7 @@ describe('BitcoinTracker interactions', () => {
     expect(store.getState().tracker.forecasts).toEqual([]);
   });
 
-  test('keeps the main trading chart on the current event while an older forecast stays in research', async () => {
+  test('keeps the Coinbase chart separate from Kalshi event rollover and saved research', async () => {
     const current = createKalshiContract();
     useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [current], receivedAt: NOW }));
     const { rerenderTracker } = await renderTracker({ openResearch: false });
@@ -350,7 +352,8 @@ describe('BitcoinTracker interactions', () => {
     );
     rerenderTracker();
     act(() => jest.advanceTimersByTime(1000));
-    expect(PriceChart.mock.lastCall[0]).toMatchObject({
+    expect(screen.getByRole('region', { name: 'Coinbase BTC/USD chart' })).toBeInTheDocument();
+    expect(CoinbaseChart.mock.lastCall[0]).toMatchObject({
       target: next.target,
       deadline: next.expiresAt,
     });

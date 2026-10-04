@@ -1,5 +1,5 @@
 import { Table } from 'react-bootstrap';
-import { formatTime } from '../../../utils/format.utils';
+import { formatDateTime, formatTime } from '../../../utils/format.utils';
 import {
   formatAdvisorMoney,
   formatAdvisorQuantity,
@@ -23,7 +23,7 @@ const activityDescriptions = {
   comparison: 'Completed comparison with holding to settlement.',
 };
 
-export default function AdvisorPositions({ portfolio, recentActivity }) {
+export default function AdvisorPositions({ portfolio, recentActivity, isStale = false, asOf }) {
   const positions = portfolio?.positions;
   return (
     <section
@@ -38,12 +38,18 @@ export default function AdvisorPositions({ portfolio, recentActivity }) {
           Automatic experiment · not your Kalshi holdings
         </span>
       </div>
+      {isStale && (
+        <p className="small text-warning mb-2">
+          Last known positions from {formatDateTime(asOf)}. Current quantities may differ.
+        </p>
+      )}
       {!Array.isArray(positions) ? (
         <p className="small text-secondary mb-0">Position data is unavailable.</p>
       ) : !positions.length ? (
         <p className="small text-secondary mb-0">
-          No open simulated positions. Cash stays available while the adviser waits for a suitable
-          opportunity.
+          {isStale
+            ? 'No open positions were recorded in that snapshot.'
+            : 'No open simulated positions. Cash stays available while the adviser waits for a suitable opportunity.'}
         </p>
       ) : (
         <div
@@ -61,7 +67,7 @@ export default function AdvisorPositions({ portfolio, recentActivity }) {
                 <th scope="col">Kalshi event</th>
                 <th scope="col">Side</th>
                 <th scope="col">Quantity</th>
-                <th scope="col">Available to sell</th>
+                <th scope="col">{isStale ? 'Last known available' : 'Available to sell'}</th>
                 <th scope="col">Average entry</th>
                 <th scope="col">Cost incl. fees</th>
                 <th scope="col">Entry fees</th>

@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Button, Modal } from 'react-bootstrap';
+import { Alert, Button, Modal } from 'react-bootstrap';
+import { formatDateTime } from '../../../utils/format.utils';
 import { formatAdvisorMoney, formatAdvisorQuantity } from '../utils/advisorDisplay.utils';
 
 function PerformanceValue({ label, value }) {
@@ -11,7 +12,7 @@ function PerformanceValue({ label, value }) {
   );
 }
 
-export default function AdvisorPerformance({ report }) {
+export default function AdvisorPerformance({ report, isStale = false }) {
   const [isOpen, setIsOpen] = useState(false);
   const performance = report?.performance;
   const hasComparison = performance?.pairedPositionCount > 0;
@@ -34,6 +35,12 @@ export default function AdvisorPerformance({ report }) {
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
+          {isStale && (
+            <Alert variant="warning" className="small">
+              Outdated performance data. Showing last known results from{' '}
+              {formatDateTime(report?.asOf)}.
+            </Alert>
+          )}
           {!performance ? (
             <p role="status">Performance data is unavailable.</p>
           ) : (

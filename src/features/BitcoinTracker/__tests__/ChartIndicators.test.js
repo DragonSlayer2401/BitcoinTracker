@@ -4,6 +4,7 @@ import {
   CHART_CANDLE_INTERVAL_MINUTES,
 } from '../utils/chartIndicators.utils';
 import { getBenchmarkChartData } from '../utils/benchmarkChart.utils';
+import { getCoinbaseChartData } from '../utils/coinbaseChart.utils';
 
 const MINUTE = 60_000;
 const START = Date.UTC(2026, 8, 14, 12);
@@ -307,4 +308,101 @@ test('empty or unsupported inputs stay unknown and display calculations do not m
   getChartIndicators(aggregated);
   expect(JSON.stringify(candles)).toBe(original);
   expect(aggregated[0]).not.toBe(candles[0]);
+});
+
+function coinbaseCandlesFromCloses(closes, { start = START } = {}) {
+  return getCoinbaseChartData({
+    candles: closes.map((close, index) => ({
+      time: start + index * MINUTE,
+      open: close - 0.25,
+      high: close + 0.5,
+      low: close - 0.5,
+      close,
+      volume: 2,
+    })),
+    now: start + closes.length * MINUTE,
+  }).candles;
+}
+
+test.each(CHART_CANDLE_INTERVAL_MINUTES)(
+  'Coinbase %i-minute aggregation preserves exchange OHLCV and counts minute bars, not index seconds',
+  (intervalMinutes) => {
+    const minutes = coinbaseCandlesFromCloses(
+      Array.from({ length: 30 }, (_, index) => 100 + index),
+    );
+    const combined = aggregateChartCandles(minutes, intervalMinutes, START + 30 * MINUTE);
+    expect(combined).toHaveLength(30 / intervalMinutes);
+    expect(combined[0]).toEqual({
+      source: 'coinbase',
+      time: START,
+      endTime: START + intervalMinutes * MINUTE,
+      open: 99.75,
+      high: 99.5 + intervalMinutes,
+      low: 99.5,
+      close: 99 + intervalMinutes,
+      volume: 2 * intervalMinutes,
+      sampleCount: intervalMinutes,
+      expectedSampleCount: intervalMinutes,
+      sampleUnit: 'minute candles',
+      intervalMinutes,
+      isComplete: true,
+      isPartial: false,
+      isForming: false,
+    });
+  },
+);
+
+test('Coinbase candles never claim complete coverage across absent or conflicting minute bars', () => {
+  const minutes = coinbaseCandlesFromCloses([100, 101, 102]);
+  const now = START + 3 * MINUTE;
+  expect(aggregateChartCandles([minutes[0], minutes[2]], 3, now)[0]).toMatchObject({
+    sampleCount: 2,
+    expectedSampleCount: 3,
+    volume: 4,
+    isComplete: false,
+    isPartial: true,
+  });
+  expect(
+    aggregateChartCandles([...minutes, { ...minutes[1], volume: 3 }], 3, now)[0],
+  ).toMatchObject({ sampleCount: 2, isPartial: true });
+  expect(aggregateChartCandles([...minutes, { ...minutes[1] }], 3, now)[0]).toMatchObject({
+    sampleCount: 3,
+    volume: 6,
+    isComplete: true,
+  });
+  expect(aggregateChartCandles(minutes, 3, START + MINUTE)[0]).toMatchObject({
+    sampleCount: 1,
+    isForming: true,
+    isPartial: true,
+    high: 100.5,
+  });
+});
+
+test('Coinbase indicators use complete minute bars and restart their warmup after a gap', () => {
+  const before = coinbaseCandlesFromCloses(Array(34).fill(100));
+  const after = coinbaseCandlesFromCloses(Array(34).fill(200), { start: START + 35 * MINUTE });
+  const combined = aggregateChartCandles([...before, ...after], 1, START + 69 * MINUTE);
+  const { points } = getChartIndicators(combined);
+  expect(points[33]).toMatchObject({ ema9: 100, ema21: 100, macd: 0, signal: 0, rsi: 50 });
+  expect(allUnknown(points[34])).toBe(true);
+  expect(points[41].ema9).toBeNull();
+  expect(points[42].ema9).toBe(200);
+  expect(points[66].signal).toBeNull();
+  expect(points[67].signal).toBe(0);
+});
+
+test('source changes cannot combine Coinbase prices with BRTI samples or carry indicator memory', () => {
+  const brti = candlesFromCloses(Array(34).fill(100));
+  const coinbase = coinbaseCandlesFromCloses(Array(9).fill(200), { start: START + 34 * MINUTE });
+  const points = getChartIndicators([...brti, ...coinbase]).points;
+  expect(allUnknown(points[34])).toBe(true);
+  expect(points[41].ema9).toBeNull();
+  expect(points[42].ema9).toBe(200);
+  expect(
+    aggregateChartCandles(
+      [brti[0], coinbaseCandlesFromCloses([200], { start: START + MINUTE })[0]],
+      3,
+      START + 3 * MINUTE,
+    ),
+  ).toEqual([]);
 });

@@ -434,6 +434,26 @@ test('shows suspension and baseline fallback after early learning performance de
   );
 });
 
+test('explains when a full learned model has stopped influencing new predictions', async () => {
+  requestResearch.mockResolvedValue({
+    ...report,
+    full: {
+      monitoring: {
+        status: 'disabled',
+        reason: 'Later outcome checks showed worse probability error.',
+      },
+    },
+  });
+  render(<ResearchData />);
+  fireEvent.click(screen.getByRole('button', { name: 'Research data' }));
+  expect(await screen.findByText(/The full learned model is suspended/)).toBeVisible();
+  expect(
+    screen.getByText(
+      /Full model outcome check: Later outcome checks showed worse probability error/,
+    ),
+  ).toBeVisible();
+});
+
 test('distinguishes a pending suspension from an adjustment that has already stopped', async () => {
   const active = { id: 'early-pending-suspension', version: 'outcome-early-kalshi-v1' };
   requestResearch.mockResolvedValue({

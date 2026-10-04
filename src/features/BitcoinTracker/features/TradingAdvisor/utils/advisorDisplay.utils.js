@@ -48,6 +48,17 @@ export const getAdvisorReason = (reason) =>
     ? (reasons[reason] ?? reason.replaceAll('_', ' '))
     : 'Waiting for the next recorded evaluation.';
 
+/** Cached ledger balances are current only while their successful snapshot is recent. */
+export function hasFreshAdvisorReport(report, now) {
+  return Boolean(
+    Number.isFinite(now) &&
+    Number.isFinite(report?.asOf) &&
+    report.asOf > 0 &&
+    report.asOf <= now &&
+    now - report.asOf < 30_000,
+  );
+}
+
 /** A stored suggestion is actionable only for this open contract and a recent collector cycle. */
 export function hasFreshAdvisorAdvice({ advice, collector, market, now }) {
   return Boolean(

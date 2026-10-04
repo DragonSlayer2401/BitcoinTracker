@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createClient } from '@libsql/client';
-import { getResearchWriteTransaction } from './research.connection';
+import { getResearchWriteTransaction, runResearchConnectionOperation } from './research.connection';
 import { initializeResearchSchema } from './research.schema';
 import { createChallengerTrialRepository } from './challengerTrial.repository';
 import { createChallengerDevelopmentRepository } from './challengerDevelopment.repository';
@@ -185,7 +185,9 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
     try {
       // A single pooled connection acquires and immediately releases the lock, without
       // changing any rows. The driver's finally cleanup rolls back on an interrupted probe.
-      await client.executeMultiple('BEGIN EXCLUSIVE; ROLLBACK;');
+      await runResearchConnectionOperation(client, () =>
+        client.executeMultiple('BEGIN EXCLUSIVE; ROLLBACK;'),
+      );
       return { writeAvailable: true, writeStatus: 'available', writeReason: null };
     } catch (error) {
       const locked = /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(error?.code ?? '');
@@ -249,16 +251,22 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
         throw new ResearchDataError('Invalid collector heartbeat.');
       return runWriteOperation(async () => {
         await initialize();
-        const result = await client.execute({
-          sql: `INSERT INTO collector_heartbeats(collector_id, heartbeat_at, payload) VALUES (?, ?, ?)
+        const result = await runResearchConnectionOperation(client, () =>
+          client.execute({
+            sql: `INSERT INTO collector_heartbeats(collector_id, heartbeat_at, payload) VALUES (?, ?, ?)
             ON CONFLICT(collector_id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, payload = excluded.payload
             WHERE (collector_heartbeats.heartbeat_at < excluded.heartbeat_at OR
               (collector_heartbeats.heartbeat_at = excluded.heartbeat_at AND
                json_extract(collector_heartbeats.payload, '$.status') IN ('starting', 'running') AND
                json_extract(excluded.payload, '$.status') IN ('stopped', 'error')))
               AND json_extract(collector_heartbeats.payload, '$.startedAt') = json_extract(excluded.payload, '$.startedAt')`,
-          args: [heartbeat.collectorId, heartbeat.heartbeatAt, getCanonicalResearchJson(heartbeat)],
-        });
+            args: [
+              heartbeat.collectorId,
+              heartbeat.heartbeatAt,
+              getCanonicalResearchJson(heartbeat),
+            ],
+          }),
+        );
         return { written: result.rowsAffected > 0 };
       });
     },
@@ -804,22 +812,26 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
         );
       }
       await initialize();
-      const result = await client.execute({
-        sql: `INSERT INTO research_leases(lease_key, owner_id, expires_at) VALUES ('training', ?, ?)
+      const result = await runResearchConnectionOperation(client, () =>
+        client.execute({
+          sql: `INSERT INTO research_leases(lease_key, owner_id, expires_at) VALUES ('training', ?, ?)
           ON CONFLICT(lease_key) DO UPDATE SET owner_id = excluded.owner_id, expires_at = excluded.expires_at
           WHERE research_leases.expires_at <= ?`,
-        args: [ownerId, expiresAt, now],
-      });
+          args: [ownerId, expiresAt, now],
+        }),
+      );
       return result.rowsAffected === 1;
     },
     async releaseLearningLease(ownerId) {
       if (!isResearchIdentifier(ownerId))
         throw new ResearchDataError('Invalid learning lease owner.');
       await initialize();
-      await client.execute({
-        sql: "DELETE FROM research_leases WHERE lease_key = 'training' AND owner_id = ?",
-        args: [ownerId],
-      });
+      await runResearchConnectionOperation(client, () =>
+        client.execute({
+          sql: "DELETE FROM research_leases WHERE lease_key = 'training' AND owner_id = ?",
+          args: [ownerId],
+        }),
+      );
     },
   };
   repository.saveModelArtifact = repository.writeModelArtifact;

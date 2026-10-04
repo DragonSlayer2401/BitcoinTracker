@@ -269,6 +269,44 @@
   padding: 0 !important;
 }
 
+// The Coinbase chart owns the main workstation panel, including at shorter desktop heights.
+.bitcoin-tracker .market-chart.trading-chart.coinbase-price-chart:not(.expanded-chart) {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  padding-top: 8px;
+
+  figure {
+    flex: 1;
+  }
+  .price-chart-frame {
+    flex: 1;
+    min-height: 340px;
+  }
+  .price-chart-canvas {
+    position: absolute;
+    inset: 0;
+    height: 100%;
+  }
+  .trading-chart-readout {
+    min-height: 30px;
+    font-size: 11px;
+  }
+  .chart-indicator-readout:empty {
+    display: none;
+  }
+  .chart-header .btn-chart {
+    min-height: 30px;
+    padding-inline: 9px;
+  }
+
+  @media (min-width: 1200px) and (min-height: 700px) {
+    .price-chart-frame {
+      min-height: 260px;
+    }
+  }
+}
+
 .chart-focus-modal .modal-body {
   display: flex;
   flex-direction: column;

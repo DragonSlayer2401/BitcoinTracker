@@ -29,6 +29,10 @@ import {
   evaluateEarlyShadowCandidate,
   trainEarlyCandidate,
 } from '@/features/BitcoinTracker/utils/learning/earlyTraining.utils';
+import {
+  evaluateFullActiveModel,
+  FULL_MODEL_MONITORING_REQUIREMENTS,
+} from '@/features/BitcoinTracker/utils/learning/fullModelMonitoring.utils';
 import { isChallengerArtifact } from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
 import { evaluateResearchExperiments } from '@/features/BitcoinTracker/utils/researchEvaluation.utils';
 import { createChallengerService } from './challenger.service';
@@ -79,6 +83,11 @@ function selectResearchModels(artifacts, storedActive, pipeline = null) {
     latest,
     candidate: canEvaluateLatestInShadow ? latest : null,
     fullActive,
+    retiredFull:
+      models
+        .filter(matchesCurrentPipeline)
+        .filter((model) => model.retirement?.wasActive)
+        .at(-1) ?? null,
     earlyActive,
     latestEarly,
     retiredEarly: earlyModels.filter((model) => model.retirement?.wasActive).at(-1) ?? null,
@@ -190,14 +199,16 @@ export function createLearningService(repository) {
       repository.getActiveModelArtifact(),
     ]);
     let selected = selectResearchModels(artifacts, storedActive);
-    if (selected.earlyActive) {
+    if (selected.earlyActive || selected.fullActive) {
       const now = Date.now();
       const events = await repository.getLearningEvidenceRows();
-      const monitoring = evaluateEarlyActiveModel(selected.earlyActive, events, { now });
+      const monitoring = selected.fullActive
+        ? evaluateFullActiveModel(selected.fullActive, events, { now })
+        : evaluateEarlyActiveModel(selected.earlyActive, events, { now });
       if (monitoring.status === 'disabled') {
         // Stop serving degraded influence immediately. The leased analysis cycle records
         // retirement durably; read endpoints never mutate models or activate replacements.
-        const stoppedId = selected.earlyActive.id;
+        const stoppedId = selected.active.id;
         selected = selectResearchModels(
           artifacts.map((model) =>
             model.id === stoppedId
@@ -246,6 +257,7 @@ export function createLearningService(repository) {
       latest,
       candidate,
       fullActive,
+      retiredFull,
       earlyActive,
       latestEarly,
       retiredEarly,
@@ -277,6 +289,16 @@ export function createLearningService(repository) {
           }
         : null;
     const isEarlyDisabled = monitoring?.status === 'disabled';
+    const fullMonitoring = fullActive
+      ? evaluateFullActiveModel(fullActive, events, { now })
+      : retiredFull
+        ? {
+            status: 'disabled',
+            reason: retiredFull.retirement.reason,
+            retiredAt: retiredFull.retirement.retiredAt,
+          }
+        : null;
+    const isFullDisabled = fullMonitoring?.status === 'disabled';
     const earlyCounts = getEarlyCounts(learningRows, pipeline, latestEarly, earlyActive);
     const earlyTraining = getEarlyTrainingStatus({
       fullActive,
@@ -298,6 +320,7 @@ export function createLearningService(repository) {
       latest,
       latestEarly,
       earlyActiveForMonitoring: earlyActive,
+      fullActiveForMonitoring: fullActive,
       learningRows,
       result: {
         generatedAt: now,
@@ -307,12 +330,19 @@ export function createLearningService(repository) {
           .getCollectorHealth({ now, events })
           .catch(() => null),
         challengers,
-        active: challengers.active ?? (earlyActive && isEarlyDisabled ? null : active),
+        active:
+          challengers.active ??
+          ((earlyActive && isEarlyDisabled) || (fullActive && isFullDisabled) ? null : active),
         candidate,
         earlyCandidate,
         shadow,
         requirements: LEARNING_REQUIREMENTS,
         training,
+        full: {
+          active: isFullDisabled ? null : fullActive,
+          monitoring: fullMonitoring,
+          requirements: FULL_MODEL_MONITORING_REQUIREMENTS,
+        },
         early: {
           active: isEarlyDisabled ? null : earlyActive,
           candidate: earlyCandidate,
@@ -324,7 +354,7 @@ export function createLearningService(repository) {
         models: models.map((model) => ({
           id: model.id,
           trainedAt: model.trainedAt,
-          active: model.id === active?.id,
+          active: model.id === active?.id && !(fullActive && isFullDisabled),
           eligibleForShadow: model.evaluation.eligibleForShadow,
           evaluation: model.evaluation,
         })),
@@ -444,6 +474,17 @@ export function createLearningService(repository) {
       };
     try {
       let state = await readState(now);
+      if (state.fullActiveForMonitoring && state.result.full.monitoring?.status === 'disabled') {
+        const active = state.fullActiveForMonitoring;
+        const reason = state.result.full.monitoring.reason;
+        await repository.retireModelArtifact(active.id, { retiredAt: now, reason });
+        // Retirement is the only mutation in this cycle. Replacements must still pass their
+        // own prospective checks; a stop never doubles as approval of another model.
+        return {
+          ...(await getLearningStatus({ now })),
+          lastRun: { status: 'disabled', modelId: active.id, reason },
+        };
+      }
       let earlyLastRun;
       if (state.earlyActiveForMonitoring && state.result.early.monitoring?.status === 'disabled') {
         const active = state.earlyActiveForMonitoring;

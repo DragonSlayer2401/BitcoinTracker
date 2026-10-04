@@ -1,4 +1,6 @@
 export const CHART_DRAWINGS_STORAGE_KEY = 'bitcoin-tracker:chart-drawings:cf-brti:v1';
+export const COINBASE_CHART_DRAWINGS_STORAGE_KEY =
+  'bitcoin-tracker:chart-drawings:coinbase-btc-usd:v1';
 export const MAXIMUM_CHART_DRAWINGS = 50;
 export const MAXIMUM_DRAWING_LABEL_LENGTH = 40;
 export const CHART_DRAWING_COLORS = Object.freeze([
@@ -70,15 +72,21 @@ export function getValidatedChartDrawings(value, now = Date.now()) {
   return drawings;
 }
 
-export function readChartDrawings(storage, now = Date.now()) {
+export function readChartDrawings(
+  storage,
+  now = Date.now(),
+  storageKey = CHART_DRAWINGS_STORAGE_KEY,
+) {
+  const symbol =
+    storageKey === COINBASE_CHART_DRAWINGS_STORAGE_KEY ? 'COINBASE:BTC-USD' : 'CF-BRTI';
   try {
-    const serialized = (storage ?? globalThis.localStorage).getItem(CHART_DRAWINGS_STORAGE_KEY);
+    const serialized = (storage ?? globalThis.localStorage).getItem(storageKey);
     if (serialized === null) return { drawings: [], warning: null };
     const record = JSON.parse(serialized);
     const drawings =
       hasExactFields(record, ['version', 'symbol', 'drawings']) &&
       record.version === 1 &&
-      record.symbol === 'CF-BRTI'
+      record.symbol === symbol
         ? getValidatedChartDrawings(record.drawings, now)
         : null;
     if (drawings === null) throw new Error('Invalid saved drawings.');
@@ -91,16 +99,25 @@ export function readChartDrawings(storage, now = Date.now()) {
   }
 }
 
-export function writeChartDrawings(value, storage, now = Date.now()) {
+export function writeChartDrawings(
+  value,
+  storage,
+  now = Date.now(),
+  storageKey = CHART_DRAWINGS_STORAGE_KEY,
+) {
   const drawings = getValidatedChartDrawings(value, now);
   if (drawings === null) return 'Chart drawings contain invalid coordinates or exceed 50 lines.';
   // An unreadable saved set is never treated as empty, even when explicitly saving an empty set.
-  const saved = readChartDrawings(storage, now);
+  const saved = readChartDrawings(storage, now, storageKey);
   if (saved.warning) return saved.warning;
   try {
     (storage ?? globalThis.localStorage).setItem(
-      CHART_DRAWINGS_STORAGE_KEY,
-      JSON.stringify({ version: 1, symbol: 'CF-BRTI', drawings }),
+      storageKey,
+      JSON.stringify({
+        version: 1,
+        symbol: storageKey === COINBASE_CHART_DRAWINGS_STORAGE_KEY ? 'COINBASE:BTC-USD' : 'CF-BRTI',
+        drawings,
+      }),
     );
     return null;
   } catch {

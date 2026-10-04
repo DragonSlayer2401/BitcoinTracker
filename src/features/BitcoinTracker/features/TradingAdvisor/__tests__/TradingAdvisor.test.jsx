@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import TradingAdvisor from '../index.web';
+import { formatDateTime } from '../../../utils/format.utils';
 import { useGetTradingAdvisorReportQuery } from '@/services/research/tradingAdvisor/tradingAdvisor.api';
 
 jest.mock('@/services/research/tradingAdvisor/tradingAdvisor.api', () => ({
@@ -440,6 +441,71 @@ test('an API error suppresses cached buy guidance and provides a retry', () => {
   expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh adviser' }));
   expect(query.refetch).toHaveBeenCalledTimes(1);
+});
+
+test('failed refreshes label cached balances, positions and performance as last known', () => {
+  mockQuery({ isError: true });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByText('Outdated account data').closest('p')).toHaveTextContent(
+    formatDateTime(NOW),
+  );
+  expect(screen.getByText(/Balances and positions are last known/)).toBeInTheDocument();
+  expect(metric('Available cash')).toHaveTextContent('$93.832');
+  expect(screen.getByText(/Last known positions from/)).toHaveTextContent(formatDateTime(NOW));
+  expect(screen.getByText('No open positions were recorded in that snapshot.')).toBeInTheDocument();
+  expect(screen.queryByText(/Cash stays available/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Performance' }));
+  expect(screen.getByRole('alert')).toHaveTextContent('Outdated performance data');
+  expect(screen.getByRole('alert')).toHaveTextContent(formatDateTime(NOW));
+});
+
+test.each([
+  ['expired', NOW - 30_000],
+  ['future-dated', NOW + 1000],
+  ['missing timestamp', undefined],
+])('marks a %s report stale even without an HTTP error', (_label, asOf) => {
+  mockQuery({ data: { ...report, asOf } });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByText('Outdated account data')).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+});
+
+test('a retry keeps cached quantities marked stale until a successful fresh report arrives', () => {
+  const cachedReport = {
+    ...report,
+    portfolio: {
+      ...report.portfolio,
+      positions: [
+        { id: 'position-1', contract: market, side: 'yes', quantity: 10, availableQuantity: 8 },
+      ],
+    },
+  };
+  mockQuery({ data: cachedReport, isFetching: true, error: { status: 503 } });
+  const { rerender } = render(<TradingAdvisor {...props} />);
+  expect(screen.getByText('Outdated account data')).toBeInTheDocument();
+  expect(screen.getByRole('columnheader', { name: 'Last known available' })).toBeInTheDocument();
+  mockQuery({ data: { ...cachedReport, asOf: NOW + 1000 } });
+  rerender(<TradingAdvisor {...props} now={NOW + 1000} />);
+  expect(screen.queryByText('Outdated account data')).not.toBeInTheDocument();
+  expect(screen.getByText('Account snapshot').closest('p')).toHaveTextContent(
+    formatDateTime(NOW + 1000),
+  );
+  expect(screen.getByRole('columnheader', { name: 'Available to sell' })).toBeInTheDocument();
+});
+
+test('an ordinary in-flight refresh retains a recent successful account snapshot', () => {
+  mockQuery({ isFetching: true });
+  render(<TradingAdvisor {...props} now={NOW + 5000} />);
+  expect(screen.queryByText('Outdated account data')).not.toBeInTheDocument();
+  expect(metric('Available cash')).toHaveTextContent('$93.832');
+});
+
+test('a response arriving between clock ticks does not flash an outdated-account warning', () => {
+  mockQuery({ data: { ...report, asOf: NOW + 500 }, fulfilledTimeStamp: NOW + 700 });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.queryByText('Outdated account data')).not.toBeInTheDocument();
+  expect(screen.getByText('Account snapshot')).toBeInTheDocument();
 });
 
 test('opens supporting research in a keyboard-accessible modal and restores focus', async () => {

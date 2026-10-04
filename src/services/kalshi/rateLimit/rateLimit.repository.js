@@ -184,7 +184,7 @@ export function createKalshiRateLimitRepository({ client, now }) {
   async function runTransaction(operation) {
     let transaction;
     try {
-      transaction = await getResearchWriteTransaction(client);
+      transaction = await getResearchWriteTransaction(client, { retryBusy: false });
       const timestamp = await getTime(transaction);
       const state = await getState(transaction, timestamp);
       const value = await operation({ transaction, timestamp, state });

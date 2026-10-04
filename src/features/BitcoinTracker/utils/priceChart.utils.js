@@ -8,7 +8,7 @@ const SIGNAL_COLOR = '#f0c577';
 const RSI_COLOR = '#c5a4ff';
 const AXIS_COLOR = '#afc3b6';
 
-function getChartLayout(chartHeight, indicatorPanes) {
+function getChartLayout(chartHeight, indicatorPanes, priceAxisWidth = 80) {
   const indicatorCount = indicatorPanes.length;
   const height = Number.isFinite(chartHeight) && chartHeight > 0 ? chartHeight : 400;
   const top = Math.min(8, height * 0.04);
@@ -16,7 +16,7 @@ function getChartLayout(chartHeight, indicatorPanes) {
   const gap = Math.min(8, height * 0.04);
   const available = height - top - bottom - gap * indicatorCount;
   const priceFraction = indicatorCount === 2 ? 0.52 : indicatorCount === 1 ? 0.7 : 1;
-  const grid = [{ top, left: 8, right: 80, height: available * priceFraction }];
+  const grid = [{ top, left: 8, right: priceAxisWidth, height: available * priceFraction }];
   const indicatorPanels = [];
   let nextTop = top + grid[0].height + gap;
   indicatorPanes.forEach((id) => {
@@ -36,7 +36,7 @@ function getChartLayout(chartHeight, indicatorPanes) {
       // Keep the top tick's centered text below the opaque DOM header.
       top: nextTop + headerHeight + plotInset,
       left: 8,
-      right: 80,
+      right: priceAxisWidth,
       height: panelHeight - headerHeight - plotInset,
       show: true,
       backgroundColor: id === 'macd' ? '#0d171b' : '#171320',
@@ -131,23 +131,24 @@ export function getChartZoomRange(range, startTime, endTime) {
   return { startTime: start, endTime: start + span };
 }
 
-// Keep absent seconds visible without turning them into observations for inspection.
-export function getObservedLineData(readings) {
+// Keep absent observations visible, using the actual cadence of the selected price feed.
+export function getObservedLineData(readings, cadence = 1000) {
   const data = [];
   const inspectionIndexes = [];
   readings.forEach((reading, index) => {
     const previous = readings[index - 1];
     const next = readings[index + 1];
-    if (previous && reading.time - previous.time > 1000) {
-      data.push({ value: [previous.time + 1000, null] });
+    if (previous && reading.time - previous.time > cadence) {
+      data.push({ value: [previous.time + cadence, null] });
     }
     inspectionIndexes.push(data.length);
     data.push({
       value: [reading.time, reading.price],
       sampleCount: reading.sampleCount,
+      source: reading.source,
       symbolSize:
-        (!previous || reading.time - previous.time > 1000) &&
-        (!next || next.time - reading.time > 1000)
+        (!previous || reading.time - previous.time > cadence) &&
+        (!next || next.time - reading.time > cadence)
           ? 5
           : 0,
     });
@@ -156,6 +157,9 @@ export function getObservedLineData(readings) {
 }
 
 export function getCandleDescription(candle) {
+  if (candle.source === 'coinbase') {
+    return `${formatDateTime(candle.time)}–${formatDateTime(candle.endTime)} · Coinbase BTC/USD · Open ${formatPrice(candle.open)}, high ${formatPrice(candle.high)}, low ${formatPrice(candle.low)}, close ${formatPrice(candle.close)} · ${candle.isPartial ? `${candle.sampleCount}/${candle.expectedSampleCount} completed minute candles · Incomplete interval` : 'Completed candle'}`;
+  }
   return `${formatDateTime(candle.time)}–${formatDateTime(candle.endTime)} · Open ${formatPrice(candle.open)}, high ${formatPrice(candle.high)}, low ${formatPrice(candle.low)}, close ${formatPrice(candle.close)} · ${candle.sampleCount}/${candle.expectedSampleCount} BRTI samples${candle.isPartial ? ' · Partial candle' : ''} · Observed ${formatDateTime(candle.firstSampleAt)}–${formatDateTime(candle.lastSampleAt)}`;
 }
 
@@ -168,13 +172,21 @@ export function formatChartTooltip(parameters) {
   if (observed) {
     const [time, price] = observed.data.value;
     sections.push(
-      `${formatDateTime(time)}<br/>CF Benchmarks BRTI<br/><strong>${formatPrice(price)} USD</strong>`,
+      `${formatDateTime(time)}<br/>${observed.data.source === 'coinbase' ? 'Coinbase BTC/USD · Completed minute close' : 'CF Benchmarks BRTI'}<br/><strong>${formatPrice(price)} USD</strong>`,
     );
   }
   const candle = entries.find((entry) => entry.seriesId === 'observed-candles')?.data?.candle;
   if (candle) {
+    const description =
+      candle.source === 'coinbase'
+        ? `Coinbase BTC/USD · ${candle.isPartial ? `${candle.sampleCount}/${candle.expectedSampleCount} completed minute candles · Incomplete interval` : 'Completed candle'}`
+        : `BRTI · one-minute candle${candle.isPartial ? ' · Partial' : ''}`;
+    const observationDetails =
+      candle.source === 'coinbase'
+        ? ''
+        : `<br/>${candle.sampleCount}/${candle.expectedSampleCount} observed samples<br/>First ${formatDateTime(candle.firstSampleAt)}<br/>Last ${formatDateTime(candle.lastSampleAt)}`;
     sections.push(
-      `${formatDateTime(candle.time)}–${formatDateTime(candle.endTime)}<br/>BRTI · one-minute candle${candle.isPartial ? ' · Partial' : ''}<br/>Open <strong>${formatPrice(candle.open)}</strong> · Close <strong>${formatPrice(candle.close)}</strong><br/>High ${formatPrice(candle.high)} · Low ${formatPrice(candle.low)}<br/>${candle.sampleCount}/${candle.expectedSampleCount} observed samples<br/>First ${formatDateTime(candle.firstSampleAt)}<br/>Last ${formatDateTime(candle.lastSampleAt)}`,
+      `${formatDateTime(candle.time)}–${formatDateTime(candle.endTime)}<br/>${description}<br/>Open <strong>${formatPrice(candle.open)}</strong> · Close <strong>${formatPrice(candle.close)}</strong><br/>High ${formatPrice(candle.high)} · Low ${formatPrice(candle.low)}${observationDetails}`,
     );
   }
   const average = entries.find(
@@ -216,7 +228,11 @@ export function getPriceChartOption({
   chartHeight = 400,
   currentReading = null,
   currentPriceStatus = 'unavailable',
+  source = 'brti',
 }) {
+  const isCoinbase = source === 'coinbase';
+  const sourceName = isCoinbase ? 'Coinbase BTC/USD' : 'BRTI';
+  const settlementPoints = isCoinbase ? [] : (settlement?.points ?? []);
   const hasDeadline = Number.isFinite(deadline) && deadline > startTime;
   const axisEndTime = hasDeadline ? Math.max(endTime, deadline) : endTime;
   const visibleRange = getChartZoomRange(zoomRange, startTime, axisEndTime);
@@ -225,6 +241,7 @@ export function getPriceChartOption({
   const lowerBound = forecast?.kalshi?.settlementLowerBound;
   const upperBound = forecast?.kalshi?.settlementUpperBound;
   const hasModelInterval = Boolean(
+    !isCoinbase &&
     forecast?.available &&
     !forecast.learning?.applied &&
     forecast.expiresAt === deadline &&
@@ -255,18 +272,19 @@ export function getPriceChartOption({
       .forEach((candle) => prices.push(candle.low, candle.high));
   }
   if (hasModelInterval && isVisibleTime(deadline)) prices.push(lowerBound, upperBound);
-  settlement.points
+  settlementPoints
     .filter((point) => isVisibleTime(point.time))
     .forEach((point) => prices.push(point.price));
-  // An off-screen target or future range must not flatten a zoomed historical section.
-  if (hasTarget && (!isZoomed || prices.length === 0)) prices.push(target);
+  // The Coinbase chart keeps the selected Kalshi threshold visible even when inspecting history.
+  if (hasTarget && (isCoinbase || !isZoomed || prices.length === 0)) prices.push(target);
   // Keep the latest index level visible even while inspecting a historical time window.
   // This reference affects only the price scale; it never becomes an observed candle or sample.
   if (hasCurrentPrice) prices.push(currentReading.price);
   const minimum = prices.length ? Math.min(...prices) : 0;
   const maximum = prices.length ? Math.max(...prices) : 1;
   const padding = Math.max((maximum - minimum) * 0.15, maximum * 0.00015);
-  const lineData = getObservedLineData(readings);
+  const lineData = getObservedLineData(readings, isCoinbase ? MINUTE : 1000);
+  if (isCoinbase) lineData.data.forEach((point) => (point.source = 'coinbase'));
   const candleInterval =
     (Number.isFinite(candleMinutes) && candleMinutes > 0 ? candleMinutes : 1) * MINUTE;
   // Candle plots anchor to the bucket start; second-by-second plots anchor indicators to
@@ -276,10 +294,48 @@ export function getPriceChartOption({
     .filter((point) => Number.isFinite(point.time) && point.time <= endTime);
   const chartAnnotations = Array.isArray(annotations) ? annotations : [];
   const verticalMarks = getVerticalMarks(chartAnnotations, comparisonTime, hasDeadline, deadline);
+  const indicatorPanes = [...(showMacd ? ['macd'] : []), ...(showRsi ? ['rsi'] : [])];
+  const { grid, indicatorPanels } = getChartLayout(
+    chartHeight,
+    indicatorPanes,
+    isCoinbase ? 120 : 80,
+  );
+  const priceRange = maximum - minimum + padding * 2;
+  const haveNearbyPriceLabels =
+    isCoinbase &&
+    hasTarget &&
+    hasCurrentPrice &&
+    (Math.abs(target - currentReading.price) / priceRange) * grid[0].height < 26;
+  const targetLabelOffset = haveNearbyPriceLabels ? (target >= currentReading.price ? -13 : 13) : 0;
   const marks = {
     markLine: getMarkLine([
       ...(hasTarget
-        ? [{ yAxis: target, lineStyle: { color: '#f0c577', type: 'dashed', width: 1 } }]
+        ? [
+            {
+              name: 'Kalshi target',
+              yAxis: target,
+              lineStyle: { color: SIGNAL_COLOR, type: 'dashed', width: isCoinbase ? 1.5 : 1 },
+              ...(isCoinbase
+                ? {
+                    label: {
+                      show: true,
+                      position: 'end',
+                      formatter: `Target ${formatPrice(target)}`,
+                      color: '#181c14',
+                      backgroundColor: SIGNAL_COLOR,
+                      borderColor: SIGNAL_COLOR,
+                      borderWidth: 1,
+                      borderRadius: 3,
+                      padding: [3, 5],
+                      fontSize: 11,
+                      fontWeight: 600,
+                      distance: 3,
+                      offset: [0, targetLabelOffset],
+                    },
+                  }
+                : {}),
+            },
+          ]
         : []),
       ...verticalMarks,
       ...chartAnnotations
@@ -311,7 +367,9 @@ export function getPriceChartOption({
         ? [
             {
               name:
-                currentPriceStatus === 'live' ? 'Current BRTI price' : 'Last observed BRTI price',
+                currentPriceStatus === 'live'
+                  ? `Current ${sourceName} price`
+                  : `Last observed ${sourceName} price`,
               yAxis: currentReading.price,
               lineStyle: { color: currentPriceColor, type: 'dashed', width: 1 },
               label: {
@@ -327,6 +385,7 @@ export function getPriceChartOption({
                 fontSize: 11,
                 fontWeight: 600,
                 distance: 3,
+                ...(isCoinbase ? { offset: [0, -targetLabelOffset] } : {}),
               },
             },
           ]
@@ -335,16 +394,17 @@ export function getPriceChartOption({
     markArea: {
       silent: true,
       itemStyle: { color: 'rgba(128, 199, 255, 0.10)' },
-      data: hasDeadline
-        ? [[{ xAxis: Math.max(startTime, deadline - MINUTE) }, { xAxis: deadline }]]
-        : [],
+      data:
+        hasDeadline && !isCoinbase
+          ? [[{ xAxis: Math.max(startTime, deadline - MINUTE) }, { xAxis: deadline }]]
+          : [],
     },
   };
   const observedSeries =
     view === 'candles'
       ? {
           id: 'observed-candles',
-          name: `BRTI ${candleInterval / MINUTE}-minute candles`,
+          name: `${sourceName} ${candleInterval / MINUTE}-minute candles`,
           type: 'candlestick',
           xAxisIndex: 0,
           yAxisIndex: 0,
@@ -372,7 +432,7 @@ export function getPriceChartOption({
         }
       : {
           id: 'observed-price',
-          name: 'CF Benchmarks BRTI',
+          name: isCoinbase ? sourceName : 'CF Benchmarks BRTI',
           type: 'line',
           xAxisIndex: 0,
           yAxisIndex: 0,
@@ -398,8 +458,6 @@ export function getPriceChartOption({
           },
           ...marks,
         };
-  const indicatorPanes = [...(showMacd ? ['macd'] : []), ...(showRsi ? ['rsi'] : [])];
-  const { grid, indicatorPanels } = getChartLayout(chartHeight, indicatorPanes);
   const axisIndexes = grid.map((_, index) => index);
   const xAxis = grid.map((_, index) => ({
     id: `time-${index === 0 ? 'price' : indicatorPanes[index - 1]}`,
@@ -637,13 +695,13 @@ export function getPriceChartOption({
       yAxis,
       series: [
         observedSeries,
-        ...(settlement.points.length
+        ...(settlementPoints.length
           ? [
               {
                 id: 'settlement-average',
                 name: 'Observed final-minute average',
                 type: 'line',
-                data: getObservedLineData(settlement.points).data,
+                data: getObservedLineData(settlementPoints).data,
                 showSymbol: true,
                 symbolSize: 5,
                 smooth: false,

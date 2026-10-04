@@ -7,7 +7,6 @@ import {
 import {
   getVerifiedLearningRows,
   groupOverlappingWindows,
-  getIndependentRows,
   scoreLearningRows,
   getWindowRepresentative,
 } from './evaluation.utils';
@@ -17,9 +16,9 @@ import {
   isOutcomeModelArtifact,
   predictOutcomeCandidate,
   isWithinOutcomeModelDomain,
-  matchesOutcomeModelPipeline,
 } from './model.utils';
 import { fitLogistic, logit, predictLogistic } from './statistics.utils';
+import { getProspectiveLearningCohort } from './prospectiveCohort.utils';
 
 // These are predeclared evidence minimums for model releases, not publication thresholds.
 export const LEARNING_REQUIREMENTS = Object.freeze({
@@ -419,21 +418,12 @@ export function evaluateShadowCandidate(model, events, { now = Date.now() } = {}
       reasons: ['A valid candidate that passed retrospective checks is required.'],
       independentWindows: 0,
     };
-  const { rows } = getVerifiedLearningRows(events, now, {
-    outcomeDefinition: model.outcomeDefinition,
-  });
   // Freeze the first predeclared prospective cohort. Repeated polling must not keep extending
   // a failed test until random fluctuations happen to make its confidence interval favorable.
-  const prospective = getIndependentRows(
-    rows.filter(
-      (row) =>
-        row.decision.cohort === 'kalshi-background' &&
-        matchesOutcomeModelPipeline(model, row.learningFeatures) &&
-        row.windowStartAt > model.shadowStartsAt &&
-        row.capturedAt > model.shadowStartsAt,
-    ),
-  ).slice(0, LEARNING_REQUIREMENTS.minimumShadowWindows);
-  const scored = prospective.filter((row) => {
+  const cohort = getProspectiveLearningCohort(model, events, now, model.shadowStartsAt);
+  const prospective = cohort.prospective.slice(0, LEARNING_REQUIREMENTS.minimumShadowWindows);
+  const resolved = prospective.map((row) => cohort.resolved.get(row.id)).filter(Boolean);
+  const scored = resolved.filter((row) => {
     const shadow = row.decision.shadowPrediction;
     const expectedProbability = predictOutcomeCandidate(model, row.learningFeatures);
     return (
@@ -449,8 +439,15 @@ export function evaluateShadowCandidate(model, events, { now = Date.now() } = {}
     );
   });
   const coverage = prospective.length ? scored.length / prospective.length : 0;
-  const evaluationComplete = prospective.length >= LEARNING_REQUIREMENTS.minimumShadowWindows;
+  const terminalFailure =
+    prospective.length >= LEARNING_REQUIREMENTS.minimumShadowWindows &&
+    prospective.some((row) => cohort.terminalFailures.has(row.id));
+  const evaluationComplete =
+    prospective.length >= LEARNING_REQUIREMENTS.minimumShadowWindows &&
+    (terminalFailure || resolved.length === prospective.length);
   if (
+    terminalFailure ||
+    !evaluationComplete ||
     scored.length < LEARNING_REQUIREMENTS.minimumShadowWindows ||
     !hasEnoughExamplesOfBothOutcomes(scored)
   )
@@ -462,11 +459,14 @@ export function evaluateShadowCandidate(model, events, { now = Date.now() } = {}
       evaluatedAt: now,
       independentWindows: scored.length,
       eligibleWindows: prospective.length,
+      resolvedWindows: resolved.length,
       callCoverage: coverage,
       reasons: [
-        evaluationComplete
-          ? 'The first 120 eligible windows lack complete candidate coverage or enough examples of both outcomes. This candidate cannot be promoted.'
-          : 'At least 120 new independent background windows with both outcomes and contemporaneously recorded candidate predictions are required.',
+        terminalFailure
+          ? 'The fixed first 120 windows contain conflicting evidence or a terminal unobserved outcome; this candidate cannot be promoted.'
+          : evaluationComplete
+            ? 'The first 120 eligible windows lack complete candidate coverage or enough examples of both outcomes. This candidate cannot be promoted.'
+            : 'Record the candidate prospectively across 120 independent later windows and wait for every selected official outcome, including both outcomes.',
       ],
     };
   const probabilities = scored.map((row) => row.decision.shadowPrediction.aboveProbability);
@@ -496,6 +496,7 @@ export function evaluateShadowCandidate(model, events, { now = Date.now() } = {}
     evaluatedAt: now,
     independentWindows: scored.length,
     eligibleWindows: prospective.length,
+    resolvedWindows: resolved.length,
     firstWindowAt: scored[0].windowStartAt,
     lastDeadlineAt: Math.max(...scored.map((row) => row.expiresAt)),
     callCoverage: coverage,

@@ -1,24 +1,31 @@
 import Icon from './Icon';
 import { formatPercent, formatPrice, formatTime } from '../utils/format.utils';
 
-export default function BitcoinPriceSummary({ benchmarkData }) {
+export default function BitcoinPriceSummary({ benchmarkData, compact = false }) {
   const { current, isFresh, priceChange, reason } = benchmarkData;
   const hasPriceChange = Number.isFinite(priceChange);
   const isPositive = hasPriceChange && priceChange >= 0;
 
   return (
-    <section className="price-summary" aria-labelledby="bitcoin-heading">
-      <div className="d-flex align-items-center gap-2 mb-2">
-        <span className="coin-symbol" aria-hidden="true">
-          ₿
-        </span>
+    <section
+      className={`price-summary${compact ? ' price-summary-compact' : ''}`}
+      aria-labelledby="bitcoin-heading"
+    >
+      <div className={`d-flex align-items-center gap-2 ${compact ? '' : 'mb-2'}`}>
+        {!compact && (
+          <span className="coin-symbol" aria-hidden="true">
+            ₿
+          </span>
+        )}
         <div>
           <h2 id="bitcoin-heading" className="section-title mb-1">
-            Bitcoin index price
+            Kalshi reference index
           </h2>
-          <span className="text-secondary small">CF Benchmarks BRTI · via Kalshi</span>
+          <span className={compact ? 'visually-hidden' : 'text-secondary small'}>
+            CF Benchmarks BRTI · via Kalshi
+          </span>
         </div>
-        <span className="spot-chip ms-auto">INDEX</span>
+        {!compact && <span className="spot-chip ms-auto">INDEX</span>}
       </div>
       <div
         className={`d-flex align-items-baseline flex-wrap gap-2 ${!isFresh ? 'price-delayed' : ''}`}

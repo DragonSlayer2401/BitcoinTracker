@@ -3,11 +3,12 @@
 import { useState } from 'react';
 import { Alert, Button, Modal } from 'react-bootstrap';
 import { useGetTradingAdvisorReportQuery } from '@/services/research/tradingAdvisor/tradingAdvisor.api';
-import { formatCountdown, formatPrice, formatTime } from '../../utils/format.utils';
+import { formatCountdown, formatDateTime, formatPrice, formatTime } from '../../utils/format.utils';
 import AdvisorAction from './components/AdvisorAction';
 import AdvisorPositions from './components/AdvisorPositions';
 import AdvisorPerformance from './components/AdvisorPerformance';
-import { formatAdvisorMoney } from './utils/advisorDisplay.utils';
+import AdvisorRisk from './components/AdvisorRisk';
+import { formatAdvisorMoney, hasFreshAdvisorReport } from './utils/advisorDisplay.utils';
 import './TradingAdvisor.scss';
 
 export default function TradingAdvisor({ market, now, chart, research, hasMarketError = false }) {
@@ -22,6 +23,11 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
   const report = query.data;
   const portfolio = report?.portfolio;
   const policy = report?.policy;
+  // A response can arrive between clock ticks; use its client receipt time as well.
+  const reportTime = Number.isFinite(now) ? Math.max(now, query.fulfilledTimeStamp ?? now) : now;
+  const isAccountStale = Boolean(
+    report && (query.isError || query.error || !hasFreshAdvisorReport(report, reportTime)),
+  );
   const hasCurrentMarket =
     market && Number.isFinite(now) && market.startsAt <= now && market.expiresAt > now;
 
@@ -32,18 +38,38 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
           className="advisor-account dashboard-panel"
           aria-labelledby="advisor-account-heading"
         >
-          <div className="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
-            <h2 id="advisor-account-heading" className="section-title mb-0">
-              Simulated account
-            </h2>
-            <div className="d-flex align-items-center flex-wrap gap-2">
+          <div className="advisor-account-header d-flex flex-column gap-2 mb-2">
+            <div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
+              <h2 id="advisor-account-heading" className="section-title mb-0">
+                Simulated account
+              </h2>
               <span className="small text-secondary">Paper adviser · no real orders</span>
-              <AdvisorPerformance report={report} />
-              <Button size="sm" variant="outline-secondary" onClick={() => setShowResearch(true)}>
-                Research &amp; market details
+            </div>
+            <div className="d-flex align-items-center flex-wrap gap-2">
+              <AdvisorPerformance report={report} isStale={isAccountStale} />
+              <AdvisorRisk report={report} now={reportTime} isStale={isAccountStale} />
+              <Button
+                size="sm"
+                variant="outline-secondary"
+                aria-label="Research & market details"
+                onClick={() => setShowResearch(true)}
+              >
+                Research
               </Button>
             </div>
           </div>
+          {report && (
+            <p
+              className={`advisor-account-time small mb-2 ${isAccountStale ? 'text-warning' : 'text-secondary'}`}
+              role={isAccountStale ? 'status' : undefined}
+            >
+              <strong>{isAccountStale ? 'Outdated account data' : 'Account snapshot'}</strong>
+              {' · '}
+              {formatDateTime(report.asOf)}
+              {isAccountStale &&
+                ' · Balances and positions are last known. Refresh before relying on them.'}
+            </p>
+          )}
           <dl className="advisor-account-values mb-0">
             <div>
               <dt>Total budget</dt>
@@ -83,13 +109,13 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
 
         <div className="advisor-chart dashboard-panel">
           <div className="advisor-event d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
-            <div className="small">
+            <div className="small d-flex align-items-baseline flex-wrap gap-2">
               <span className="text-secondary">Current Kalshi event</span>
-              <strong className="d-block">
+              <strong className="advisor-target">
                 Target {formatPrice(hasCurrentMarket ? market.target : null)}
               </strong>
             </div>
-            <div className="text-end">
+            <div className="d-flex align-items-center flex-wrap justify-content-end gap-2">
               <span
                 className="advisor-countdown"
                 role="timer"
@@ -97,7 +123,7 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
               >
                 {hasCurrentMarket ? formatCountdown(market.expiresAt - now) : '—'}
               </span>
-              <span className="small text-secondary d-block">
+              <span className="small text-secondary">
                 {hasCurrentMarket
                   ? `Closes ${formatTime(market.expiresAt)}`
                   : 'Waiting for an open event'}
@@ -112,11 +138,16 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
           market={hasCurrentMarket ? market : null}
           now={now}
           isLoading={query.isLoading}
-          isError={query.isError || hasMarketError}
+          isError={query.isError || isAccountStale || hasMarketError}
           onRefresh={query.refetch}
           isRefreshing={query.isFetching}
         />
-        <AdvisorPositions portfolio={portfolio} recentActivity={report?.recentActivity} />
+        <AdvisorPositions
+          portfolio={portfolio}
+          recentActivity={report?.recentActivity}
+          isStale={isAccountStale}
+          asOf={report?.asOf}
+        />
       </div>
       <Modal
         show={showResearch}

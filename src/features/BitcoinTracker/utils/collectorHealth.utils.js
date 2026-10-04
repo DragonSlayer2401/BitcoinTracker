@@ -2,7 +2,7 @@ import { isKalshiContract } from './kalshi/contract.utils';
 import { RESEARCH_EXPERIMENT_V5 } from './researchVariantConfig.utils';
 
 export const COLLECTOR_HEARTBEAT_VERSION = 'collector-heartbeat-v1';
-export const CURRENT_COLLECTOR_CODE_VERSION = 'kalshi-collector-2026-10-03-v2';
+export const CURRENT_COLLECTOR_CODE_VERSION = 'kalshi-collector-2026-10-03-v4';
 export const CURRENT_COLLECTOR_RESEARCH_VERSION = RESEARCH_EXPERIMENT_V5;
 export const COLLECTOR_HEALTH_POLICY = Object.freeze({
   heartbeatIntervalMs: 30_000,

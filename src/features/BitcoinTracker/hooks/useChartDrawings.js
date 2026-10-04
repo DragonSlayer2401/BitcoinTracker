@@ -9,7 +9,7 @@ import {
 } from '../utils/chartDrawings.utils';
 
 /** A symbol's chart annotations persist across Kalshi events; actions merge with durable state. */
-export default function useChartDrawings() {
+export default function useChartDrawings(storageKey = CHART_DRAWINGS_STORAGE_KEY) {
   const [drawings, setDrawings] = useState([]);
   const [warning, setWarning] = useState(null);
   const [isRestored, setIsRestored] = useState(false);
@@ -18,7 +18,7 @@ export default function useChartDrawings() {
 
   useEffect(() => {
     const restore = () => {
-      const saved = readChartDrawings();
+      const saved = readChartDrawings(undefined, undefined, storageKey);
       setWarning(saved.warning);
       if (!saved.warning) setDrawings(saved.drawings);
       undoHistory.current = [];
@@ -26,24 +26,24 @@ export default function useChartDrawings() {
       setIsRestored(true);
     };
     const handleStorage = (event) => {
-      if (event.key === null || event.key === CHART_DRAWINGS_STORAGE_KEY) restore();
+      if (event.key === null || event.key === storageKey) restore();
     };
     restore();
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
-  }, []);
+  }, [storageKey]);
 
   const changeDrawings = useCallback(
     (getNext) => {
       if (!isRestored) return false;
-      const saved = readChartDrawings();
+      const saved = readChartDrawings(undefined, undefined, storageKey);
       if (saved.warning) {
         setWarning(saved.warning);
         return false;
       }
       const next = getNext(saved.drawings);
       if (!next) return false;
-      const saveWarning = writeChartDrawings(next);
+      const saveWarning = writeChartDrawings(next, undefined, undefined, storageKey);
       setWarning(saveWarning);
       if (saveWarning) return false;
       const previousAction = undoHistory.current.at(-1);
@@ -57,7 +57,7 @@ export default function useChartDrawings() {
       setDrawings(next);
       return true;
     },
-    [isRestored],
+    [isRestored, storageKey],
   );
 
   const addDrawing = useCallback(
@@ -111,7 +111,7 @@ export default function useChartDrawings() {
   const undoLast = useCallback(() => {
     if (!isRestored || !undoHistory.current.length) return false;
     const previous = undoHistory.current.at(-1);
-    const saved = readChartDrawings();
+    const saved = readChartDrawings(undefined, undefined, storageKey);
     if (saved.warning) {
       setWarning(saved.warning);
       return false;
@@ -123,14 +123,14 @@ export default function useChartDrawings() {
       setWarning('Drawings changed in another tab. That tab’s changes were kept; undo was reset.');
       return false;
     }
-    const saveWarning = writeChartDrawings(previous.before);
+    const saveWarning = writeChartDrawings(previous.before, undefined, undefined, storageKey);
     setWarning(saveWarning);
     if (saveWarning) return false;
     undoHistory.current.pop();
     setCanUndo(undoHistory.current.length > 0);
     setDrawings(previous.before);
     return true;
-  }, [isRestored]);
+  }, [isRestored, storageKey]);
 
   return {
     drawings,

@@ -5,8 +5,14 @@ import { mergeBenchmarkChartHistory } from '../utils/benchmarkChart.utils';
 const HOUR = 3_600_000;
 
 /** Load older chart readings on demand; the live forecast keeps its own original inputs. */
-export default function useBenchmarkChartHistory(benchmarkData, windowMinutes, now) {
-  const needsHistory = [120, 240].includes(windowMinutes) && Number.isSafeInteger(now) && now > 0;
+export default function useBenchmarkChartHistory(
+  benchmarkData,
+  windowMinutes,
+  now,
+  enabled = true,
+) {
+  const needsHistory =
+    enabled && [120, 240].includes(windowMinutes) && Number.isSafeInteger(now) && now > 0;
   const endingAt = needsHistory ? Math.floor(now / HOUR) * HOUR : 0;
   const history = useGetBenchmarkHistoryQuery(
     { hours: windowMinutes / 60, endingAt },
