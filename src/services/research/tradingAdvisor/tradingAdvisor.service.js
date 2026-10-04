@@ -10,6 +10,8 @@ import { createAdvisorAccount, getAdvisorPortfolio } from './tradingAdvisor.ledg
 import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
 import { createTradingPolicyTrialRepository } from './tradingPolicyTrials.repository';
 import { createTradingPolicyTrialService } from './tradingPolicyTrials.service';
+import { createAdvisorHistoryTrialRepository } from './advisorHistoryTrials.repository';
+import { createAdvisorHistoryTrialService } from './advisorHistoryTrials.service';
 import { fetchKalshiPurchaseValue } from '@/services/kalshi/purchaseValue/purchaseValue.service';
 import { fetchKalshiMarket } from '@/services/kalshi/kalshi.service';
 import { getKalshiContract } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
@@ -28,6 +30,7 @@ export function createTradingAdvisorService({
   now = Date.now,
   policy = TRADING_ADVISOR_POLICY,
   trials = null,
+  historyTrials = null,
   owner = randomUUID(),
 }) {
   let advancing = null;
@@ -37,6 +40,7 @@ export function createTradingAdvisorService({
   let lastHeartbeatAt = -Infinity;
   const outcomeAttempts = new Map();
   let trialInitialization = null;
+  let historyInputs = [];
   async function ensureTrials() {
     if (!trials) return;
     trialInitialization ??= trials.ensureTrial(policy, now()).catch((error) => {
@@ -115,6 +119,14 @@ export function createTradingAdvisorService({
         },
         lease,
       );
+      if (historyTrials)
+        historyInputs.push({
+          kind: 'observation',
+          contract: advice.contract,
+          book,
+          observedAt: now(),
+          sourceId: `execution:${advice.id}`,
+        });
       changed = true;
     }
     return changed;
@@ -137,6 +149,13 @@ export function createTradingAdvisorService({
         continue;
       }
       if (trials) await trials.settle({ market, observedAt: now() });
+      if (historyTrials)
+        historyInputs.push({
+          kind: 'settlement',
+          market,
+          observedAt: now(),
+          sourceId: `outcome:${contract.ticker}:${market?.receivedAt}`,
+        });
       for (const position of state.account.positions.filter(
         (row) => row.contract.ticker === contract.ticker,
       )) {
@@ -286,6 +305,15 @@ export function createTradingAdvisorService({
         validUntil: Math.min(evaluatedAt + policy.cadenceMs, contract.expiresAt),
       };
       await writeFrozen('saveAdvice', { advice, researchInputSnapshot }, lease);
+      if (historyTrials)
+        historyInputs.push({
+          kind: 'observation',
+          contract,
+          forecast,
+          book,
+          observedAt: evaluatedAt,
+          sourceId: advice.id,
+        });
       scheduleNextWake(await repository.readState(policy.id), contract);
     } catch (error) {
       nextWakeAt = 0;
@@ -305,16 +333,36 @@ export function createTradingAdvisorService({
         await ensureTrials();
         await trials.settle({ market, observedAt: now() });
       }
+      if (historyTrials)
+        await historyTrials.observe({
+          kind: 'settlement',
+          market,
+          observedAt: now(),
+          sourceId: `outcome:${market.ticker}:${market.receivedAt}`,
+        });
     },
     advance(input) {
       if (advancing) return advancing;
-      advancing = advanceOnce(input).finally(() => {
+      advancing = (async () => {
+        if (historyTrials) await historyTrials.start().catch(() => {});
+        try {
+          await advanceOnce(input);
+        } finally {
+          // The incumbent's lease has been released. Shadow persistence and bounded AI
+          // inference cannot own, delay, or mutate its simulated execution transaction.
+          const captured = historyInputs;
+          historyInputs = [];
+          for (const observation of captured) await historyTrials.observe(observation);
+          if (historyTrials) await historyTrials.captureExecutionObservation(readBook);
+        }
+      })().finally(() => {
         advancing = null;
       });
       return advancing;
     },
     async stop(status = 'stopped') {
       if (advancing) await advancing;
+      if (historyTrials) await historyTrials.stop();
       if (!started) return;
       const lease = await repository.acquireLease(policy.id, owner);
       if (!lease) return;
@@ -359,6 +407,8 @@ export function createTradingAdvisorService({
       );
       return {
         trials: trials ? await trials.getReport(policy.id) : null,
+        historyTrials: historyTrials ? await historyTrials.getReport() : null,
+        currentPlan: state.currentPlan ?? null,
         asOf,
         startedAt: state.startedAt,
         simulated: true,
@@ -403,6 +453,7 @@ export function createTradingAdvisorService({
 export function createConfiguredTradingAdvisorService({
   repository,
   trialRepository,
+  historyTrialRepository,
   now = Date.now,
   ...options
 }) {
@@ -418,6 +469,13 @@ export function createConfiguredTradingAdvisorService({
         now,
         ...options,
         policy: configuration.policy,
+        historyTrials: historyTrialRepository
+          ? createAdvisorHistoryTrialService({
+              repository: historyTrialRepository,
+              policy: configuration.policy,
+              now,
+            })
+          : null,
         trials:
           configuration.policy.version === 2 && trialRepository
             ? createTradingPolicyTrialService({ repository: trialRepository, now })
@@ -462,9 +520,14 @@ async function getAdvisorStore() {
     const client = createClient(configuration);
     const repository = createTradingAdvisorRepository({ client });
     const trialRepository = createTradingPolicyTrialRepository({ client });
+    const historyTrialRepository = createAdvisorHistoryTrialRepository({ client });
     return {
       repository,
-      service: createConfiguredTradingAdvisorService({ repository, trialRepository }),
+      service: createConfiguredTradingAdvisorService({
+        repository,
+        trialRepository,
+        historyTrialRepository,
+      }),
     };
   })().catch((error) => {
     defaultStore = null;

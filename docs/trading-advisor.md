@@ -10,6 +10,10 @@ displayed holdings to the user's real Kalshi portfolio, place orders or claim va
 The word UP maps to the contract's YES result; DOWN maps to NO. Exact official contract rules,
 target and closing time remain authoritative, including the final-minute BRTI average and equality.
 
+The current plan now has a separate execution status. Experimental history and AI candidates
+run in independent shadow accounts; see [AI policy experiments](advisor-ai-experiments.md) for
+their action choices, explicit setup, cost limits, evidence and manual review requirements.
+
 ## Start and inspect
 
 Use **Setup** to choose a paper allocation from $1 to $100 and a risk profile, save, and start

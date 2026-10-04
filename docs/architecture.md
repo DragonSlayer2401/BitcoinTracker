@@ -8,6 +8,14 @@ through the research dialog. Prediction collection and model validation still ru
 Start adviser work at `features/TradingAdvisor/` and `services/research/tradingAdvisor/`; see
 [trading adviser](trading-advisor.md) for decision math, ownership, execution and evidence.
 
+`advisorPlan.utils.js` separates the current plan from execution readiness; the adviser repository
+persists its original assessment/expiry with the matching financial state. `advisorCandidate.utils.js`
+owns bounded history, code-priced action choices, rules decisions and candidate-specific validation.
+`advisorHistoryTrials.*` owns separate prospective accounts, immutable evidence and paid inference
+reservations. `advisorLanguageModel.service.js` owns the opt-in server provider. The existing
+collector forwards observations after releasing its incumbent lease. See
+[AI policy experiments](advisor-ai-experiments.md) for setup, timing, failure handling and limits.
+
 For adviser V2, read `utils/advisorPolicy.utils.js` for frozen allocation/risk profiles, then
 `utils/tradingAdvisor.utils.js` for decisions and partial IOC simulation. The service's
 `advisorPortfolio.utils.js` reconstructs fresh account risk inputs for both capture and repository

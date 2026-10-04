@@ -24,6 +24,7 @@ import { createPaperTradingService } from '../src/services/research/paperTrading
 import { createTradingAdvisorRepository } from '../src/services/research/tradingAdvisor/tradingAdvisor.repository';
 import { createConfiguredTradingAdvisorService } from '../src/services/research/tradingAdvisor/tradingAdvisor.service';
 import { createTradingPolicyTrialRepository } from '../src/services/research/tradingAdvisor/tradingPolicyTrials.repository';
+import { createAdvisorHistoryTrialRepository } from '../src/services/research/tradingAdvisor/advisorHistoryTrials.repository';
 import { getResearchForecast } from '../src/features/BitcoinTracker/utils/researchForecast.utils';
 import { getKalshiMarketConditions } from '../src/features/BitcoinTracker/utils/kalshi/marketConditions.utils';
 import {
@@ -431,6 +432,15 @@ export async function runResearchCollector({
                   capturedAt: observedAt,
                   modelVersion: estimate.modelVersion,
                   modelId: estimate.learning?.modelId ?? null,
+                  referencePrice: estimate.kalshi?.referencePrice ?? null,
+                  referenceAt: estimate.kalshi?.referenceAt ?? null,
+                  referenceReceivedAt: estimate.kalshi?.referenceReceivedAt ?? null,
+                  referenceSource: estimate.kalshi?.referenceSource ?? null,
+                  volatility: estimate.volatility ?? null,
+                  minuteVolatility:
+                    estimate.kalshi?.minuteVolatility ??
+                    estimate.pressure?.components?.minuteVolatility ??
+                    null,
                   researchInputSnapshot,
                 };
               },
@@ -773,6 +783,7 @@ export async function runCollectorCommand(args) {
         ? createConfiguredTradingAdvisorService({
             repository: createTradingAdvisorRepository({ client }),
             trialRepository: createTradingPolicyTrialRepository({ client }),
+            historyTrialRepository: createAdvisorHistoryTrialRepository({ client }),
           })
         : null;
     if (options.advisorReport) {

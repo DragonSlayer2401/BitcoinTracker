@@ -64,3 +64,20 @@ same-origin checks. Local Start/Stop browser smoke tests are separate from these
 At desktop and mobile sizes check Setup validation, keyboard controls, visible saved/unsaved state,
 collector status, sell price in cents, net proceeds vs profit, expired-plan suppression and
 Performance trial progress. No newly displayed percentage should imply proven trading profit.
+
+## History-aware adviser checks
+
+The TradingAdvisor tests also cover independent incumbent, rules and AI paper accounts; causal
+same-contract evidence; candidate disagreement without weakening incumbent validation; pullbacks,
+deterioration and expiry; structured output validation; delayed/restarted inference; and durable
+spend limits. Providers are mocked: these checks do not send paid requests.
+
+Verify that AI decisions create and fill their own delayed paper orders even when the incumbent
+has no pending order. Shared execution claims must prevent duplicate fetches or favorable retries
+after a lost request. Partial fills cancel remainders; expired orders release cash. Late API charges
+must affect net profit and drawdown even after the last settlement.
+
+Check plan/readiness separation, consumed BUY intentions, unchanged HOLD plans with no validity
+extension, stale-plan labels, disabled provider state and visible independent-account results.
+Actual API latency, account entitlement and prospective profit evidence require a separately
+configured collector run; passing tests does not establish a profitable policy.

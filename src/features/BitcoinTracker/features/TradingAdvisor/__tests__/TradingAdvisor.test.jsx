@@ -146,7 +146,7 @@ test('describes a sale as an advantage over holding rather than realized trade p
     },
   });
   render(<TradingAdvisor {...props} />);
-  expect(screen.getByRole('heading', { name: 'SELL DOWN' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'EXIT DOWN' })).toBeInTheDocument();
   expect(metric('Estimated sale proceeds, net')).toHaveTextContent('$7.40');
   expect(metric('Expected settlement payout')).toHaveTextContent('$6.50');
   expect(metric('Sale advantage after caution margin')).toHaveTextContent('$0.40');
@@ -230,7 +230,7 @@ test('does not suggest the full pre-sale quantity again when advice reduces part
     },
   });
   render(<TradingAdvisor {...props} />);
-  expect(screen.getByRole('heading', { name: 'SELL UP' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'REDUCE UP' })).toBeInTheDocument();
   expect(metric('Quantity')).toHaveTextContent('3 contracts');
   expect(screen.getByText('Sell 3 UP contracts at 60¢ or better.')).toBeInTheDocument();
   expect(screen.queryByText(/Sell 10 UP contracts/)).not.toBeInTheDocument();
@@ -315,7 +315,9 @@ test('distinguishes suggestions, simulated fills, unfilled orders and completed 
   });
   render(<TradingAdvisor {...props} />);
   fireEvent.click(screen.getByText('Recent paper activity'));
-  const activity = within(screen.getByRole('list'));
+  const activity = within(
+    within(screen.getByRole('region', { name: 'Paper positions' })).getByRole('list'),
+  );
   expect(activity.getByText('Suggestion · BUY UP')).toBeInTheDocument();
   expect(activity.getByText('Simulated fill · BUY UP')).toBeInTheDocument();
   expect(activity.getByText('No simulated fill · SELL UP')).toBeInTheDocument();
@@ -340,21 +342,24 @@ test.each([
     { latestAdvice: { ...advice, contract: { ...market, ticker: 'KXBTC15M-OTHER' } } },
   ],
   ['changed target', { latestAdvice: { ...advice, contract: { ...market, target: 49_999 } } }],
-])('shows WAIT for %s without repeating the old buy or its price target', (_label, changes) => {
-  mockQuery({ data: { ...report, ...changes } });
-  render(<TradingAdvisor {...props} />);
-  expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
-  expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
-  expect(screen.queryByText('Maximum buy price')).not.toBeInTheDocument();
-  expect(screen.queryByText('Conditional exit plan')).not.toBeInTheDocument();
-});
+])(
+  'shows an unavailable assessment for %s without repeating the old buy or its price target',
+  (_label, changes) => {
+    mockQuery({ data: { ...report, ...changes } });
+    render(<TradingAdvisor {...props} />);
+    expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Maximum buy price')).not.toBeInTheDocument();
+    expect(screen.queryByText('Conditional exit plan')).not.toBeInTheDocument();
+  },
+);
 
 test.each(['filled', 'no-fill'])(
   'does not repeat a buy that already has execution status %s',
   (executionStatus) => {
     mockQuery({ data: { ...report, latestAdvice: { ...advice, executionStatus } } });
     render(<TradingAdvisor {...props} />);
-    expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
     expect(
       screen.getByText(
         executionStatus === 'filled' ? /recorded simulated fill/ : /last suggestion did not fill/,
@@ -367,7 +372,7 @@ test.each([
   ['buy', 'yes', 'UP', 'Recorded entry cost, including fees: $5.968.'],
   ['sell', 'no', 'DOWN', 'Recorded sale proceeds, after fees: $5.632.'],
 ])(
-  'retains the actual completed %s details while guidance remains non-actionable WAIT',
+  'retains the actual completed %s details while guidance remains an unavailable assessment',
   (action, side, sideLabel, amountLabel) => {
     mockQuery({
       data: {
@@ -404,7 +409,7 @@ test.each([
       },
     });
     render(<TradingAdvisor {...props} now={NOW + 3000} />);
-    expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
     const history = within(screen.getByRole('region', { name: 'Last simulated fill' }));
     expect(
       history.getByText(
@@ -436,7 +441,7 @@ test('a fresh no-trade decision explains the missing edge rather than blaming st
     },
   });
   render(<TradingAdvisor {...props} />);
-  expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'NO TRADE' })).toBeInTheDocument();
   expect(screen.getByText(/No suitable entry/)).toBeInTheDocument();
   expect(screen.getByText('Fresh evaluation')).toBeInTheDocument();
 });
@@ -456,7 +461,7 @@ test('shows startup instructions with an explicit budget and unknown balances be
 test('an API error suppresses cached buy guidance and provides a retry', () => {
   const query = mockQuery({ isError: true });
   render(<TradingAdvisor {...props} />);
-  expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh adviser' }));
   expect(query.refetch).toHaveBeenCalledTimes(1);
 });
@@ -485,7 +490,7 @@ test.each([
   mockQuery({ data: { ...report, asOf } });
   render(<TradingAdvisor {...props} />);
   expect(screen.getByText('Outdated account data')).toBeInTheDocument();
-  expect(screen.getByRole('heading', { name: 'WAIT' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
 });
 

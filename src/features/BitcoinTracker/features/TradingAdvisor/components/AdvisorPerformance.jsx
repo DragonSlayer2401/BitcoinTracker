@@ -3,6 +3,7 @@ import { Alert, Button, Modal } from 'react-bootstrap';
 import { formatDateTime } from '../../../utils/format.utils';
 import { formatAdvisorMoney, formatAdvisorQuantity } from '../utils/advisorDisplay.utils';
 import AdvisorStrategyTrials from './AdvisorStrategyTrials';
+import AdvisorHistoryTrials from './AdvisorHistoryTrials';
 
 function PerformanceValue({ label, value }) {
   return (
@@ -114,6 +115,7 @@ export default function AdvisorPerformance({ report, isStale = false }) {
             </>
           )}
           <AdvisorStrategyTrials trials={report?.trials} />
+          <AdvisorHistoryTrials trials={report?.historyTrials} />
         </Modal.Body>
         <Modal.Footer>
           <Button variant="outline-secondary" onClick={() => setIsOpen(false)}>

@@ -47,6 +47,13 @@ const freeze = (value) => {
   return value;
 };
 
+// Candidate policies share pricing, data checks and accounting without changing incumbent decisions.
+export {
+  getBookProblem as getTradingBookProblem,
+  getPortfolioProblem as getTradingPortfolioProblem,
+  getQuoteAmounts as getTradingQuoteAmounts,
+};
+
 export function isTradingAdvisorPolicy(policy) {
   if (policy?.version === 2) return isAdvisorV2Policy(policy);
   return Boolean(

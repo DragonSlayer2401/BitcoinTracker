@@ -4,10 +4,9 @@ import { formatPercent, formatTime } from '../../../utils/format.utils';
 import {
   formatAdvisorMoney,
   formatAdvisorQuantity,
-  getAdvisorReason,
   getAdvisorSideLabel,
-  hasFreshAdvisorAdvice,
 } from '../utils/advisorDisplay.utils';
+import { getAdvisorPlanHeading, getAdvisorPlanState } from '../utils/advisorPlan.utils';
 
 function ActionMetric({ label, value }) {
   return (
@@ -27,44 +26,21 @@ export default function AdvisorAction({
   onRefresh,
   isRefreshing,
 }) {
-  const advice = report?.latestAdvice;
-  const isFresh =
-    !isError && hasFreshAdvisorAdvice({ advice, collector: report?.collector, market, now });
+  const planState = getAdvisorPlanState({ report, market, now, isError, isLoading });
+  const advice = planState.advice;
+  const isFresh = Boolean(planState.current);
   const usesRetiredDailyLossRule =
     isFresh &&
     report?.policy?.dailyLossLimitEnabled !== false &&
-    ['daily_loss_limit', 'daily_equity_loss_limit'].includes(advice.reason);
+    ['daily_loss_limit', 'daily_equity_loss_limit'].includes(advice?.reason);
   const action = isFresh ? advice.action : 'wait';
   const side = isFresh ? getAdvisorSideLabel(advice.side) : '';
-  const heading = action === 'wait' ? 'WAIT' : `${action.toUpperCase()} ${side}`;
-  const completedFill =
-    action === 'wait' && advice?.executionStatus === 'filled'
-      ? report?.recentActivity?.find(
-          (entry) =>
-            entry.kind === 'fill' &&
-            entry.adviceId === advice.id &&
-            entry.action === advice.action &&
-            entry.side === advice.side,
-        )
-      : null;
+  const heading = planState.heading;
+  const completedFill = planState.completedFill;
   const needsStartup = !report?.startedAt || report?.collector?.status === 'not-started';
-  const reason = isError
-    ? 'A fresh adviser report or current event is unavailable. Refresh before relying on a suggestion.'
-    : isLoading
-      ? 'Loading the latest recorded evaluation…'
-      : needsStartup
-        ? 'The paper adviser has not started collecting decisions yet.'
-        : !market
-          ? 'Waiting for the next open Kalshi event.'
-          : advice?.executionStatus === 'filled'
-            ? 'The last suggestion has a recorded simulated fill. Waiting for updated guidance.'
-            : advice?.executionStatus === 'no-fill'
-              ? 'The last suggestion did not fill. Waiting for a new evaluation.'
-              : !isFresh
-                ? 'No fresh advice for this event. Waiting for a new collector evaluation.'
-                : usesRetiredDailyLossRule
-                  ? 'This collector is still using the removed daily-loss rule. Restart it to apply the update.'
-                  : getAdvisorReason(advice.reason);
+  const reason = usesRetiredDailyLossRule
+    ? 'This collector is still using the removed daily-loss rule. Restart it to apply the update.'
+    : planState.explanation;
 
   return (
     <section
@@ -84,9 +60,48 @@ export default function AdvisorAction({
         </span>
       </div>
       <div className="advisor-action-call" role="status">
+        <span className="small text-secondary d-block mb-1">Current plan</span>
         <h3 className="mb-1">{heading}</h3>
         <p className="small mb-0">{reason}</p>
       </div>
+      <div className="advisor-readiness d-flex align-items-baseline flex-wrap gap-2 small mt-2">
+        <span className="text-secondary">Execution status</span>
+        <strong>{planState.readinessLabel}</strong>
+      </div>
+      {planState.blocker && planState.blocker !== reason && (
+        <p className="small mt-1 mb-1">
+          <strong>Waiting on: </strong>
+          {planState.blocker}
+        </p>
+      )}
+      {planState.historical && (
+        <p className="small text-secondary mt-2 mb-1">
+          Previous plan (historical): <strong>{getAdvisorPlanHeading(planState.historical)}</strong>
+          {' · '}
+          {formatTime(planState.historical.assessedAt)}. This is not a current instruction.
+        </p>
+      )}
+      {planState.current?.action === 'conditional-buy' && (
+        <p className="small mt-2 mb-1">{planState.current.conditions[0]}</p>
+      )}
+      {planState.current && (
+        <details className="small advisor-assumptions mt-2">
+          <summary>Plan conditions and invalidation</summary>
+          {planState.current.conditions
+            .slice(planState.current.action === 'conditional-buy' ? 1 : 0)
+            .map((condition, index) => (
+              <p key={`condition-${index}`} className="mt-2 mb-1">
+                {condition}
+              </p>
+            ))}
+          <p className="fw-semibold mt-2 mb-1">Reassess this plan when:</p>
+          <ul className="ps-3 mb-1">
+            {planState.current.invalidationConditions.map((condition, index) => (
+              <li key={index}>{condition}</li>
+            ))}
+          </ul>
+        </details>
+      )}
       {completedFill && (
         <section className="small border rounded p-2 mt-2" aria-label="Last simulated fill">
           <h4 className="h6 mb-1">Last simulated fill</h4>
@@ -105,8 +120,9 @@ export default function AdvisorAction({
             Estimated fill fee: {formatAdvisorMoney(completedFill.fee)}.
           </p>
           <span className="text-secondary d-block">
-            {advice.contract?.ticker} · {formatTime(completedFill.recordedAt)} · Completed paper
-            account history. Wait for a new evaluation before considering another action.
+            {planState.historical?.contract?.ticker} · {formatTime(completedFill.recordedAt)} ·
+            Completed paper account history. Wait for a new evaluation before considering another
+            action.
           </span>
         </section>
       )}
@@ -217,7 +233,13 @@ export default function AdvisorAction({
         </p>
       </details>
       <div className="d-flex align-items-center justify-content-between flex-wrap gap-2 small text-secondary mt-auto pt-3">
-        <span>Evaluated {formatTime(advice?.evaluatedAt)}</span>
+        <span>
+          Last assessment {formatTime(planState.assessedAt)}
+          <span className="d-block">
+            Next review{' '}
+            {planState.reviewAt ? formatTime(planState.reviewAt) : 'awaiting fresh assessment'}
+          </span>
+        </span>
         <Button size="sm" variant="outline-secondary" onClick={onRefresh} disabled={isRefreshing}>
           {isRefreshing ? 'Refreshing…' : 'Refresh adviser'}
         </Button>

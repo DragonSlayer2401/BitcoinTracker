@@ -19,6 +19,7 @@ import {
   simulateTradingExecution,
 } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
 import { createTradingAdvisorPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPolicy.utils';
+import { createAdvisorPlan } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPlan.utils';
 import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
 import { getTradingPolicySelection } from './tradingPolicyTrials.repository';
 import {
@@ -63,6 +64,9 @@ const statements = [
     id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
     payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS advisor_accounts (
+    policy_id TEXT PRIMARY KEY REFERENCES advisor_policies(id),
+    payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS advisor_current_plans (
     policy_id TEXT PRIMARY KEY REFERENCES advisor_policies(id),
     payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS advisor_leases (
@@ -346,6 +350,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         events: eventRows.rows.map(decode),
         attempts,
         risk: decode(await one(transaction, 'advisor_risk_state', 'policy_id', policyId)),
+        currentPlan: decode(await one(transaction, 'advisor_current_plans', 'policy_id', policyId)),
       };
       await transaction.commit();
       return state;
@@ -456,6 +461,33 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         });
       await saveAccount(transaction, value.policyId, next);
       await saveValuation(transaction, value.policyId, next, value, 'advice');
+      const previousPlan = decode(
+        await one(transaction, 'advisor_current_plans', 'policy_id', value.policyId),
+      );
+      const financialSignature = (account) =>
+        hash(
+          encode({
+            cash: account.cash,
+            positions: account.positions,
+            pendingIntents: account.pendingIntents,
+          }).payload,
+        );
+      const plan = createAdvisorPlan(
+        value,
+        previousPlan?.financialSignature === financialSignature(account) ? previousPlan : null,
+      );
+      if (plan) {
+        const savedPlan = encode({
+          ...plan,
+          accountVersion: next.version,
+          financialSignature: financialSignature(next),
+        });
+        await transaction.execute({
+          sql: `INSERT INTO advisor_current_plans(policy_id,payload,content_hash) VALUES (?,?,?)
+            ON CONFLICT(policy_id) DO UPDATE SET payload = excluded.payload, content_hash = excluded.content_hash`,
+          args: [value.policyId, savedPlan.payload, savedPlan.contentHash],
+        });
+      }
       return value;
     });
   }
