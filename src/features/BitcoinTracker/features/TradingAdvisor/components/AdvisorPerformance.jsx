@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Alert, Button, Modal } from 'react-bootstrap';
 import { formatDateTime } from '../../../utils/format.utils';
 import { formatAdvisorMoney, formatAdvisorQuantity } from '../utils/advisorDisplay.utils';
+import AdvisorStrategyTrials from './AdvisorStrategyTrials';
 
 function PerformanceValue({ label, value }) {
   return (
@@ -112,6 +113,7 @@ export default function AdvisorPerformance({ report, isStale = false }) {
               </p>
             </>
           )}
+          <AdvisorStrategyTrials trials={report?.trials} />
         </Modal.Body>
         <Modal.Footer>
           <Button variant="outline-secondary" onClick={() => setIsOpen(false)}>

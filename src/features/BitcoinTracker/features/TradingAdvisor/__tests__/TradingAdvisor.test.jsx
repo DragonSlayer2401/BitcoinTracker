@@ -85,6 +85,25 @@ const metric = (label) => screen.getByText(label, { selector: 'dt' }).nextElemen
 
 beforeEach(() => mockQuery());
 
+test('explains when a running collector still uses the removed daily-loss rule', () => {
+  mockQuery({
+    data: {
+      ...report,
+      latestAdvice: {
+        ...advice,
+        action: 'wait',
+        side: null,
+        reason: 'daily_loss_limit',
+        executionStatus: null,
+      },
+    },
+  });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByText('Collector update needed')).toBeVisible();
+  expect(screen.getByText(/Restart it to apply the update/)).toBeVisible();
+  expect(screen.queryByText(/Stop new entries after/)).not.toBeInTheDocument();
+});
+
 test('puts a fresh buy, price limit, fees and paper budget ahead of forecast research', () => {
   render(<TradingAdvisor {...props} />);
   expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeInTheDocument();
@@ -94,10 +113,8 @@ test('puts a fresh buy, price limit, fees and paper budget ahead of forecast res
   expect(metric('Maximum total cost')).toHaveTextContent('$6.168');
   expect(metric('Estimated fees')).toHaveTextContent('$0.168');
   expect(screen.getByText('After the entry fills:')).toBeInTheDocument();
-  expect(screen.getByText('Suggested sell limit: 10 UP at $0.83 or better.')).toBeInTheDocument();
-  expect(
-    screen.getByText(/This limit is not placed. Reassess with fresh prices/),
-  ).toBeInTheDocument();
+  expect(screen.getByText('Sell 10 UP contracts at 83¢ or better.')).toBeInTheDocument();
+  expect(screen.getByText(/This order is not placed/)).toBeInTheDocument();
   expect(screen.getByText(/Paper adviser · no real orders/)).toBeInTheDocument();
   expect(screen.getByText(/not your Kalshi holdings/)).toBeInTheDocument();
   expect(
@@ -135,8 +152,7 @@ test('describes a sale as an advantage over holding rather than realized trade p
   expect(metric('Sale advantage after caution margin')).toHaveTextContent('$0.40');
   expect(screen.getByText(/It is not realized profit on the position/)).toBeInTheDocument();
   expect(screen.queryByText('Expected profit if held')).not.toBeInTheDocument();
-  expect(screen.queryByText('Conditional exit plan')).not.toBeInTheDocument();
-  expect(screen.queryByText(/Suggested sell limit/)).not.toBeInTheDocument();
+  expect(screen.getByText('Sell 10 DOWN contracts at 60¢ or better.')).toBeInTheDocument();
 });
 
 test('holds an existing position while clearly comparing expected holding and selling values', () => {
@@ -196,7 +212,7 @@ test('uses the conditional exit quantity and side without describing a held posi
     },
   });
   render(<TradingAdvisor {...props} />);
-  expect(screen.getByText('Suggested sell limit: 3 DOWN at $0.72 or better.')).toBeInTheDocument();
+  expect(screen.getByText('Sell 3 DOWN contracts at 72¢ or better.')).toBeInTheDocument();
   expect(screen.queryByText('After the entry fills:')).not.toBeInTheDocument();
 });
 
@@ -216,8 +232,8 @@ test('does not suggest the full pre-sale quantity again when advice reduces part
   render(<TradingAdvisor {...props} />);
   expect(screen.getByRole('heading', { name: 'SELL UP' })).toBeInTheDocument();
   expect(metric('Quantity')).toHaveTextContent('3 contracts');
-  expect(screen.queryByText('Conditional exit plan')).not.toBeInTheDocument();
-  expect(screen.queryByText(/Suggested sell limit/)).not.toBeInTheDocument();
+  expect(screen.getByText('Sell 3 UP contracts at 60¢ or better.')).toBeInTheDocument();
+  expect(screen.queryByText(/Sell 10 UP contracts/)).not.toBeInTheDocument();
 });
 
 test('HOLD explains the unmet sale margin even when selling has a small positive raw advantage', () => {
@@ -251,7 +267,7 @@ test('does not display an expired conditional sell limit even while the main adv
   });
   render(<TradingAdvisor {...props} />);
   expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeInTheDocument();
-  expect(screen.queryByText(/Suggested sell limit/)).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Sell limit order' })).not.toBeInTheDocument();
 });
 
 test('distinguishes suggestions, simulated fills, unfilled orders and completed outcomes in activity', () => {
@@ -430,7 +446,9 @@ test('shows startup instructions with an explicit budget and unknown balances be
   render(<TradingAdvisor {...props} />);
   expect(metric('Total budget')).toHaveTextContent('$100.00');
   expect(metric('Available cash')).toHaveTextContent('—');
-  expect(screen.getByText('pnpm research:collect --trading-advisor')).toBeInTheDocument();
+  expect(
+    screen.getByText(/to choose your paper allocation and start collection/),
+  ).toBeInTheDocument();
   expect(screen.getByText('Position data is unavailable.')).toBeInTheDocument();
   expect(screen.queryByText(/No open simulated positions/)).not.toBeInTheDocument();
 });

@@ -11,6 +11,16 @@ export const formatAdvisorQuantity = (value) =>
 export const getAdvisorSideLabel = (side) => (side === 'yes' ? 'UP' : side === 'no' ? 'DOWN' : '');
 
 const reasons = {
+  risk_valuation_unavailable_or_stale:
+    'New entries need a fresh estimate of the account’s sale value.',
+  equity_drawdown_limit:
+    'The account drawdown stop has paused new entries. Existing positions can still be sold.',
+  daily_equity_loss_limit: 'The daily account-loss limit has paused new entries.',
+  portfolio_loss_capacity_exhausted: 'Existing BTC exposure uses the remaining loss budget.',
+  loss_cooldown: 'Waiting after a losing trade before considering another entry.',
+  reentry_cooldown: 'Waiting after the last sale before considering another entry.',
+  partial_delayed_snapshot_simulation:
+    'Available contracts filled; the unfilled remainder was canceled.',
   outside_active_contract: 'Wait for an open Kalshi event before considering a trade.',
   forecast_unavailable_or_stale: 'A fresh, matching probability estimate is unavailable.',
   book_unavailable_or_noncausal: 'A fresh order book is needed before estimating a fill.',

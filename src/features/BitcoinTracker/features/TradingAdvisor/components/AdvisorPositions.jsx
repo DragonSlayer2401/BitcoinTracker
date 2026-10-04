@@ -106,6 +106,12 @@ export default function AdvisorPositions({ portfolio, recentActivity, isStale = 
                 {Number.isFinite(entry.quantity)
                   ? `· ${formatAdvisorQuantity(entry.quantity)} contracts · `
                   : ''}
+                {entry.canceledQuantity > 0 && (
+                  <span>
+                    {formatAdvisorQuantity(entry.canceledQuantity)} unfilled contracts canceled
+                    ·{' '}
+                  </span>
+                )}
                 {entry.reason
                   ? getAdvisorReason(entry.reason)
                   : (activityDescriptions[entry.kind] ?? 'Saved in the paper ledger.')}

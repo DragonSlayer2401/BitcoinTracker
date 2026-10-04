@@ -41,7 +41,7 @@ test('shows estimated whole-account losses separately from remaining capital at 
   expect(metric('Capital still at risk')).toHaveTextContent('$10.00');
   expect(metric('Cash left if all exposure loses')).toHaveTextContent('$90.00');
   expect(metric('Largest observed drawdown')).toHaveTextContent('$4.00');
-  expect(screen.getByText(/It does not cap losses on positions already open/)).toBeVisible();
+  expect(screen.getByText(/All open BTC positions and pending buys count toward/)).toBeVisible();
 });
 
 test.each([

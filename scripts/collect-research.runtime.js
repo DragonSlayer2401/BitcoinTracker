@@ -22,7 +22,8 @@ import { createLearningService } from '../src/services/research/learning.service
 import { createPaperTradingRepository } from '../src/services/research/paperTrading/paperTrading.repository';
 import { createPaperTradingService } from '../src/services/research/paperTrading/paperTrading.service';
 import { createTradingAdvisorRepository } from '../src/services/research/tradingAdvisor/tradingAdvisor.repository';
-import { createTradingAdvisorService } from '../src/services/research/tradingAdvisor/tradingAdvisor.service';
+import { createConfiguredTradingAdvisorService } from '../src/services/research/tradingAdvisor/tradingAdvisor.service';
+import { createTradingPolicyTrialRepository } from '../src/services/research/tradingAdvisor/tradingPolicyTrials.repository';
 import { getResearchForecast } from '../src/features/BitcoinTracker/utils/researchForecast.utils';
 import { getKalshiMarketConditions } from '../src/features/BitcoinTracker/utils/kalshi/marketConditions.utils';
 import {
@@ -637,7 +638,9 @@ export async function runResearchCollector({
                 const tickerId = saved.contract.ticker;
                 outcomeRefresh.set(tickerId, now());
                 try {
-                  settledMarkets.set(tickerId, await loadMarket(tickerId));
+                  const settledMarket = await loadMarket(tickerId);
+                  await tradingAdvisorService?.observeOutcome?.(settledMarket);
+                  settledMarkets.set(tickerId, settledMarket);
                 } catch {
                   warn(
                     'official-outcome',
@@ -767,7 +770,10 @@ export async function runCollectorCommand(args) {
         : null;
     const tradingAdvisorService =
       options.tradingAdvisor || options.advisorReport
-        ? createTradingAdvisorService({ repository: createTradingAdvisorRepository({ client }) })
+        ? createConfiguredTradingAdvisorService({
+            repository: createTradingAdvisorRepository({ client }),
+            trialRepository: createTradingPolicyTrialRepository({ client }),
+          })
         : null;
     if (options.advisorReport) {
       console.log(JSON.stringify(await tradingAdvisorService.getReport(), null, 2));

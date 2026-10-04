@@ -3,10 +3,25 @@
 This repository is a Next.js App Router application using JavaScript and JSX. React Bootstrap supplies UI primitives, Redux owns the saved forecast state, and RTK Query owns cached server responses. Start with the user workflow, then follow the data into the calculation and storage layers.
 
 The primary dashboard now serves a position-aware paper trading adviser. Its action, simulated
-$100 account and positions lead the screen; prediction controls and diagnostics remain available
+account (up to $100) and positions lead the screen; prediction controls and diagnostics remain available
 through the research dialog. Prediction collection and model validation still run independently.
 Start adviser work at `features/TradingAdvisor/` and `services/research/tradingAdvisor/`; see
 [trading adviser](trading-advisor.md) for decision math, ownership, execution and evidence.
+
+For adviser V2, read `utils/advisorPolicy.utils.js` for frozen allocation/risk profiles, then
+`utils/tradingAdvisor.utils.js` for decisions and partial IOC simulation. The service's
+`advisorPortfolio.utils.js` reconstructs fresh account risk inputs for both capture and repository
+replay; `tradingAdvisor.ledger.js` owns cash, reservations, cost basis and daily equity state.
+`tradingPolicyTrials.*` registers and compares independent prospective shadow strategies and
+archives activation/rollback decisions. `createConfiguredTradingAdvisorService` uses the saved
+configuration and preserves the current account when a trial wins. The collector forwards its
+existing books and official outcomes; no candidate owns an exchange client.
+
+`components/AdvisorSetup.jsx` and `advisorSetup.service.js` own local setup commands. The private
+configuration route records versioned allocation changes only while collection is stopped and
+positions/comparisons are complete. `services/research/collectorControl/` starts a fixed local
+runner and stops only its own child through IPC. This does not add real order routing or a
+serverless background daemon. UI report queries remain read-only.
 
 ## Start here
 

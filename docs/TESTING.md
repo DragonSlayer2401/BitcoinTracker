@@ -46,3 +46,21 @@ tracks the current event while saved research retains its original contract.
    `/api/kalshi/benchmark/history` calls. Model inputs, collection and settlement remain unchanged.
 
 Public API smoke checks require network access. Entitled benchmark tests require configured Kalshi credentials and access; report that verification separately. Passing tests proves software behavior, not forecast accuracy.
+
+## Adviser V2 checks
+
+Owning tests live under `features/TradingAdvisor/__tests__/`. Verify configuration migration
+preserves losses/cash/risk history, rejects active collection or outstanding obligations, and
+does not allow a retired policy to resume writing. Test replay with the historically selected
+strategy, complete fresh valuation, daily equity state and delayed execution risk rechecks.
+Partial buy/sell fills must cancel the remainder, free reservations and retain proportional cost.
+
+Profit-trial tests use real in-memory repositories and shared observations: future fixed cohort,
+missing results, zero-trade outcomes, partial fills, coverage, fees, promotion, rollback and restart
+handling. No network requests or actual account configuration changes are required by tests.
+Collector-control tests mock process ownership, IPC shutdown, duplicate launch, authentication and
+same-origin checks. Local Start/Stop browser smoke tests are separate from these mocked checks.
+
+At desktop and mobile sizes check Setup validation, keyboard controls, visible saved/unsaved state,
+collector status, sell price in cents, net proceeds vs profit, expired-plan suppression and
+Performance trial progress. No newly displayed percentage should imply proven trading profit.

@@ -7,6 +7,9 @@ import { createClient } from '@libsql/client';
 import { getResearchDatabaseConfiguration } from '../research.repository';
 import { createTradingAdvisorRepository } from './tradingAdvisor.repository';
 import { createAdvisorAccount, getAdvisorPortfolio } from './tradingAdvisor.ledger';
+import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
+import { createTradingPolicyTrialRepository } from './tradingPolicyTrials.repository';
+import { createTradingPolicyTrialService } from './tradingPolicyTrials.service';
 import { fetchKalshiPurchaseValue } from '@/services/kalshi/purchaseValue/purchaseValue.service';
 import { fetchKalshiMarket } from '@/services/kalshi/kalshi.service';
 import { getKalshiContract } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
@@ -24,6 +27,7 @@ export function createTradingAdvisorService({
   loadMarket = fetchKalshiMarket,
   now = Date.now,
   policy = TRADING_ADVISOR_POLICY,
+  trials = null,
   owner = randomUUID(),
 }) {
   let advancing = null;
@@ -32,6 +36,15 @@ export function createTradingAdvisorService({
   let nextWakeAt = 0;
   let lastHeartbeatAt = -Infinity;
   const outcomeAttempts = new Map();
+  let trialInitialization = null;
+  async function ensureTrials() {
+    if (!trials) return;
+    trialInitialization ??= trials.ensureTrial(policy, now()).catch((error) => {
+      trialInitialization = null;
+      throw error;
+    });
+    await trialInitialization;
+  }
 
   async function writeFrozen(method, args, lease) {
     pendingWrite = { method, args };
@@ -90,6 +103,8 @@ export function createTradingAdvisorService({
             Math.min(advice.evaluatedAt + policy.maximumFillDelayMs + 1, advice.contract.expiresAt),
           )
         : null;
+      if (trials && book)
+        await trials.observe({ contract: advice.contract, book, observedAt: now() });
       await writeFrozen(
         'saveExecution',
         {
@@ -121,6 +136,7 @@ export function createTradingAdvisorService({
       } catch {
         continue;
       }
+      if (trials) await trials.settle({ market, observedAt: now() });
       for (const position of state.account.positions.filter(
         (row) => row.contract.ticker === contract.ticker,
       )) {
@@ -190,10 +206,11 @@ export function createTradingAdvisorService({
     nextWakeAt = Math.max(observedAt + 1, Math.min(...deadlines));
   }
 
-  async function advanceOnce({ market, getForecast }) {
+  async function advanceOnce({ market, getForecast, allowNewAdvice = true }) {
     if (!pendingWrite && now() < nextWakeAt) return;
     if (!started) {
       await repository.ensurePolicy(policy, now());
+      await ensureTrials();
       started = true;
     }
     const lease = await repository.acquireLease(policy.id, owner);
@@ -224,6 +241,7 @@ export function createTradingAdvisorService({
       if (await resolveOutcomes(state, lease)) state = await repository.readState(policy.id);
       const contract = getKalshiContract(market);
       if (
+        !allowNewAdvice ||
         !contract ||
         now() < contract.startsAt ||
         now() >= contract.expiresAt ||
@@ -241,12 +259,20 @@ export function createTradingAdvisorService({
       forecast.available = Boolean(forecast.available && researchInputSnapshot?.timing?.replayable);
       const book = await readBook(contract.ticker);
       const evaluatedAt = now();
-      const portfolio = getAdvisorPortfolio(state.account, evaluatedAt);
+      if (trials) await trials.observe({ contract, forecast, book, observedAt: evaluatedAt });
+      const selectedPolicy = trials ? await trials.getActivePolicy(policy, evaluatedAt) : policy;
+      const portfolio = getAdvisorDecisionPortfolio({
+        account: state.account,
+        book,
+        now: evaluatedAt,
+        policy: selectedPolicy,
+        riskHistory: state.risk?.history ?? null,
+      });
       const output = getTradingAdvice({
         contract,
         forecast,
         book,
-        policy,
+        policy: selectedPolicy,
         now: evaluatedAt,
         portfolio,
       });
@@ -274,6 +300,12 @@ export function createTradingAdvisorService({
   }
 
   return {
+    async observeOutcome(market) {
+      if (trials) {
+        await ensureTrials();
+        await trials.settle({ market, observedAt: now() });
+      }
+    },
     advance(input) {
       if (advancing) return advancing;
       advancing = advanceOnce(input).finally(() => {
@@ -326,6 +358,7 @@ export function createTradingAdvisorService({
         asOf - valuation.observedAt < 30000,
       );
       return {
+        trials: trials ? await trials.getReport(policy.id) : null,
         asOf,
         startedAt: state.startedAt,
         simulated: true,
@@ -366,18 +399,86 @@ export function createTradingAdvisorService({
   };
 }
 
-let defaultService;
-export async function getTradingAdvisorReportFromStore() {
-  defaultService ??= (async () => {
+/** Select a saved configuration without restarting collection or discarding account history. */
+export function createConfiguredTradingAdvisorService({
+  repository,
+  trialRepository,
+  now = Date.now,
+  ...options
+}) {
+  let current = null;
+  let currentPolicyId = null;
+  let updating = Promise.resolve();
+  async function select() {
+    const configuration = await repository.readConfiguration();
+    if (currentPolicyId !== configuration.policy.id) {
+      if (current) await current.stop();
+      current = createTradingAdvisorService({
+        repository,
+        now,
+        ...options,
+        policy: configuration.policy,
+        trials:
+          configuration.policy.version === 2 && trialRepository
+            ? createTradingPolicyTrialService({ repository: trialRepository, now })
+            : null,
+      });
+      currentPolicyId = configuration.policy.id;
+    }
+    return { service: current, configuration };
+  }
+  function serial(operation) {
+    const result = updating.then(operation);
+    updating = result.catch(() => {});
+    return result;
+  }
+  return {
+    advance: (input) =>
+      serial(async () => {
+        await repository.ensureDailyLossLimitRemoved();
+        const { service, configuration } = await select();
+        // Drain old intentions before rolling over, without replacing them with another
+        // old-policy order that would keep the migration waiting indefinitely.
+        return service.advance({
+          ...input,
+          allowNewAdvice: configuration.policy.dailyLossLimitEnabled === false,
+        });
+      }),
+    observeOutcome: (market) => serial(async () => (await select()).service.observeOutcome(market)),
+    stop: (status) => serial(async () => current?.stop(status)),
+    async getReport() {
+      const { configuration, service } = await select();
+      return { ...(await service.getReport()), configuration };
+    },
+  };
+}
+
+let defaultStore;
+async function getAdvisorStore() {
+  defaultStore ??= (async () => {
     const configuration = getResearchDatabaseConfiguration();
     if (configuration.mode === 'local-database')
       await mkdir(path.dirname(fileURLToPath(configuration.url)), { recursive: true });
-    return createTradingAdvisorService({
-      repository: createTradingAdvisorRepository({ client: createClient(configuration) }),
-    });
+    const client = createClient(configuration);
+    const repository = createTradingAdvisorRepository({ client });
+    const trialRepository = createTradingPolicyTrialRepository({ client });
+    return {
+      repository,
+      service: createConfiguredTradingAdvisorService({ repository, trialRepository }),
+    };
   })().catch((error) => {
-    defaultService = null;
+    defaultStore = null;
     throw error;
   });
-  return (await defaultService).getReport();
+  return defaultStore;
+}
+
+export async function getTradingAdvisorReportFromStore() {
+  return (await getAdvisorStore()).service.getReport();
+}
+export async function getAdvisorConfigurationFromStore() {
+  return (await getAdvisorStore()).repository.readConfiguration();
+}
+export async function saveAdvisorConfigurationToStore(configuration) {
+  return (await getAdvisorStore()).repository.configure(configuration);
 }

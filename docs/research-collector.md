@@ -4,6 +4,13 @@ The optional Node process records real KXBTC15M contracts while the browser is c
 
 Use Node 24 and install project dependencies, including development dependencies:
 
+Local users can use the dashboard's **Setup** dialog to save an allocation/risk profile and
+start or stop collection. It starts research plus both paper experiments using the shared API
+limiter. A collector already started in a terminal must first be stopped there with Ctrl+C.
+The app does not kill arbitrary processes or remove unverified lock files. Managed collection
+continues with the dialog closed and shuts down when its local server disconnects. Existing
+CLI commands read the same saved adviser configuration.
+
 ```sh
 pnpm research:collect --once
 pnpm research:collect
@@ -20,6 +27,13 @@ The launcher loads `.env.local`, then `.env`; existing environment values take p
 The collector and browser use the same [futures-aware calculation](derivatives.md). Futures data is optional: unavailable or warming inputs retain the existing price/spot-pressure calculation. After updating this code, stop an already-running collector with Ctrl+C and restart it to load the new calculation. Existing saved calls and pending outcomes remain intact.
 
 ## Paired experiments and replay
+
+With adviser V2 configured, the collector also tests entry/exit/sizing strategies using its
+existing books and official results, including outcomes of events with no simulated trades.
+Profit after costs, paired improvement and risk determine prospective promotion; subsequent
+deterioration restores standard rules. There are no extra exchange requests per strategy.
+See [trading-advisor.md](trading-advisor.md#prospective-strategy-trials) for the fixed cohort,
+fill coverage requirements, missing-outcome behavior and statistical limitations.
 
 Collection also tests the research changes. Version `kalshi-ablation-v5` records settlement-only,
 spot-only, futures-only, combined, half-pressure, faster-decay, Kalshi-market blend and market-only

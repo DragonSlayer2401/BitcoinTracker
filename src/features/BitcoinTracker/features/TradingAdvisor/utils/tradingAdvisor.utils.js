@@ -7,6 +7,11 @@ import {
   getKalshiPurchaseValue,
   getPurchaseFeeEstimate,
 } from '../../../utils/kalshi/purchaseValue.utils';
+import {
+  getAdvisorEntryRisk,
+  getAdvisorOpportunityBudget,
+  isAdvisorV2Policy,
+} from './advisorPolicy.utils';
 
 // A prospective experiment, not fitted or validated trading parameters.
 export const TRADING_ADVISOR_POLICY = Object.freeze({
@@ -43,9 +48,15 @@ const freeze = (value) => {
 };
 
 export function isTradingAdvisorPolicy(policy) {
+  if (policy?.version === 2) return isAdvisorV2Policy(policy);
   return Boolean(
     policy &&
-    /^kalshi-advisor-v[1-9]\d*$/.test(policy.id) &&
+    (/^kalshi-advisor-v[1-9]\d*$/.test(policy.id) ||
+      /^kalshi-advisor-v3-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        policy.id,
+      )) &&
+    (policy.dailyLossLimitEnabled === undefined ||
+      typeof policy.dailyLossLimitEnabled === 'boolean') &&
     policy.totalBudget === 100 &&
     policy.initialBankroll === 100 &&
     finite(policy.cashReserve) &&
@@ -215,13 +226,22 @@ function getPortfolioProblem(portfolio) {
 }
 
 /** Whole-cent limits are valid across Kalshi price structures; fees apply to the entire order. */
-function getOrderLimit({ action, quantity, valuePerContract, costBudget, fee, now }) {
+function getOrderLimit({
+  action,
+  quantity,
+  valuePerContract,
+  costBudget,
+  fee,
+  now,
+  qualifiesAmount,
+}) {
   let lower = 1;
   let upper = 99;
   const qualifies = (units) => {
     const amounts = getQuoteAmounts([{ price: units / 100, quantity }], action, fee, now);
     return Boolean(
       amounts &&
+      (!qualifiesAmount || qualifiesAmount(amounts)) &&
       (action === 'buy'
         ? amounts.totalCost <= Math.min(valuePerContract * quantity, costBudget) + 1e-8
         : amounts.netProceeds >= valuePerContract * quantity - 1e-8),
@@ -240,7 +260,16 @@ function getOrderLimit({ action, quantity, valuePerContract, costBudget, fee, no
   return lower / 100;
 }
 
-function getExitPlan({ side, quantity, probability, book, now, policy }) {
+function getExitPlan({
+  side,
+  quantity,
+  probability,
+  book,
+  now,
+  policy,
+  contract,
+  costBasis = null,
+}) {
   const price = getOrderLimit({
     action: 'sell',
     quantity,
@@ -248,6 +277,31 @@ function getExitPlan({ side, quantity, probability, book, now, policy }) {
     fee: book.fee,
     now,
   });
+  const amounts =
+    price === null ? null : getQuoteAmounts([{ price, quantity }], 'sell', book.fee, now);
+  const expiresAt =
+    policy.version === 2
+      ? Math.min(
+          now + policy.cadenceMs,
+          book.fee.validUntil,
+          book.fee.checkedAt + 30000,
+          contract.expiresAt,
+        )
+      : now + policy.cadenceMs;
+  if (price === null && policy.version === 2)
+    return {
+      available: false,
+      action: 'sell',
+      side,
+      quantity,
+      limitPrice: null,
+      type: 'conditional_limit',
+      reason: 'no_fee_adjusted_sell_limit',
+      expiresAt,
+      costBasis,
+      explanation:
+        'No sell price below $1 currently beats the estimated value of holding after fees and the caution margin.',
+    };
   return price === null
     ? null
     : {
@@ -259,6 +313,20 @@ function getExitPlan({ side, quantity, probability, book, now, policy }) {
         reason: 'fee_adjusted_exit_target',
         expiresAt: now + policy.cadenceMs,
         fillAssumption: 'Not submitted; requires available buyers and fresh reassessment.',
+        ...(policy.version === 2
+          ? {
+              available: true,
+              basis: 'hold-value-plus-fees',
+              grossProceeds: amounts.proceeds,
+              estimatedFee: amounts.fee,
+              netProceeds: amounts.netProceeds,
+              costBasis,
+              estimatedProfit: finite(costBasis) ? money(amounts.netProceeds - costBasis) : null,
+              expiresAt,
+              explanation:
+                'This whole-cent sell limit covers estimated exit fees and pays more than the model’s estimated value of holding, including its caution margin.',
+            }
+          : {}),
       };
 }
 
@@ -343,6 +411,10 @@ export function getTradingAdvice({
       book,
       now,
       policy,
+      contract,
+      costBasis: finite(position.costBasis)
+        ? money((position.costBasis * available) / position.quantity)
+        : null,
     });
     let hasExecutableDepth = false;
     let fullSaleQuote = null;
@@ -394,7 +466,26 @@ export function getTradingAdvice({
           holdExpectedValue: money(probability * quantity),
         };
     }
-    if (selected) return result({ ...positionFields, ...selected, exitPlan });
+    if (selected)
+      return result({
+        ...positionFields,
+        ...selected,
+        exitPlan:
+          policy.version === 2
+            ? getExitPlan({
+                side: position.side,
+                quantity: selected.quantity,
+                probability,
+                book,
+                now,
+                policy,
+                contract,
+                costBasis: finite(position.costBasis)
+                  ? money((position.costBasis * selected.quantity) / position.quantity)
+                  : null,
+              })
+            : exitPlan,
+      });
     if (!hasExecutableDepth)
       return result({ ...positionFields, reason: 'insufficient_exit_depth', exitPlan });
     return result({
@@ -409,8 +500,10 @@ export function getTradingAdvice({
     });
   }
 
-  if (portfolio.dailyRealizedPnl <= -policy.maxDailyLoss)
+  if (policy.dailyLossLimitEnabled !== false && portfolio.dailyRealizedPnl <= -policy.maxDailyLoss)
     return result({ reason: 'daily_loss_limit' });
+  const risk = policy.version === 2 ? getAdvisorEntryRisk({ portfolio, policy, now }) : null;
+  if (risk?.reason) return result({ reason: risk.reason });
   if (contract.expiresAt - now <= policy.minimumEntryRemainingMs)
     return result({ reason: 'too_close_to_settlement' });
   const budget = Math.min(
@@ -418,6 +511,7 @@ export function getTradingAdvice({
     policy.totalBudget - portfolio.openRisk,
     policy.maxOpenRisk - portfolio.openRisk,
     policy.maxPositionCost,
+    risk?.budget ?? Infinity,
   );
   if (budget <= 0)
     return result({
@@ -438,6 +532,19 @@ export function getTradingAdvice({
         policy,
       });
       if (!quote.available || quote.totalCost > budget + 1e-8) continue;
+      const qualifiesAmount =
+        policy.version === 2
+          ? (amounts) =>
+              amounts.totalCost <=
+              getAdvisorOpportunityBudget({
+                probability,
+                priceWithFees: amounts.totalCost / quantity,
+                equity: risk.equity,
+                policy,
+              }) +
+                1e-8
+          : null;
+      if (qualifiesAmount && !qualifiesAmount(quote)) continue;
       const expectedNetValue = money(probability * quantity - quote.totalCost);
       const conservativeExpectedNetValue = money(cautiousProbability * quantity - quote.totalCost);
       if (conservativeExpectedNetValue < policy.minimumEntryEdge * quantity - 1e-8) continue;
@@ -448,6 +555,7 @@ export function getTradingAdvice({
         costBudget: budget,
         fee: book.fee,
         now,
+        qualifiesAmount,
       });
       if (limitPrice === null || quote.fills.some((fill) => fill.price > limitPrice + 1e-8))
         continue;
@@ -465,7 +573,29 @@ export function getTradingAdvice({
           quotedCost: quote.totalCost,
           quotedFee: quote.fee,
           reason: 'fee_adjusted_entry_edge',
-          exitPlan: getExitPlan({ side, quantity, probability, book, now, policy }),
+          exitPlan: getExitPlan({
+            side,
+            quantity,
+            probability,
+            book,
+            now,
+            policy,
+            contract,
+            costBasis: maximum.totalCost,
+          }),
+          ...(policy.version === 2
+            ? {
+                sizingMethod: 'fractional-kelly-with-hard-risk-caps',
+                riskBudget: budget,
+                opportunityBudget: getAdvisorOpportunityBudget({
+                  probability,
+                  priceWithFees: maximum.totalCost / quantity,
+                  equity: risk.equity,
+                  policy,
+                }),
+                probabilityStatus: 'unvalidated-estimate',
+              }
+            : {}),
         };
     }
   }
@@ -507,6 +637,18 @@ export function simulateTradingExecution({
     recordedAt: now,
     book: copy(book ?? null),
     fills: [],
+    ...(policy.version === 2
+      ? {
+          requestedQuantity: advice.quantity,
+          canceledQuantity: advice.quantity,
+          timeInForce: 'IOC',
+          fullyCovered: false,
+          dailyEquity: {
+            day: portfolio?.equityDay ?? null,
+            startEquity: portfolio?.dailyStartEquity ?? null,
+          },
+        }
+      : {}),
   };
   const noFill = (reason) => freeze({ ...base, reason });
   if (now > decidedAt + policy.maximumFillDelayMs || now >= contract.expiresAt)
@@ -519,15 +661,27 @@ export function simulateTradingExecution({
   )
     return noFill('no_causal_execution_book');
   if (getPortfolioProblem(portfolio)) return noFill('portfolio_unavailable');
+  let executionBudget = Infinity;
   if (advice.action === 'buy') {
     if (contract.expiresAt - now <= policy.minimumEntryRemainingMs)
       return noFill('too_close_to_settlement');
-    if (portfolio.dailyRealizedPnl <= -policy.maxDailyLoss) return noFill('daily_loss_limit');
+    if (
+      policy.dailyLossLimitEnabled !== false &&
+      portfolio.dailyRealizedPnl <= -policy.maxDailyLoss
+    )
+      return noFill('daily_loss_limit');
+    if (policy.version === 2) {
+      const risk = getAdvisorEntryRisk({ portfolio, policy, now });
+      if (risk.reason) return noFill(risk.reason);
+      executionBudget = risk.budget;
+    }
     if (
       !finite(advice.maxCost) ||
       advice.maxCost > policy.maxPositionCost + 1e-8 ||
-      portfolio.cash - advice.maxCost < policy.cashReserve - 1e-8 ||
-      portfolio.openRisk + advice.maxCost > Math.min(policy.maxOpenRisk, policy.totalBudget) + 1e-8
+      (policy.version !== 2 &&
+        (portfolio.cash - advice.maxCost < policy.cashReserve - 1e-8 ||
+          portfolio.openRisk + advice.maxCost >
+            Math.min(policy.maxOpenRisk, policy.totalBudget) + 1e-8))
     )
       return noFill('capital_limit_changed');
     if (portfolio.positions.some((position) => position.contract.ticker === contract.ticker))
@@ -542,6 +696,95 @@ export function simulateTradingExecution({
       (position.availableQuantity ?? position.quantity) < advice.quantity
     )
       return noFill('position_unavailable');
+  }
+  if (policy.version === 2) {
+    if (
+      !Number.isSafeInteger(advice.quantity) ||
+      advice.quantity < 1 ||
+      advice.quantity > policy.maxContracts ||
+      !finite(advice.limitPrice) ||
+      !finite(advice.probability) ||
+      advice.probability < 0 ||
+      advice.probability > 1
+    )
+      return noFill('invalid_execution_request');
+    const problem = getBookProblem({ contract, book, now });
+    if (problem) return noFill(problem);
+    let selected = null;
+    let reason = 'insufficient_execution_depth';
+    // A single later book is the entire opportunity. Any unfilled remainder is canceled.
+    for (let quantity = 1; quantity <= advice.quantity; quantity += 1) {
+      const quote = getTradingExecutionQuote({
+        action: advice.action,
+        side: advice.side,
+        quantity,
+        contract,
+        book,
+        now,
+        policy,
+      });
+      if (!quote.available) {
+        reason = quote.reason;
+        break;
+      }
+      if (
+        quote.fills.some((fill) =>
+          advice.action === 'buy'
+            ? fill.price > advice.limitPrice + 1e-8
+            : fill.price < advice.limitPrice - 1e-8,
+        )
+      ) {
+        reason = 'limit_price_exceeded';
+        break;
+      }
+      if (advice.action === 'buy') {
+        const opportunityBudget = getAdvisorOpportunityBudget({
+          probability: advice.probability,
+          priceWithFees: quote.totalCost / quantity,
+          equity: portfolio.valuation.executableEquity,
+          policy,
+        });
+        if (
+          quote.totalCost >
+          Math.min(advice.maxCost, portfolio.cash, executionBudget, opportunityBudget) + 1e-8
+        ) {
+          reason = 'capital_limit_changed';
+          continue;
+        }
+        if (
+          (advice.probability - policy.probabilityReserve - policy.minimumEntryEdge) * quantity <
+          quote.totalCost - 1e-8
+        ) {
+          reason = 'execution_edge_lost';
+          continue;
+        }
+      } else {
+        const requiredPerContract =
+          advice.probability + policy.probabilityReserve + policy.minimumExitAdvantage;
+        if (
+          !finite(advice.minimumNetProceeds) ||
+          advice.minimumNetProceeds < requiredPerContract * advice.quantity - 1e-8 ||
+          quote.netProceeds < (advice.minimumNetProceeds * quantity) / advice.quantity - 1e-8
+        ) {
+          reason = 'execution_edge_lost';
+          continue;
+        }
+      }
+      selected = quote;
+    }
+    if (!selected) return noFill(reason);
+    return freeze({
+      ...base,
+      ...selected,
+      kind: 'fill',
+      price: selected.averagePrice,
+      fullyCovered: selected.quantity === advice.quantity,
+      canceledQuantity: advice.quantity - selected.quantity,
+      reason:
+        selected.quantity === advice.quantity
+          ? 'delayed_snapshot_simulation'
+          : 'partial_fill_remainder_canceled',
+    });
   }
   const quote = getTradingExecutionQuote({
     action: advice.action,

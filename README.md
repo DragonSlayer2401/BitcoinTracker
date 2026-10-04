@@ -15,6 +15,9 @@ Open [localhost:3000](http://localhost:3000). On Windows, if Turbopack cannot sp
 
 ## What it does
 
+- Leads with position-aware paper guidance, including the exact side, quantity and sell-limit price in cents. **Setup** configures a $1–$100 allocation and conservative/balanced risk allowance, then starts or stops a local collector. The existing account's losses and history are retained.
+- V2 sizes entries by cautious estimated edge, fees, liquidity and remaining risk capacity. Fresh account valuation, drawdown, correlated BTC exposure and reentry cooldowns constrain recommendations and delayed fills. There is no daily-loss entry cutoff. Partial orders fill what qualifies and cancel the remainder.
+- **Performance** compares three frozen entry/exit/sizing strategies with standard rules on future contracts, after fees and observed fills. A qualifying strategy can take over the same paper account; deterioration restores standard rules. Forecast-model learning remains separate. These are experiments, not proven profitability.
 - Loads the actual Kalshi target and 15-minute close time. YES means the rounded final-minute BRTI average is at or above the target; equality is YES.
 - Defaults to the current contract. Select an upcoming event to schedule it, even while its target is pending. Keep the page open for the scheduled start.
 - Counts down to the original close time. Joining with 12 minutes left starts at 12 minutes, without extending the event.

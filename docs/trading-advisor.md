@@ -12,6 +12,20 @@ target and closing time remain authoritative, including the final-minute BRTI av
 
 ## Start and inspect
 
+Use **Setup** to choose a paper allocation from $1 to $100 and a risk profile, save, and start
+collection. Local Node 24 is required. Stop a collector started in a terminal with Ctrl+C once
+before handing control to the app; the UI deliberately cannot terminate an unowned process.
+The managed collector runs research, adviser and the separate legacy paper experiment. It keeps
+running when the setup dialog closes and stops gracefully when the local server disconnects.
+Serverless/remote deployments still need an external collector; no request starts a cloud daemon.
+
+Saving setup creates a versioned policy and archives the prior account. It only succeeds when the
+collector is stopped, there are no open/reserved positions, and official settlement comparisons
+are complete. Cash changes only by the allocation difference; realized losses, fees, cooldowns,
+daily state, performance and the adjusted risk peak carry forward. This is not a reset button.
+
+CLI operation remains available and reads the same saved configuration:
+
 ```sh
 pnpm research:collect --trading-advisor
 pnpm research:collect --advisor-report
@@ -27,7 +41,39 @@ not request more exchange data, start a collector or train a model. Only the col
 books and official outcomes through the existing shared Kalshi limiter. No paid API or new key
 is required beyond the existing configured market access.
 
-## Frozen experimental rules
+## V2 sizing and enforced risk
+
+The default conservative profile keeps 60% of allocation in cash, limits a position to 7.5%,
+combined BTC exposure to 15%, and drawdown to 10%. Balanced uses
+50%, 10%, 20% and 15% respectively. These are ceilings, not suggested amounts to spend.
+All exposures are treated as related; opposite sides do not receive an assumed risk offset.
+
+For a prospective purchase, the engine reduces the model probability by the profile's caution
+margin (8 points conservative, 5 balanced), includes fees and slippage in its price, and tests
+a quarter-Kelly budget: `equity * 0.25 * max(0, (cautiousProbability - cost) / (1 - cost))`.
+It also caps the worst permitted limit-price cost, rather than relying on a cheaper displayed ask.
+This is experimental risk-based sizing; the input probability is not claimed to be calibrated.
+
+The permitted cost is the smallest of that opportunity budget, available cash above reserve,
+position/exposure caps, and equity remaining above the peak-minus-drawdown floor.
+Daily realized losses and daily equity declines do not independently stop or resize new entries.
+An unknown or stale complete liquidation mark stops new buys. Risk checks run again at execution
+and can reduce the fill quantity. Sales remain available when entry risk limits trip.
+
+Daily equity and realized P&L remain recorded for reporting. The account
+waits two minutes after a sale/settlement and five minutes after a realized loss before
+new entry. These entry controls cannot promise a realized loss ceiling: liquidity, gaps and
+already-held exposure can still produce losses. They never force an unpriced liquidation.
+
+## Frozen legacy rules
+
+The daily-loss cutoff described below applies only to archived policies and their pending orders.
+After restarting the collector with the updated code, its next adviser advance enrolls a new
+policy ID with `dailyLossLimitEnabled: false`. The account's cash, positions, fees, performance,
+cooldowns, daily results and risk history carry forward without changing the allocation. The
+rollover waits for any recorded pending orders and active writer lease to finish, fences the old
+writer, and leaves the original policy and evidence intact. New V2 strategy trials start a fresh
+prospective sample under the revised rules. Viewing reports alone does not make this change.
 
 `kalshi-advisor-v1` starts with $100. The total allocation cap is $100, including committed
 capital and fees; profit does not authorize exceeding this cap. Additional limits keep this first
@@ -110,7 +156,9 @@ touched its price. See [Kalshi limit sales](https://help.kalshi.com/en/articles/
 ## Execution and evaluation
 
 The intention, quantity, limits, probability, model and evidence are saved before execution.
-The later book must cover the requested quantity at acceptable prices and within its time window.
+V1 requires full quantity coverage. V2 fills the largest qualifying whole-contract quantity from
+that later book and cancels the rest immediately. Unused buy cash and sell reservations are
+released in the same transaction; there is no resting remainder or retry at a better later price.
 Fees are refreshed. There is no series of retries selecting a favorable snapshot. Interrupted or
 expired attempts become no-fills. All fills are simulations from observed depth, not exchange
 confirmations; displayed orders may disappear before a real order executes.
@@ -172,10 +220,36 @@ and complete/incomplete counts. Missing marks never reset the peak or become zer
 This is not a continuous maximum drawdown or reconstructed history before deployment. The
 existing realized P&L and realized drawdown remain separate.
 
-These measurements support later profit/risk-based policy comparisons. They do not size trades
-from an unvalidated probability, automatically liquidate holdings or change the frozen `$5`
-realized-loss entry trigger. Configurable sizing, portfolio drawdown stops, partial-order fills,
-and prospective trading-policy promotion require separately versioned implementation/evidence.
+The legacy engine keeps these measurements separate from entry sizing. V2 uses
+them for the enforced risk checks described above. Both preserve missing values rather than
+treating unpriced holdings as zero, and neither automatically liquidates without a valid sale.
+
+## Prospective strategy trials
+
+Each configured V2 run registers standard rules and three candidates before collecting results:
+more selective entries (4-cent minimum edge), earlier exits (half-cent advantage), and smaller
+positions (one-eighth Kelly). All other profile/risk limits and starting allocations are identical.
+Each has an independent shadow account; one candidate's fills never spend another's cash.
+
+Trials reuse every available adviser decision/execution book and the collector's official results.
+They have no exchange client and do not request extra data. Missing delayed observations become
+no-fills, not invented fills. Each immutable input advances the four accounts transactionally.
+Consumed sale depth cannot value remaining holdings until a new observation arrives.
+
+The first 120 future contracts are a fixed confirmation sample. No-trade events count; missing
+outcomes remain missing rather than being replaced. Promotion needs at least 24 hours, 24 traded
+candidate events, 12 traded baseline events, adequate observed-fill coverage, positive net profit,
+a positive conservative paired-profit lower-bound estimate and acceptable relative drawdown.
+The statistical screen uses an approximate standard-error calculation with a 2.4 multiplier for
+the three candidates; it does not establish future profitability or eliminate serial dependence.
+
+A qualifying strategy changes only its registered entry, exit or sizing setting in the same
+paper account. Cash, holdings, losses and hard risk limits stay intact. Decisions archive the
+selected policy; repository replay checks the selection that existed at that time. Later fills
+use the intention's saved policy. Subsequent resolved contracts feed a rolling 40-event monitor;
+after at least 20, profit/drawdown deterioration restores standard rules. Rejected/rolled-back
+trials cannot reuse that sample to try again; a new setup registers fresh future evidence.
+**Performance** shows active rules, progress, net profit, paired advantage, coverage and blockers.
 
 ## Storage and ownership
 
@@ -202,6 +276,5 @@ bounded report reads. Valuation persistence and account/evidence changes commit 
 together. Existing account balances, losses and old observations are preserved.
 
 Future work includes real portfolio reconciliation, user-confirmed transactions, resting-order
-lifecycles, execution-quality validation, policy comparisons on unseen periods, calibrated sizing,
-and executable portfolio risk controls. Real order routing requires a separate explicitly authorized
+lifecycles, execution-quality validation and empirically calibrated sizing. Real order routing requires a separate explicitly authorized
 phase. Existing forecast research and chronological validation continue independently.

@@ -14,9 +14,13 @@ import {
 } from '../research.validation';
 import {
   getTradingAdvice,
+  TRADING_ADVISOR_POLICY,
   isTradingAdvisorPolicy,
   simulateTradingExecution,
 } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
+import { createTradingAdvisorPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPolicy.utils';
+import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
+import { getTradingPolicySelection } from './tradingPolicyTrials.repository';
 import {
   getKalshiOutcome,
   isSameKalshiContract,
@@ -50,6 +54,11 @@ function decode(row) {
 }
 
 const statements = [
+  `CREATE TABLE IF NOT EXISTS advisor_configuration (
+    id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS advisor_configuration_history (
+    revision INTEGER PRIMARY KEY, previous_policy_id TEXT NOT NULL,
+    payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS advisor_policies (
     id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
     payload TEXT NOT NULL, content_hash TEXT NOT NULL)`,
@@ -105,6 +114,7 @@ const statements = [
     'advisor_attempts',
     'advisor_events',
     'advisor_valuations',
+    'advisor_configuration_history',
   ].flatMap((table) =>
     ['UPDATE', 'DELETE'].map(
       (operation) =>
@@ -261,6 +271,11 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     )
       reject('Invalid trading-advisor writer lease.');
     return write(async (transaction) => {
+      const retired = await transaction.execute({
+        sql: 'SELECT revision FROM advisor_configuration_history WHERE previous_policy_id = ? LIMIT 1',
+        args: [policyId],
+      });
+      if (retired.rows.length) return null;
       const original = await one(transaction, 'advisor_leases', 'policy_id', policyId);
       // Each service owns a fresh UUID and serializes advance calls. If its previous lease
       // release failed, the next completed-call successor can replace and fence that token.
@@ -378,7 +393,12 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         return decode(original);
       }
       const savedPolicy = await one(transaction, 'advisor_policies', 'id', value.policyId);
-      const policy = decode(savedPolicy);
+      const basePolicy = decode(savedPolicy);
+      const policy =
+        basePolicy?.version === 2
+          ? ((await getTradingPolicySelection(transaction, value.policyId, value.evaluatedAt)) ??
+            basePolicy)
+          : basePolicy;
       const account = await accountFrom(transaction, value.policyId);
       if (
         !policy ||
@@ -389,10 +409,17 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
           value.evaluatedAt - account.lastAdviceAt < policy.cadenceMs)
       )
         reject('Advice must be prospective and obey the saved observation cadence.');
-      if (
-        value.accountVersion !== account.version ||
-        !same(value.portfolio, getAdvisorPortfolio(account, value.evaluatedAt))
-      )
+      const risk = decode(
+        await one(transaction, 'advisor_risk_state', 'policy_id', value.policyId),
+      );
+      const portfolio = getAdvisorDecisionPortfolio({
+        account,
+        book: value.book,
+        now: value.evaluatedAt,
+        policy,
+        riskHistory: risk?.history ?? null,
+      });
+      if (value.accountVersion !== account.version || !same(value.portfolio, portfolio))
         reject('Advice must preserve its exact available portfolio.');
       if (['buy', 'sell'].includes(value.action) && !researchInputSnapshot?.timing?.replayable)
         reject('An actionable recommendation requires causal underlying forecast inputs.');
@@ -400,7 +427,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         contract: value.contract,
         forecast: value.forecast,
         book: value.book,
-        portfolio: getAdvisorPortfolio(account, value.evaluatedAt),
+        portfolio,
         now: value.evaluatedAt,
         policy,
       });
@@ -534,11 +561,21 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
       )
         reject('Another execution observation may still be in progress.');
       const account = await accountFrom(transaction, advice.policyId);
+      const risk = decode(
+        await one(transaction, 'advisor_risk_state', 'policy_id', advice.policyId),
+      );
       const execution = simulateTradingExecution({
         advice,
         book,
         now: recordedAt,
-        portfolio: getAdvisorPortfolio(account, recordedAt, adviceId),
+        portfolio: getAdvisorDecisionPortfolio({
+          account,
+          book,
+          now: recordedAt,
+          policy: advice.policy,
+          riskHistory: risk?.history ?? null,
+          releasedIntentId: adviceId,
+        }),
         policy: advice.policy,
       });
       if (!execution) return null;
@@ -696,6 +733,207 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     );
     return row ? JSON.parse(row.payload) : null;
   }
+  async function readConfiguration() {
+    await initialize();
+    return (
+      decode(await retryLocalBusy(() => one(client, 'advisor_configuration', 'id', 1))) ?? {
+        revision: 0,
+        configuredAt: null,
+        policy: TRADING_ADVISOR_POLICY,
+      }
+    );
+  }
+
+  /** Retire the daily-loss rule prospectively without rewriting evidence or resetting money. */
+  async function ensureDailyLossLimitRemoved() {
+    const configuration = await readConfiguration();
+    if (configuration.policy.dailyLossLimitEnabled === false) return configuration;
+    return write(async (transaction) => {
+      const previous = decode(await one(transaction, 'advisor_configuration', 'id', 1)) ?? {
+        revision: 0,
+        configuredAt: null,
+        policy: TRADING_ADVISOR_POLICY,
+      };
+      const previousPolicy = previous.policy;
+      if (previousPolicy.dailyLossLimitEnabled === false) return previous;
+      const lease = await one(transaction, 'advisor_leases', 'policy_id', previousPolicy.id);
+      const previousAccount = await accountFrom(transaction, previousPolicy.id);
+      if (!previousAccount && (await one(transaction, 'advisor_policies', 'id', previousPolicy.id)))
+        reject('The enrolled advisor account is missing.', 'ADVISOR_STORAGE_CORRUPT');
+      // Finish already recorded orders under their original rules. An active writer must
+      // release its lease before we snapshot the account and fence the previous policy.
+      if (Number(lease?.expires_at ?? 0) > now() || previousAccount?.pendingIntents.length)
+        return previous;
+      const policy = {
+        ...previousPolicy,
+        id: `kalshi-advisor-v${previousPolicy.version === 2 ? 2 : 3}-${randomUUID()}`,
+        dailyLossLimitEnabled: false,
+      };
+      if (!isTradingAdvisorPolicy(policy)) reject('The revised advisor policy is invalid.');
+      const account = previousAccount
+        ? { ...previousAccount, version: previousAccount.version + 1 }
+        : createAdvisorAccount(policy);
+      const configuredAt = now();
+      const next = {
+        revision: previous.revision + 1,
+        configuredAt,
+        policy,
+        previousPolicyId: previousPolicy.id,
+        carriedRealizedPnl: account.realizedPnl,
+        reason: 'daily_loss_limit_removed',
+      };
+      const policyEntry = encode(policy);
+      const accountEntry = encode(account);
+      const entry = encode(next);
+      await transaction.execute({
+        sql: 'INSERT INTO advisor_policies(id, started_at, payload, content_hash) VALUES (?, ?, ?, ?)',
+        args: [policy.id, configuredAt, policyEntry.payload, policyEntry.contentHash],
+      });
+      await transaction.execute({
+        sql: 'INSERT INTO advisor_accounts(policy_id, payload, content_hash) VALUES (?, ?, ?)',
+        args: [policy.id, accountEntry.payload, accountEntry.contentHash],
+      });
+      const previousRisk = decode(
+        await one(transaction, 'advisor_risk_state', 'policy_id', previousPolicy.id),
+      );
+      if (previousRisk) {
+        // A valuation belongs to its original policy and account version; history carries
+        // forward, while the next captured book supplies the new account's valuation.
+        const riskEntry = encode({ ...previousRisk, valuation: null });
+        await transaction.execute({
+          sql: 'INSERT INTO advisor_risk_state(policy_id, payload, content_hash) VALUES (?, ?, ?)',
+          args: [policy.id, riskEntry.payload, riskEntry.contentHash],
+        });
+      }
+      await transaction.execute({
+        sql: 'INSERT INTO advisor_configuration_history(revision, previous_policy_id, payload, content_hash) VALUES (?, ?, ?, ?)',
+        args: [next.revision, previousPolicy.id, entry.payload, entry.contentHash],
+      });
+      await transaction.execute({
+        sql: `INSERT INTO advisor_configuration(id, payload, content_hash) VALUES (1, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, content_hash = excluded.content_hash`,
+        args: [entry.payload, entry.contentHash],
+      });
+      return next;
+    });
+  }
+
+  /** Change a stopped, flat account's allocation without erasing losses or resetting its risk peak. */
+  async function configure({ allocation, riskLevel, expectedRevision }) {
+    if (
+      !Number.isFinite(allocation) ||
+      allocation < 1 ||
+      allocation > 100 ||
+      !['conservative', 'balanced'].includes(riskLevel)
+    )
+      reject('Choose an allocation of $1–$100 in whole cents and a supported risk level.');
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)
+      reject('Reload setup before saving its configuration.');
+    let policy;
+    try {
+      policy = createTradingAdvisorPolicy({ allocation, riskLevel, runId: randomUUID() });
+    } catch {
+      reject('Choose an allocation of $1–$100 in whole cents and a supported risk level.');
+    }
+    return write(async (transaction) => {
+      const previous = decode(await one(transaction, 'advisor_configuration', 'id', 1));
+      if ((previous?.revision ?? 0) !== expectedRevision)
+        reject('Setup changed in another window. Reload it before saving.');
+      const previousPolicy = previous?.policy ?? TRADING_ADVISOR_POLICY;
+      const lease = await one(transaction, 'advisor_leases', 'policy_id', previousPolicy.id);
+      const heartbeatRow = await one(
+        transaction,
+        'advisor_heartbeats',
+        'policy_id',
+        previousPolicy.id,
+      );
+      const heartbeat = heartbeatRow ? JSON.parse(heartbeatRow.payload) : null;
+      if (
+        Number(lease?.expires_at ?? 0) > now() ||
+        (heartbeat?.status === 'running' && now() - heartbeat.heartbeatAt < 30000)
+      )
+        reject('Stop the collector before changing account setup.');
+      const previousAccount = await accountFrom(transaction, previousPolicy.id);
+      if (!previousAccount && (await one(transaction, 'advisor_policies', 'id', previousPolicy.id)))
+        reject('The enrolled advisor account is missing.', 'ADVISOR_STORAGE_CORRUPT');
+      if (
+        previousAccount &&
+        (previousAccount.positions.length ||
+          previousAccount.pendingIntents.length ||
+          previousAccount.pendingComparisons.length)
+      )
+        reject(
+          'Wait for open positions, pending orders and official settlement comparisons to finish.',
+        );
+      const account = createAdvisorAccount(policy);
+      const difference = policy.initialBankroll - previousPolicy.initialBankroll;
+      if (previousAccount) {
+        Object.assign(account, previousAccount, {
+          policyVersion: 2,
+          version: previousAccount.version + 1,
+        });
+        account.cash = Math.round((previousAccount.cash + difference) * 1e8) / 1e8;
+        if (account.cash < 0)
+          reject('The selected allocation cannot cover the account’s recorded losses.');
+        account.dailyStartEquity = Math.max(
+          0,
+          (previousAccount.dailyStartEquity ?? previousPolicy.initialBankroll) + difference,
+        );
+      }
+      const configuredAt = now();
+      const configuration = {
+        revision: expectedRevision + 1,
+        configuredAt,
+        policy,
+        previousPolicyId: previousPolicy.id,
+        carriedRealizedPnl: account.realizedPnl,
+      };
+      const policyEntry = encode(policy);
+      const accountEntry = encode(account);
+      const entry = encode(configuration);
+      await transaction.execute({
+        sql: 'INSERT INTO advisor_policies(id, started_at, payload, content_hash) VALUES (?, ?, ?, ?)',
+        args: [policy.id, configuredAt, policyEntry.payload, policyEntry.contentHash],
+      });
+      await transaction.execute({
+        sql: 'INSERT INTO advisor_accounts(policy_id, payload, content_hash) VALUES (?, ?, ?)',
+        args: [policy.id, accountEntry.payload, accountEntry.contentHash],
+      });
+      const previousRisk = decode(
+        await one(transaction, 'advisor_risk_state', 'policy_id', previousPolicy.id),
+      );
+      if (previousRisk?.history) {
+        const riskEntry = encode({
+          valuation: null,
+          history: {
+            ...previousRisk.history,
+            peakEquity: Math.max(
+              policy.initialBankroll,
+              previousRisk.history.peakEquity + difference,
+            ),
+            historicalPeakEquity: Math.max(
+              previousRisk.history.peakEquity,
+              previousRisk.history.historicalPeakEquity ?? previousRisk.history.peakEquity,
+            ),
+          },
+        });
+        await transaction.execute({
+          sql: 'INSERT INTO advisor_risk_state(policy_id, payload, content_hash) VALUES (?, ?, ?)',
+          args: [policy.id, riskEntry.payload, riskEntry.contentHash],
+        });
+      }
+      await transaction.execute({
+        sql: 'INSERT INTO advisor_configuration_history(revision, previous_policy_id, payload, content_hash) VALUES (?, ?, ?, ?)',
+        args: [configuration.revision, previousPolicy.id, entry.payload, entry.contentHash],
+      });
+      await transaction.execute({
+        sql: `INSERT INTO advisor_configuration(id, payload, content_hash) VALUES (1, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, content_hash = excluded.content_hash`,
+        args: [entry.payload, entry.contentHash],
+      });
+      return configuration;
+    });
+  }
   /** Bounded audit pages preserve access to old evidence without replaying it on every tick. */
   async function readEvidencePage(
     policyId,
@@ -734,6 +972,9 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     saveComparison,
     writeHeartbeat,
     readHeartbeat,
+    readConfiguration,
+    ensureDailyLossLimitRemoved,
+    configure,
     readEvidencePage,
   };
 }

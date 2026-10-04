@@ -104,11 +104,6 @@ export default function AdvisorRisk({ report, now, isStale = false }) {
             quantities are counted once. All open BTC positions and pending buys count toward
             potential loss; they are not assumed to protect one another.
           </p>
-          <p className="small">
-            The {formatAdvisorMoney(report?.policy?.maxDailyLoss)} daily realized-loss trigger stops
-            new entries. It does not cap losses on positions already open or automatically sell
-            them. These new measurements do not change the saved trading policy.
-          </p>
           {valuation?.positions?.length > 0 && (
             <Table responsive size="sm" className="small">
               <caption>Holdings at the last valuation</caption>

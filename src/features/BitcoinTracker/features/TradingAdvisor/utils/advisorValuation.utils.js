@@ -192,7 +192,9 @@ export function getAdvisorRiskHistory(previous, valuation, initialBankroll = 100
       previous.peakEquity < initialBankroll ||
       !finite(previous.maxDrawdown) ||
       previous.maxDrawdown < 0 ||
-      previous.maxDrawdown > previous.peakEquity ||
+      (previous.historicalPeakEquity !== undefined &&
+        (!finite(previous.historicalPeakEquity) || previous.historicalPeakEquity < 0)) ||
+      previous.maxDrawdown > Math.max(previous.peakEquity, previous.historicalPeakEquity ?? 0) ||
       (previous.completeCount > 0
         ? !timestamp(previous.lastCompleteAt) ||
           previous.lastCompleteAt < previous.startedAt ||
@@ -206,6 +208,10 @@ export function getAdvisorRiskHistory(previous, valuation, initialBankroll = 100
   const drawdown = valuation.complete ? money(peakEquity - valuation.executableEquity) : null;
   return freeze({
     startedAt: previous?.startedAt ?? valuation.observedAt,
+    // Allocation withdrawals rebase today's peak without shrinking older dollar declines.
+    ...(previous?.historicalPeakEquity !== undefined
+      ? { historicalPeakEquity: previous.historicalPeakEquity }
+      : {}),
     lastObservedAt: valuation.observedAt,
     lastCompleteAt: valuation.complete ? valuation.observedAt : (previous?.lastCompleteAt ?? null),
     observationCount: (previous?.observationCount ?? 0) + 1,

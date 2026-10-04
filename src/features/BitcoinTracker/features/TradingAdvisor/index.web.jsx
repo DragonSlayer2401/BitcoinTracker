@@ -8,6 +8,7 @@ import AdvisorAction from './components/AdvisorAction';
 import AdvisorPositions from './components/AdvisorPositions';
 import AdvisorPerformance from './components/AdvisorPerformance';
 import AdvisorRisk from './components/AdvisorRisk';
+import AdvisorSetup from './components/AdvisorSetup';
 import { formatAdvisorMoney, hasFreshAdvisorReport } from './utils/advisorDisplay.utils';
 import './TradingAdvisor.scss';
 
@@ -48,6 +49,7 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
             <div className="d-flex align-items-center flex-wrap gap-2">
               <AdvisorPerformance report={report} isStale={isAccountStale} />
               <AdvisorRisk report={report} now={reportTime} isStale={isAccountStale} />
+              <AdvisorSetup onSaved={query.refetch} />
               <Button
                 size="sm"
                 variant="outline-secondary"

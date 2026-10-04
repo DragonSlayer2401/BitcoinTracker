@@ -1,4 +1,5 @@
 import { Alert, Button } from 'react-bootstrap';
+import AdvisorSellLimit from './AdvisorSellLimit';
 import { formatPercent, formatTime } from '../../../utils/format.utils';
 import {
   formatAdvisorMoney,
@@ -29,6 +30,10 @@ export default function AdvisorAction({
   const advice = report?.latestAdvice;
   const isFresh =
     !isError && hasFreshAdvisorAdvice({ advice, collector: report?.collector, market, now });
+  const usesRetiredDailyLossRule =
+    isFresh &&
+    report?.policy?.dailyLossLimitEnabled !== false &&
+    ['daily_loss_limit', 'daily_equity_loss_limit'].includes(advice.reason);
   const action = isFresh ? advice.action : 'wait';
   const side = isFresh ? getAdvisorSideLabel(advice.side) : '';
   const heading = action === 'wait' ? 'WAIT' : `${action.toUpperCase()} ${side}`;
@@ -57,7 +62,9 @@ export default function AdvisorAction({
               ? 'The last suggestion did not fill. Waiting for a new evaluation.'
               : !isFresh
                 ? 'No fresh advice for this event. Waiting for a new collector evaluation.'
-                : getAdvisorReason(advice.reason);
+                : usesRetiredDailyLossRule
+                  ? 'This collector is still using the removed daily-loss rule. Restart it to apply the update.'
+                  : getAdvisorReason(advice.reason);
 
   return (
     <section
@@ -69,7 +76,11 @@ export default function AdvisorAction({
           Current paper guidance
         </h2>
         <span className="small text-secondary">
-          {isFresh ? 'Fresh evaluation' : 'Awaiting data'}
+          {usesRetiredDailyLossRule
+            ? 'Collector update needed'
+            : isFresh
+              ? 'Fresh evaluation'
+              : 'Awaiting data'}
         </span>
       </div>
       <div className="advisor-action-call" role="status">
@@ -171,33 +182,18 @@ export default function AdvisorAction({
               position.
             </p>
           )}
-          {['buy', 'hold'].includes(action) &&
-            advice.exitPlan &&
-            Number.isFinite(advice.exitPlan.expiresAt) &&
-            advice.exitPlan.expiresAt > now && (
-              <div className="advisor-exit-plan small">
-                <strong className="d-block">Conditional exit plan</strong>
-                {action === 'buy' && <span className="d-block">After the entry fills:</span>}
-                {Number.isFinite(advice.exitPlan.limitPrice) && (
-                  <strong className="d-block">
-                    Suggested sell limit:{' '}
-                    {formatAdvisorQuantity(advice.exitPlan.quantity ?? advice.quantity)}{' '}
-                    {getAdvisorSideLabel(advice.exitPlan.side ?? advice.side)} at{' '}
-                    {formatAdvisorMoney(advice.exitPlan.limitPrice)} or better.
-                  </strong>
-                )}
-                <span className="text-secondary d-block">
-                  This limit is not placed. Reassess with fresh prices and available buyers; a fill
-                  or profit is not guaranteed.
-                </span>
-              </div>
-            )}
+          <AdvisorSellLimit advice={advice} now={now} />
+          {advice.sizing && (
+            <p className="small text-secondary mt-2 mb-0">
+              Position size uses a cautious estimate of the opportunity and your remaining account
+              risk budget.
+            </p>
+          )}
         </>
       )}
       {needsStartup && !isLoading && (
         <Alert variant="secondary" className="small mt-3 mb-2">
-          Run <code>pnpm research:collect --trading-advisor</code>. Stop an existing collector
-          first, then restart with this flag. This page reads its saved results.
+          Open <strong>Setup</strong> to choose your paper allocation and start collection.
         </Alert>
       )}
       <details className="small advisor-assumptions mt-2">
@@ -207,10 +203,13 @@ export default function AdvisorAction({
           {formatAdvisorMoney(report?.policy?.maxPositionCost)} and combined open risk at{' '}
           {formatAdvisorMoney(report?.policy?.maxOpenRisk)}.
         </p>
-        <p className="mb-1">
-          Stop new entries after {formatAdvisorMoney(report?.policy?.maxDailyLoss)} of realized
-          losses in a UTC day. Existing positions may add losses.
-        </p>
+        {report?.policy?.version === 2 && (
+          <p className="mb-1">
+            New entries stop at {formatAdvisorMoney(report.policy.maxDrawdown)} of equity drawdown.
+            Open and pending BTC exposure uses the same risk budget. Sales and losing trades trigger
+            a reentry cooldown.
+          </p>
+        )}
         <p className="text-secondary mb-0">
           Probabilities and expected profit are estimates. Simulated liquidity, fees and slippage
           can differ from real fills. Realized P&amp;L excludes changes in open positions. No

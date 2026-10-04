@@ -21,6 +21,15 @@ export function createAdvisorAccount(policy) {
     lastAdviceAt: null,
     lastRecordedAt: null,
     version: 0,
+    ...(policy.version === 2
+      ? {
+          policyVersion: 2,
+          lastExitAt: null,
+          lastLossAt: null,
+          equityDay: null,
+          dailyStartEquity: null,
+        }
+      : {}),
     performance: {
       adviceCount: 0,
       buyCount: 0,
@@ -48,6 +57,27 @@ export function createAdvisorAccount(policy) {
   };
 }
 
+/** Capture the first executable equity observation of a UTC day, without moving account money. */
+export function withAdvisorDailyEquity(account, valuation, now) {
+  const next = copy(account);
+  if (
+    next.policyVersion === 2 &&
+    next.equityDay !== day(now) &&
+    valuation?.complete &&
+    Number.isFinite(valuation.executableEquity) &&
+    valuation.executableEquity >= 0 &&
+    Number.isSafeInteger(valuation.observedAt) &&
+    valuation.observedAt <= now &&
+    now - valuation.observedAt <= 30000 &&
+    Number.isSafeInteger(valuation.validUntil) &&
+    valuation.validUntil > now
+  ) {
+    next.equityDay = day(now);
+    next.dailyStartEquity = valuation.executableEquity;
+  }
+  return next;
+}
+
 export function getAdvisorPortfolio(account, now, releasedIntentId = null) {
   const pending = account.pendingIntents.filter((intent) => intent.id !== releasedIntentId);
   const released = account.pendingIntents.find((intent) => intent.id === releasedIntentId);
@@ -63,6 +93,15 @@ export function getAdvisorPortfolio(account, now, releasedIntentId = null) {
     realizedPnl: account.realizedPnl,
     dailyRealizedPnl: account.realizedDay === day(now) ? account.dailyRealizedPnl : 0,
     feesPaid: account.feesPaid,
+    ...(account.policyVersion === 2
+      ? {
+          accountVersion: account.version,
+          lastExitAt: account.lastExitAt ?? null,
+          lastLossAt: account.lastLossAt ?? null,
+          equityDay: account.equityDay ?? null,
+          dailyStartEquity: account.dailyStartEquity ?? null,
+        }
+      : {}),
     pendingIntents: copy(pending),
     positions: account.positions.map((position) => ({
       ...copy(position),
@@ -79,6 +118,16 @@ export function applyAdvisorAdvice(account, advice) {
   const next = copy(account);
   if (next.lastRecordedAt !== null && advice.evaluatedAt < next.lastRecordedAt)
     fail('Advice cannot precede the last account mutation.');
+  if (
+    next.policyVersion === 2 &&
+    next.equityDay !== day(advice.evaluatedAt) &&
+    advice.portfolio?.equityDay === day(advice.evaluatedAt) &&
+    Number.isFinite(advice.portfolio.dailyStartEquity) &&
+    advice.portfolio.dailyStartEquity >= 0
+  ) {
+    next.equityDay = advice.portfolio.equityDay;
+    next.dailyStartEquity = advice.portfolio.dailyStartEquity;
+  }
   if (advice.action === 'buy') {
     if (
       !Number.isFinite(advice.maxCost) ||
@@ -131,6 +180,7 @@ function recognizeProfit(account, amount, time) {
   } else if (value < 0) {
     performance.lossCount += 1;
     performance.grossLosses = money(performance.grossLosses - value);
+    if (account.policyVersion === 2) account.lastLossAt = time;
   }
   performance.realizedPeak = Math.max(performance.realizedPeak, account.realizedPnl);
   performance.maxRealizedDrawdown = money(
@@ -144,6 +194,16 @@ export function applyAdvisorEvent(account, event) {
   const next = copy(account);
   if (next.lastRecordedAt !== null && event.recordedAt < next.lastRecordedAt)
     fail('Account results must be recorded in chronological order.');
+  if (
+    next.policyVersion === 2 &&
+    next.equityDay !== day(event.recordedAt) &&
+    event.dailyEquity?.day === day(event.recordedAt) &&
+    Number.isFinite(event.dailyEquity.startEquity) &&
+    event.dailyEquity.startEquity >= 0
+  ) {
+    next.equityDay = event.dailyEquity.day;
+    next.dailyStartEquity = event.dailyEquity.startEquity;
+  }
   let realizedPnl = null;
   if (event.kind === 'comparison') {
     const comparison = next.pendingComparisons.find((row) => row.positionId === event.positionId);
@@ -179,6 +239,7 @@ export function applyAdvisorEvent(account, event) {
     comparison.actualProceeds = money(comparison.actualProceeds + event.payout);
     realizedPnl = recognizeProfit(next, event.payout - position.costBasis, event.recordedAt);
     next.positions = next.positions.filter((row) => row.id !== position.id);
+    if (next.policyVersion === 2) next.lastExitAt = event.recordedAt;
     next.performance.settledCount += 1;
   } else {
     const intent = next.pendingIntents.find((row) => row.id === event.adviceId);
@@ -191,7 +252,15 @@ export function applyAdvisorEvent(account, event) {
       if (
         event.action !== intent.action ||
         event.side !== intent.side ||
-        event.quantity !== intent.quantity ||
+        (intent.policy?.version === 2
+          ? !Number.isSafeInteger(event.quantity) ||
+            event.quantity < 1 ||
+            event.quantity > intent.quantity ||
+            event.requestedQuantity !== intent.quantity ||
+            event.canceledQuantity !== intent.quantity - event.quantity ||
+            event.timeInForce !== 'IOC' ||
+            event.fullyCovered !== (event.quantity === intent.quantity)
+          : event.quantity !== intent.quantity) ||
         !Number.isFinite(event.fee) ||
         event.fee < 0
       )
@@ -250,6 +319,7 @@ export function applyAdvisorEvent(account, event) {
         position.entryFees = money(position.entryFees * (1 - fraction));
         next.positions = next.positions.filter((row) => row.quantity > 0);
         next.performance.exitCount += 1;
+        if (next.policyVersion === 2) next.lastExitAt = event.recordedAt;
       }
     }
   }
