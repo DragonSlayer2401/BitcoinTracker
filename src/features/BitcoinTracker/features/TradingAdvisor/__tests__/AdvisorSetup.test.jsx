@@ -95,10 +95,10 @@ test('starts collection only on explicit click and surfaces command failure', as
   expect(changeCollectorControl).toHaveBeenCalledWith('start', expect.any(AbortSignal));
 });
 
-test('sell limit clearly distinguishes net proceeds from profit and respects plan expiry', () => {
+test('sell limit distinguishes proceeds from profit and persists only for an active standing plan', () => {
   const advice = {
     action: 'hold',
-    side: 'yes',
+    side: 'no',
     quantity: 10,
     exitPlan: {
       side: 'no',
@@ -117,6 +117,10 @@ test('sell limit clearly distinguishes net proceeds from profit and respects pla
   );
   rerender(<AdvisorSellLimit advice={advice} now={20000} />);
   expect(screen.queryByRole('region', { name: 'Sell limit order' })).not.toBeInTheDocument();
+  rerender(<AdvisorSellLimit advice={advice} now={20000} isStandingPlan />);
+  expect(screen.getByRole('heading', { name: 'Set a sell limit at 72¢' })).toBeVisible();
+  expect(screen.queryByText(/Recheck by/)).not.toBeInTheDocument();
+  expect(screen.getByText(/No order has been placed/)).toBeVisible();
 });
 
 test('an unavailable price explains holding without inventing a sale price', () => {
@@ -124,6 +128,8 @@ test('an unavailable price explains holding without inventing a sale price', () 
     <AdvisorSellLimit
       advice={{
         action: 'hold',
+        side: 'yes',
+        quantity: 5,
         exitPlan: {
           available: false,
           expiresAt: 20000,
@@ -133,6 +139,59 @@ test('an unavailable price explains holding without inventing a sale price', () 
       now={10000}
     />,
   );
-  expect(screen.getByRole('heading', { name: 'No suitable sell limit' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Hold; no suitable sell limit' })).toBeInTheDocument();
   expect(screen.getByText('No price below $1 beats holding.')).toBeInTheDocument();
+});
+
+test.each([
+  { side: 'no' },
+  { quantity: 11 },
+  { quantity: 0 },
+  { quantity: 1.5 },
+  { limitPrice: 1 },
+  { limitPrice: null },
+])('rejects a malformed or mismatched standing sell target: %j', (changes) => {
+  render(
+    <AdvisorSellLimit
+      advice={{
+        action: 'hold',
+        side: 'yes',
+        quantity: 10,
+        exitPlan: { side: 'yes', quantity: 10, limitPrice: 0.7, expiresAt: 20000, ...changes },
+      }}
+      now={21000}
+      isStandingPlan
+    />,
+  );
+  expect(screen.queryByRole('region', { name: 'Sell limit order' })).not.toBeInTheDocument();
+});
+
+test('an immediate sale cannot bypass its quote expiry with the standing flag', () => {
+  render(
+    <AdvisorSellLimit
+      advice={{ action: 'sell', side: 'yes', quantity: 2, limitPrice: 0.7, validUntil: 20000 }}
+      now={20000}
+      isStandingPlan
+    />,
+  );
+  expect(screen.queryByRole('region', { name: 'Sell limit order' })).not.toBeInTheDocument();
+});
+
+test('a standing target explains order types without inventing a stop price', async () => {
+  const user = userEvent.setup();
+  render(
+    <AdvisorSellLimit
+      advice={{
+        action: 'hold',
+        side: 'yes',
+        quantity: 10,
+        exitPlan: { side: 'yes', quantity: 10, limitPrice: 0.7, expiresAt: 20000 },
+      }}
+      now={21000}
+      isStandingPlan
+    />,
+  );
+  await user.click(screen.getByText('Limit orders and stops'));
+  expect(screen.getByText(/A sell limit below the current bid can fill immediately/)).toBeVisible();
+  expect(screen.queryByText(/Stop.*\d+¢/)).not.toBeInTheDocument();
 });

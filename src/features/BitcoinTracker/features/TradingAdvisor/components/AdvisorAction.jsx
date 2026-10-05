@@ -4,9 +4,10 @@ import { formatPercent, formatTime } from '../../../utils/format.utils';
 import {
   formatAdvisorMoney,
   formatAdvisorQuantity,
+  getAdvisorReason,
   getAdvisorSideLabel,
 } from '../utils/advisorDisplay.utils';
-import { getAdvisorPlanHeading, getAdvisorPlanState } from '../utils/advisorPlan.utils';
+import { createAdvisorPlan, getAdvisorPlanState } from '../utils/advisorPlan.utils';
 
 function ActionMetric({ label, value }) {
   return (
@@ -28,15 +29,30 @@ export default function AdvisorAction({
 }) {
   const planState = getAdvisorPlanState({ report, market, now, isError, isLoading });
   const advice = planState.advice;
-  const isFresh = Boolean(planState.current);
+  const activePlan = planState.active;
+  const applicationConditions = activePlan ? createAdvisorPlan(activePlan.advice) : null;
+  const hasStandingExit = ['buy', 'hold'].includes(activePlan?.advice?.action);
+  const sellLimitAdvice = hasStandingExit
+    ? activePlan.advice
+    : advice?.action === 'sell'
+      ? advice
+      : null;
+  const heldPosition = report?.portfolio?.positions?.find(
+    (position) => position.id === activePlan?.advice?.positionId,
+  );
+  const priceCondition = ['buy', 'reduce', 'exit'].includes(activePlan?.action)
+    ? applicationConditions?.conditions?.[0]
+    : null;
+  const isFresh = planState.executionReady;
   const usesRetiredDailyLossRule =
     isFresh &&
     report?.policy?.dailyLossLimitEnabled !== false &&
     ['daily_loss_limit', 'daily_equity_loss_limit'].includes(advice?.reason);
-  const action = isFresh ? advice.action : 'wait';
+  const action = activePlan?.advice?.action ?? 'wait';
   const side = isFresh ? getAdvisorSideLabel(advice.side) : '';
   const heading = planState.heading;
   const completedFill = planState.completedFill;
+  const source = report?.source;
   const needsStartup = !report?.startedAt || report?.collector?.status === 'not-started';
   const reason = usesRetiredDailyLossRule
     ? 'This collector is still using the removed daily-loss rule. Restart it to apply the update.'
@@ -56,52 +72,106 @@ export default function AdvisorAction({
             ? 'Collector update needed'
             : isFresh
               ? 'Fresh evaluation'
-              : 'Awaiting data'}
+              : activePlan
+                ? 'Plan maintained'
+                : 'Awaiting data'}
         </span>
       </div>
+      {source && (
+        <div className="small mb-2" aria-label="Assessment source">
+          <strong>
+            {source.kind === 'ai'
+              ? activePlan
+                ? 'AI plan'
+                : 'Last AI assessment'
+              : source.kind === 'numerical-fallback'
+                ? 'Numerical fallback'
+                : source.kind === 'numerical'
+                  ? 'Numerical plan'
+                  : 'Awaiting AI assessment'}
+          </strong>
+          {source.model && source.kind !== 'numerical' && (
+            <span className="text-secondary"> · {source.model}</span>
+          )}
+          {(source.pending || source.latestDecision?.status === 'proposed') && (
+            <span className="text-secondary"> · Updating</span>
+          )}
+          {source.kind === 'numerical-fallback' && (
+            <p className="mb-1">
+              {getAdvisorReason(source.providerReason ?? source.decision?.fallbackReason)}
+            </p>
+          )}
+          {source.kind === 'ai' && !source.pending && source.providerReason && (
+            <p className="mb-1" role="status">
+              AI update status: {getAdvisorReason(source.providerReason)}.
+            </p>
+          )}
+          {!source.kind && !source.pending && source.providerReason && (
+            <p className="mb-1">{getAdvisorReason(source.providerReason)}</p>
+          )}
+        </div>
+      )}
       <div className="advisor-action-call" role="status">
-        <span className="small text-secondary d-block mb-1">Current plan</span>
+        <span className="small text-secondary d-block mb-1">
+          {activePlan ? 'Current plan' : planState.historical ? 'Recorded plan' : 'Plan status'}
+        </span>
         <h3 className="mb-1">{heading}</h3>
+        {planState.historical && (
+          <p className="small text-secondary mb-1">
+            Recorded for {planState.historical.contract.ticker} ·{' '}
+            {formatTime(planState.historical.assessedAt)}
+          </p>
+        )}
         <p className="small mb-0">{reason}</p>
+        {priceCondition && <p className="small fw-semibold mt-2 mb-0">{priceCondition}</p>}
       </div>
-      <div className="advisor-readiness d-flex align-items-baseline flex-wrap gap-2 small mt-2">
-        <span className="text-secondary">Execution status</span>
-        <strong>{planState.readinessLabel}</strong>
-      </div>
-      {planState.blocker && planState.blocker !== reason && (
-        <p className="small mt-1 mb-1">
-          <strong>Waiting on: </strong>
-          {planState.blocker}
+      {sellLimitAdvice && (
+        <AdvisorSellLimit
+          advice={sellLimitAdvice}
+          now={now}
+          isStandingPlan={hasStandingExit}
+          availableQuantity={heldPosition?.availableQuantity}
+        />
+      )}
+      {activePlan?.action === 'hold' && (
+        <p className="small mt-2 mb-0">
+          <strong>Loss exit: model-managed.</strong> The next assessment may say REDUCE or EXIT if
+          the outlook weakens. No fixed stop order has been placed.
         </p>
       )}
-      {planState.historical && (
-        <p className="small text-secondary mt-2 mb-1">
-          Previous plan (historical): <strong>{getAdvisorPlanHeading(planState.historical)}</strong>
-          {' · '}
-          {formatTime(planState.historical.assessedAt)}. This is not a current instruction.
+      {planState.updateMessage && (
+        <p className="small text-secondary mt-2 mb-1" role="status">
+          {planState.updateMessage}
         </p>
       )}
-      {planState.current?.action === 'conditional-buy' && (
-        <p className="small mt-2 mb-1">{planState.current.conditions[0]}</p>
-      )}
-      {planState.current && (
+      {activePlan && (
         <details className="small advisor-assumptions mt-2">
-          <summary>Plan conditions and invalidation</summary>
-          {planState.current.conditions
-            .slice(planState.current.action === 'conditional-buy' ? 1 : 0)
+          <summary>Plan conditions</summary>
+          {(applicationConditions?.conditions ?? [])
+            .slice(priceCondition ? 1 : 0)
             .map((condition, index) => (
               <p key={`condition-${index}`} className="mt-2 mb-1">
                 {condition}
               </p>
             ))}
-          <p className="fw-semibold mt-2 mb-1">Reassess this plan when:</p>
+          <p className="fw-semibold mt-2 mb-1">What can change the plan:</p>
           <ul className="ps-3 mb-1">
-            {planState.current.invalidationConditions.map((condition, index) => (
+            {(applicationConditions?.invalidationConditions ?? []).map((condition, index) => (
               <li key={index}>{condition}</li>
             ))}
           </ul>
         </details>
       )}
+      {activePlan &&
+        ['cooldown', 'pending', 'fresh-quote', 'confirmation'].includes(planState.readiness) && (
+          <details className="small advisor-assumptions mt-2">
+            <summary>Order details</summary>
+            <p className="mt-2 mb-1">{planState.readinessLabel}</p>
+            {planState.blocker && planState.blocker !== reason && (
+              <p className="mb-1">{planState.blocker}</p>
+            )}
+          </details>
+        )}
       {completedFill && (
         <section className="small border rounded p-2 mt-2" aria-label="Last simulated fill">
           <h4 className="h6 mb-1">Last simulated fill</h4>
@@ -198,7 +268,6 @@ export default function AdvisorAction({
               position.
             </p>
           )}
-          <AdvisorSellLimit advice={advice} now={now} />
           {advice.sizing && (
             <p className="small text-secondary mt-2 mb-0">
               Position size uses a cautious estimate of the opportunity and your remaining account
@@ -233,13 +302,7 @@ export default function AdvisorAction({
         </p>
       </details>
       <div className="d-flex align-items-center justify-content-between flex-wrap gap-2 small text-secondary mt-auto pt-3">
-        <span>
-          Last assessment {formatTime(planState.assessedAt)}
-          <span className="d-block">
-            Next review{' '}
-            {planState.reviewAt ? formatTime(planState.reviewAt) : 'awaiting fresh assessment'}
-          </span>
-        </span>
+        <span>Last reviewed {formatTime(planState.assessedAt)}</span>
         <Button size="sm" variant="outline-secondary" onClick={onRefresh} disabled={isRefreshing}>
           {isRefreshing ? 'Refreshing…' : 'Refresh adviser'}
         </Button>

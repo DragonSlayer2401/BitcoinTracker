@@ -19,7 +19,12 @@ import {
   simulateTradingExecution,
 } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
 import { createTradingAdvisorPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPolicy.utils';
-import { createAdvisorPlan } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPlan.utils';
+import { getAdvisorForecastReconciliation } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecast.utils';
+import {
+  ADVISOR_OPERATIONAL_REASONS,
+  createAdvisorPlan,
+  isMeaningfulAdvisorPlan,
+} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPlan.utils';
 import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
 import { getTradingPolicySelection } from './tradingPolicyTrials.repository';
 import {
@@ -94,6 +99,9 @@ const statements = [
     summary_payload TEXT NOT NULL, summary_hash TEXT NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS advisor_execution_once
     ON advisor_events(advice_id) WHERE kind IN ('fill', 'no-fill')`,
+  `CREATE TABLE IF NOT EXISTS advisor_execution_inputs (
+    event_id TEXT PRIMARY KEY REFERENCES advisor_events(id),
+    encoding TEXT NOT NULL, payload BLOB NOT NULL, content_hash TEXT NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS advisor_settlement_once
     ON advisor_events(position_id) WHERE kind = 'settlement'`,
   `CREATE UNIQUE INDEX IF NOT EXISTS advisor_comparison_once
@@ -115,6 +123,7 @@ const statements = [
     'advisor_policies',
     'advisor_advice',
     'advisor_inputs',
+    'advisor_execution_inputs',
     'advisor_attempts',
     'advisor_events',
     'advisor_valuations',
@@ -303,6 +312,39 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
       }),
     );
   }
+  /** Recover display history only; archived advice never regains executable validity. */
+  async function readLastPlan(transaction, policyId, visited = new Set()) {
+    if (visited.has(policyId)) return null;
+    visited.add(policyId);
+    const saved = decode(await one(transaction, 'advisor_current_plans', 'policy_id', policyId));
+    if (isMeaningfulAdvisorPlan(saved)) return { ...saved, policyId: saved.policyId ?? policyId };
+    const recorded = await transaction.execute({
+      sql: `SELECT summary_payload AS payload, summary_hash AS content_hash
+        FROM advisor_advice WHERE policy_id = ? AND evaluated_at <= ?
+        AND (action IN ('buy','sell','hold') OR (action = 'wait'
+          AND COALESCE(json_extract(summary_payload, '$.reason'), '') NOT IN (${ADVISOR_OPERATIONAL_REASONS.map(() => '?').join(',')})))
+        ORDER BY evaluated_at DESC, sequence DESC LIMIT 1`,
+      args: [policyId, now(), ...ADVISOR_OPERATIONAL_REASONS],
+    });
+    const advice = decode(recorded.rows[0]);
+    const recovered = createAdvisorPlan(advice);
+    if (isMeaningfulAdvisorPlan(recovered))
+      return {
+        ...recovered,
+        policyId,
+        accountVersion: advice.accountVersion,
+        historicalOnly: true,
+      };
+    const predecessor = await transaction.execute({
+      sql: `SELECT payload, content_hash FROM advisor_configuration_history
+        WHERE json_extract(payload, '$.policy.id') = ? ORDER BY revision DESC LIMIT 1`,
+      args: [policyId],
+    });
+    const previousPolicyId = decode(predecessor.rows[0])?.previousPolicyId;
+    return previousPolicyId
+      ? ((await readLastPlan(transaction, previousPolicyId, visited)) ?? saved)
+      : saved;
+  }
   async function readState(policyId) {
     await initialize();
     return retryLocalBusy(() => readStateOnce(policyId));
@@ -350,7 +392,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         events: eventRows.rows.map(decode),
         attempts,
         risk: decode(await one(transaction, 'advisor_risk_state', 'policy_id', policyId)),
-        currentPlan: decode(await one(transaction, 'advisor_current_plans', 'policy_id', policyId)),
+        currentPlan: await readLastPlan(transaction, policyId),
       };
       await transaction.commit();
       return state;
@@ -372,6 +414,25 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
       }
     }
     return advice;
+  }
+  /** Read the frozen fill-time calculation without fetching or substituting later inputs. */
+  async function readExecution(id, { includeInputs = false } = {}) {
+    await initialize();
+    const event = decode(await retryLocalBusy(() => one(client, 'advisor_events', 'id', id)));
+    if (event && includeInputs) {
+      const inputs = await retryLocalBusy(() =>
+        one(client, 'advisor_execution_inputs', 'event_id', id),
+      );
+      if (inputs) {
+        const payload = gunzipSync(Buffer.from(inputs.payload), {
+          maxOutputLength: MAXIMUM_RESEARCH_INPUT_BYTES,
+        }).toString('utf8');
+        if (hash(payload) !== inputs.content_hash)
+          reject('Advisor execution input archive is corrupt.');
+        event.researchInputSnapshot = JSON.parse(payload);
+      }
+    }
+    return event;
   }
   async function saveAdvice({ advice, researchInputSnapshot = null, lease }) {
     const value = clean(advice);
@@ -461,9 +522,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
         });
       await saveAccount(transaction, value.policyId, next);
       await saveValuation(transaction, value.policyId, next, value, 'advice');
-      const previousPlan = decode(
-        await one(transaction, 'advisor_current_plans', 'policy_id', value.policyId),
-      );
+      const previousPlan = await readLastPlan(transaction, value.policyId);
       const financialSignature = (account) =>
         hash(
           encode({
@@ -472,16 +531,17 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
             pendingIntents: account.pendingIntents,
           }).payload,
         );
-      const plan = createAdvisorPlan(
-        value,
-        previousPlan?.financialSignature === financialSignature(account) ? previousPlan : null,
-      );
+      const plan = createAdvisorPlan(value, previousPlan);
       if (plan) {
-        const savedPlan = encode({
-          ...plan,
-          accountVersion: next.version,
-          financialSignature: financialSignature(next),
-        });
+        const savedPlan = encode(
+          plan === previousPlan
+            ? plan
+            : {
+                ...plan,
+                accountVersion: next.version,
+                financialSignature: financialSignature(next),
+              },
+        );
         await transaction.execute({
           sql: `INSERT INTO advisor_current_plans(policy_id,payload,content_hash) VALUES (?,?,?)
             ON CONFLICT(policy_id) DO UPDATE SET payload = excluded.payload, content_hash = excluded.content_hash`,
@@ -551,9 +611,17 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     adviceId,
     book,
     recordedAt,
+    forecast = null,
+    researchInputSnapshot = null,
     observationAttemptToken = null,
     lease,
   }) {
+    // Freeze all evidence before waiting for the writer, including unavailable recalculations.
+    const savedForecast = clean(forecast);
+    const inputs = researchInputSnapshot
+      ? encode(researchInputSnapshot, MAXIMUM_RESEARCH_INPUT_BYTES)
+      : null;
+    const savedSnapshot = inputs ? JSON.parse(inputs.payload) : null;
     return write(async (transaction) => {
       const advice = decode(await one(transaction, 'advisor_advice', 'id', adviceId));
       if (!advice) reject('Execution requires saved advice.');
@@ -561,7 +629,13 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
       const id = `${adviceId}:execution`;
       const existing = decode(await one(transaction, 'advisor_events', 'id', id));
       if (existing) {
-        if (existing.recordedAt !== recordedAt || !same(existing.book, book))
+        const archived = await one(transaction, 'advisor_execution_inputs', 'event_id', id);
+        if (
+          existing.recordedAt !== recordedAt ||
+          !same(existing.book, book) ||
+          !same(existing.forecast ?? null, savedForecast) ||
+          (archived?.content_hash ?? null) !== (inputs?.contentHash ?? null)
+        )
           reject('A saved execution observation cannot be replaced.');
         return existing;
       }
@@ -632,7 +706,53 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
                 : execution.netProceeds -
                     (advice.probability + advice.policy.probabilityReserve) * execution.quantity,
             );
-      return appendEvent(
+      const forecastReconciliation = getAdvisorForecastReconciliation({
+        contract: advice.contract,
+        originalForecast: advice.forecast,
+        currentForecast: savedForecast
+          ? { ...savedForecast, researchInputSnapshot: savedSnapshot }
+          : null,
+        book,
+        now: recordedAt,
+      });
+      const blend = forecastReconciliation.marketBlend;
+      const activeBlend = forecastReconciliation.activeMarketBlend;
+      // Compare identical filled quantity, slippage and fees; these are forecast values,
+      // not simulated profits from alternative entry/exit strategies.
+      const forecastValuesAtFill = Object.fromEntries(
+        Object.entries({
+          refreshedProduction: forecastReconciliation.recomputed
+            ? savedForecast?.aboveProbability
+            : null,
+          executionMidpoint: forecastReconciliation.executionBookProbability,
+          rawMarketBlend: blend?.appliedMarket ? blend.rawAboveProbability : null,
+          calibratedMarketBlend:
+            blend?.appliedMarket && blend.modelId && blend.calibrationStatus === 'fitted'
+              ? blend.aboveProbability
+              : null,
+          activeMarketBlend:
+            activeBlend?.appliedMarket &&
+            activeBlend.modelId &&
+            activeBlend.calibrationStatus === 'fitted'
+              ? activeBlend.aboveProbability
+              : null,
+        }).map(([name, aboveProbability]) => {
+          if (execution.kind !== 'fill' || !Number.isFinite(aboveProbability)) return [name, null];
+          const probability = advice.side === 'yes' ? aboveProbability : 1 - aboveProbability;
+          return [
+            name,
+            {
+              probability,
+              expectedNetValue: round(
+                advice.action === 'buy'
+                  ? probability * execution.quantity - execution.totalCost
+                  : execution.netProceeds - probability * execution.quantity,
+              ),
+            },
+          ];
+        }),
+      );
+      const value = await appendEvent(
         transaction,
         {
           ...execution,
@@ -644,11 +764,20 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
           book: book ?? null,
           recordedAt,
           probability: advice.probability,
+          forecast: savedForecast,
+          forecastReconciliation,
+          forecastValuesAtFill,
           expectedNetValueAtFill,
           conservativeExpectedNetValueAtFill,
         },
         account,
       );
+      if (inputs)
+        await transaction.execute({
+          sql: 'INSERT INTO advisor_execution_inputs(event_id, encoding, payload, content_hash) VALUES (?, ?, ?, ?)',
+          args: [id, 'gzip-json', gzipSync(inputs.payload), inputs.contentHash],
+        });
+      return value;
     });
   }
   async function saveSettlement({ policyId, positionId, market, recordedAt, lease }) {
@@ -997,6 +1126,7 @@ export function createTradingAdvisorRepository({ client, now = Date.now }) {
     releaseLease,
     readState,
     readAdvice,
+    readExecution,
     saveAdvice,
     claimExecutionAttempt,
     saveExecution,

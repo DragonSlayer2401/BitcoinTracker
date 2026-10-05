@@ -8,6 +8,7 @@ import {
   LEARNING_FEATURE_VERSION,
   DERIVATIVES_LEARNING_FEATURE_VERSION,
 } from '../learning/features.utils';
+import { PATTERN_MODEL_VERSION } from '../learning/patternVersions.utils';
 import { isDerivativesForecastMetadata } from '../derivativesForecast.utils';
 import {
   EARLY_MODEL_VERSION,
@@ -56,6 +57,7 @@ const kalshiBaselineVersions = [
   KALSHI_DERIVATIVES_MODEL_VERSION,
 ];
 const learnedModelVersions = [
+  PATTERN_MODEL_VERSION,
   LEGACY_CHALLENGER_MODEL_VERSION,
   CHALLENGER_MODEL_VERSION,
   EARLY_MODEL_VERSION,
@@ -65,6 +67,7 @@ const learnedModelVersions = [
   KALSHI_OUTCOME_MODEL_VERSION,
 ];
 const kalshiModelVersions = [
+  PATTERN_MODEL_VERSION,
   LEGACY_CHALLENGER_MODEL_VERSION,
   CHALLENGER_MODEL_VERSION,
   EARLY_MODEL_VERSION,
@@ -79,6 +82,7 @@ export const isSnapshotModelVersion = (version) =>
   [PRESSURE_MODEL_VERSION, ...learnedModelVersions, ...kalshiBaselineVersions].includes(version);
 
 export function hasValidLearningMetadata(learning, forecast) {
+  const usesPatterns = forecast.modelVersion === PATTERN_MODEL_VERSION;
   const fields = [
     'applied',
     'modelId',
@@ -88,6 +92,7 @@ export function hasValidLearningMetadata(learning, forecast) {
     'aboveProbability',
     'featureVersion',
   ];
+  if (usesPatterns) fields.push('baselineFeatureVersion');
   const usesLegacyModel = ['outcome-logistic-v1', 'outcome-logistic-kalshi-v1'].includes(
     forecast.modelVersion,
   );
@@ -121,12 +126,19 @@ export function hasValidLearningMetadata(learning, forecast) {
         : forecast.modelVersion === EARLY_MODEL_VERSION
           ? EARLY_CALIBRATION_VERSION
           : CALIBRATION_VERSION) &&
-    (usesLegacyModel
-      ? learning.featureVersion === 'deadline-reversal-features-v1'
-      : [LEARNING_FEATURE_VERSION, DERIVATIVES_LEARNING_FEATURE_VERSION].includes(
-          learning.featureVersion,
-        )) &&
-    (learning.featureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION
+    (usesPatterns
+      ? learning.featureVersion === 'deadline-pattern-features-v5' &&
+        learning.modelId.startsWith(`${PATTERN_MODEL_VERSION}-combined-`) &&
+        [LEARNING_FEATURE_VERSION, DERIVATIVES_LEARNING_FEATURE_VERSION].includes(
+          learning.baselineFeatureVersion,
+        )
+      : usesLegacyModel
+        ? learning.featureVersion === 'deadline-reversal-features-v1'
+        : [LEARNING_FEATURE_VERSION, DERIVATIVES_LEARNING_FEATURE_VERSION].includes(
+            learning.featureVersion,
+          )) &&
+    ((usesPatterns ? learning.baselineFeatureVersion : learning.featureVersion) ===
+    DERIVATIVES_LEARNING_FEATURE_VERSION
       ? hasValidDerivativesMetadata(forecast.derivatives, forecast)
       : forecast.derivatives == null) &&
     isTimestamp(learning.trainingCutoffAt) &&

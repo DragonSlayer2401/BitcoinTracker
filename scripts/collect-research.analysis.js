@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { writeCollectorState } from './collect-research.storage';
 import { createChallengerService } from '../src/services/research/challenger.service';
 import { createCollectorHealthService } from '../src/services/research/collectorHealth.service';
+import { evaluatePatternChallengers } from '../src/features/BitcoinTracker/utils/patternEvaluation.utils';
 
 /** Future labels are stored separately and cannot enter an earlier forecast's replay input. */
 export async function collectForwardResearchLabels({ repository, benchmark, now, statePath }) {
@@ -41,9 +42,11 @@ export async function collectForwardResearchLabels({ repository, benchmark, now,
 
 /** Local analysis only: it neither submits orders nor promotes an experimental variant. */
 export async function getCollectorAnalysis({ repository, now, replayLimit = 10 }) {
-  const [evidence, labels] = await Promise.all([
+  const [evidence, labels, paperObservations, patternSuites] = await Promise.all([
     repository.getLearningEvidenceRows(),
     repository.getForwardResearchLabels(),
+    repository.getPatternPaperObservations?.() ?? [],
+    repository.readPatternSuiteRegistrations?.() ?? [],
   ]);
   const replay = { checked: 0, matched: 0, failed: 0, skipped: 0, failures: [] };
   const decisions = evidence
@@ -74,6 +77,7 @@ export async function getCollectorAnalysis({ repository, now, replayLimit = 10 }
   return {
     generatedAt: now,
     comparison: evaluateResearchExperiments(evidence, { now }),
+    patterns: evaluatePatternChallengers(evidence, { now, paperObservations, patternSuites }),
     collectorHealth: await createCollectorHealthService(repository)
       .getCollectorHealth({ now, events: evidence, labels })
       .catch(() => null),

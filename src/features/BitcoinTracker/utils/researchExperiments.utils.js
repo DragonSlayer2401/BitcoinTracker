@@ -33,6 +33,7 @@ const observationTimes = new Set([
 ]);
 const modelTimes = new Set([
   'trainedAt',
+  'registeredAt',
   'trainingCutoffAt',
   'calibrationCutoffAt',
   'evaluationCutoffAt',
@@ -127,6 +128,7 @@ function getTimingAssessment(input, models, capturedAt, windowStartAt) {
     inspect(model, `models.${name}`, modelTimes, false);
   }
   inspect(models?.challengers, 'models.challengers', modelTimes, false);
+  inspect(models?.patterns, 'models.patterns', modelTimes, false);
 
   if (input?.ticker && !validTime(input.ticker.receivedAt))
     limitations.push('The spot quote has no local receipt timestamp.');
@@ -186,6 +188,17 @@ export function createResearchInputSnapshot(
     capturedAt,
     ...copy,
     expectedExperiment: JSON.parse(JSON.stringify(estimate.researchExperiment)),
+    ...(estimate.chartPatterns
+      ? {
+          expectedPatterns: JSON.parse(
+            JSON.stringify({
+              chartPatterns: estimate.chartPatterns,
+              patternLearningFeatures: estimate.patternLearningFeatures,
+              patternShadowPredictions: estimate.patternShadowPredictions,
+            }),
+          ),
+        }
+      : {}),
     timing,
   };
 }
@@ -214,9 +227,24 @@ export function replayResearchInputSnapshot(snapshot) {
   // Replay uses the captured experiment generation, never today's expanded variant set.
   const forecast = getResearchForecast(snapshot.input, snapshot.models, snapshot.windowStartAt, {
     researchVersion: snapshot.expectedExperiment.version,
+    capturePatterns: Object.hasOwn(snapshot, 'expectedPatterns'),
+    patternVersion: snapshot.expectedPatterns?.chartPatterns?.version,
   });
   if (!hasMatchingReplayValues(forecast.researchExperiment, snapshot.expectedExperiment)) {
     throw new Error('Research replay differs from the saved variants or production prediction.');
+  }
+  if (
+    snapshot.expectedPatterns &&
+    !hasMatchingReplayValues(
+      {
+        chartPatterns: forecast.chartPatterns,
+        patternLearningFeatures: forecast.patternLearningFeatures,
+        patternShadowPredictions: forecast.patternShadowPredictions,
+      },
+      snapshot.expectedPatterns,
+    )
+  ) {
+    throw new Error('Research replay differs from the saved pattern evidence.');
   }
   return forecast;
 }

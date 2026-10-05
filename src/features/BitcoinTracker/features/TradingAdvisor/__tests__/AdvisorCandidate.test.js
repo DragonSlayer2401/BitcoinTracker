@@ -7,7 +7,11 @@ import {
   validateAdvisorCandidateDecision,
 } from '../utils/advisorCandidate.utils';
 import { createTradingAdvisorPolicy } from '../utils/advisorPolicy.utils';
-import { getTradingAdvice, simulateTradingExecution } from '../utils/tradingAdvisor.utils';
+import {
+  getTradingAdvice,
+  getTradingQuoteAmounts,
+  simulateTradingExecution,
+} from '../utils/tradingAdvisor.utils';
 import { getAdvisorValuation } from '../utils/advisorValuation.utils';
 import {
   applyAdvisorAdvice,
@@ -207,17 +211,200 @@ test('moderate persistent deterioration can reduce the position rather than forc
   );
 });
 
-test('the LLM can select HOLD when the unchanged incumbent selects SELL', () => {
-  const value = input({ position: true, probability: 0.1 });
+test.each([
+  ['yes', 0.1, 0.46],
+  ['no', 0.9, 0.51],
+])(
+  'AI HOLD for %s keeps its advance target above the raw bid when numerical advice sells',
+  (side, probability, expectedLimit) => {
+    const value = input({ position: true, probability });
+    value.portfolio.positions[0].side = side;
+    expect(getTradingAdvice(value).action).toBe('sell');
+    const evidence = getAdvisorCandidateEvidence(value);
+    const accepted = validate(value, selection(evidence, 'HOLD'));
+    expect(accepted).toMatchObject({
+      accepted: true,
+      advice: { action: 'hold', candidatePolicyVersion: 'history-llm-v1' },
+      plan: { action: 'HOLD', status: 'active' },
+    });
+    expect(accepted.advice.policy).toEqual(policy);
+    const target = accepted.advice.exitPlan;
+    const rawBestBid = 1 - value.book[side === 'yes' ? 'noAsks' : 'yesAsks'][0].price;
+    expect(target.limitPrice).toBeGreaterThan(rawBestBid);
+    expect(target.limitPrice).toBe(expectedLimit);
+    const targetAmounts = getTradingQuoteAmounts(
+      [{ price: target.limitPrice, quantity: target.quantity }],
+      'sell',
+      value.book.fee,
+      NOW,
+    );
+    expect(target.netProceeds).toBe(targetAmounts.netProceeds);
+    expect(target.estimatedProfit).toBeCloseTo(target.netProceeds - target.costBasis, 6);
+  },
+);
+
+test('HOLD does not suggest a marketable sell target when the best bid is already 99 cents', () => {
+  const value = input({
+    position: true,
+    probability: 0.5,
+    book: {
+      ...bookAt(NOW),
+      yesAsks: [{ price: 0.99, quantity: 100 }],
+      noAsks: [{ price: 0.01, quantity: 100 }],
+    },
+  });
   expect(getTradingAdvice(value).action).toBe('sell');
   const evidence = getAdvisorCandidateEvidence(value);
   const accepted = validate(value, selection(evidence, 'HOLD'));
   expect(accepted).toMatchObject({
     accepted: true,
-    advice: { action: 'hold', candidatePolicyVersion: 'history-llm-v1' },
-    plan: { action: 'HOLD', status: 'active' },
+    advice: {
+      action: 'hold',
+      exitPlan: {
+        available: false,
+        limitPrice: null,
+        reason: 'no_higher_resting_sell_limit',
+      },
+    },
+  });
+});
+
+test('HOLD keeps the fee-adjusted holding target when there are no current buyers', () => {
+  const value = input({
+    position: true,
+    probability: 0.6,
+    book: { ...bookAt(NOW), noAsks: [] },
+  });
+  const numerical = getTradingAdvice(value);
+  expect(numerical).toMatchObject({ action: 'wait', reason: 'insufficient_exit_depth' });
+  const evidence = getAdvisorCandidateEvidence(value);
+  const accepted = validate(value, selection(evidence, 'HOLD'));
+  expect(accepted.accepted).toBe(true);
+  expect(accepted.advice.exitPlan).toEqual(numerical.exitPlan);
+});
+
+test('HOLD prices its available position rather than inheriting the numerical partial-sale quantity', () => {
+  const value = input({
+    position: true,
+    probability: 0.1,
+    book: { ...bookAt(NOW), noAsks: [{ price: 0.55, quantity: 3 }] },
+  });
+  expect(getTradingAdvice(value)).toMatchObject({
+    action: 'sell',
+    quantity: 3,
+    exitPlan: { quantity: 3, costBasis: 1.5 },
+  });
+  const evidence = getAdvisorCandidateEvidence(value);
+  const accepted = validate(value, selection(evidence, 'HOLD'));
+  expect(accepted).toMatchObject({
+    accepted: true,
+    advice: {
+      action: 'hold',
+      quantity: 10,
+      exitPlan: { available: true, side: 'yes', quantity: 10, costBasis: 5 },
+    },
+  });
+});
+
+test.each([4, 0])(
+  'HOLD only offers a sell target for the %s contracts not reserved by a pending order',
+  (availableQuantity) => {
+    const value = input({ position: true, probability: 0.6 });
+    value.portfolio.positions[0].availableQuantity = availableQuantity;
+    value.portfolio.pendingIntents = [{ id: 'pending-sale', contract }];
+    expect(getTradingAdvice(value)).toMatchObject({
+      action: 'wait',
+      reason: 'pending_execution',
+      exitPlan: null,
+    });
+    const evidence = getAdvisorCandidateEvidence(value);
+    const hold = evidence.options.find((option) => option.action === 'HOLD').advice;
+    expect(hold.quantity).toBe(10);
+    if (availableQuantity) {
+      expect(hold.exitPlan).toMatchObject({
+        available: true,
+        quantity: availableQuantity,
+        costBasis: 2,
+      });
+    } else expect(hold.exitPlan).toBeNull();
+    expect(evidence.options.map((option) => option.action)).toEqual(['HOLD']);
+  },
+);
+
+test('AI can realize an early scalp after entry and exit fees while the numerical baseline holds', () => {
+  const entryInput = input();
+  const entryAdvice = { ...getTradingAdvice(entryInput), id: 'scalp-entry' };
+  expect(entryAdvice.action).toBe('buy');
+  expect(entryAdvice.maxCost).toBeLessThanOrEqual(policy.maxPositionCost);
+  const entryAccount = applyAdvisorAdvice(entryInput.account, entryAdvice);
+  const entryAt = NOW + policy.minimumFillDelayMs;
+  const entryBook = bookAt(entryAt);
+  const releasedPortfolio = getAdvisorPortfolio(entryAccount, entryAt, entryAdvice.id);
+  const entry = {
+    ...simulateTradingExecution({
+      advice: entryAdvice,
+      book: entryBook,
+      portfolio: {
+        ...releasedPortfolio,
+        valuation: getAdvisorValuation({
+          portfolio: releasedPortfolio,
+          books: [entryBook],
+          now: entryAt,
+          policy,
+        }),
+        riskHistory: { peakEquity: 100 },
+      },
+      now: entryAt,
+    }),
+    adviceId: entryAdvice.id,
+  };
+  expect(entry.kind).toBe('fill');
+  expect(entry.fee).toBeGreaterThan(0);
+  const heldAccount = applyAdvisorEvent(entryAccount, entry).account;
+  const reviewAt = entryAt + 3000;
+  const saleBookAt = (at) => ({
+    ...bookAt(at),
+    yesAsks: [{ price: 0.7, quantity: 100 }],
+    noAsks: [{ price: 0.35, quantity: 100 }],
+  });
+  const value = {
+    ...input({ now: reviewAt, probability: 0.75, book: saleBookAt(reviewAt) }),
+    account: heldAccount,
+    portfolio: portfolioAt(heldAccount, reviewAt, saleBookAt(reviewAt)),
+  };
+  expect(getTradingAdvice(value).action).toBe('hold');
+  const evidence = getAdvisorCandidateEvidence(value);
+  const accepted = validate(value, selection(evidence, 'EXIT'));
+  expect(accepted).toMatchObject({
+    accepted: true,
+    advice: {
+      action: 'sell',
+      candidatePolicyVersion: 'history-llm-v1',
+      candidateExit: { version: 'history-exit-v1' },
+    },
   });
   expect(accepted.advice.policy).toEqual(policy);
+  const saleAdvice = { ...accepted.advice, id: 'scalp-exit' };
+  const reserved = applyAdvisorAdvice(heldAccount, saleAdvice);
+  const saleAt = reviewAt + policy.minimumFillDelayMs;
+  const sale = {
+    ...simulateAdvisorCandidateExecution({
+      advice: saleAdvice,
+      book: saleBookAt(saleAt),
+      portfolio: getAdvisorPortfolio(reserved, saleAt, saleAdvice.id),
+      now: saleAt,
+    }),
+    adviceId: saleAdvice.id,
+  };
+  expect(sale).toMatchObject({ kind: 'fill', quantity: entry.quantity, fullyCovered: true });
+  expect(sale.price).toBeGreaterThanOrEqual(saleAdvice.limitPrice);
+  expect(sale.fee).toBeGreaterThan(0);
+  const { account, realizedPnl } = applyAdvisorEvent(reserved, sale);
+  expect(realizedPnl).toBeGreaterThan(0);
+  expect(realizedPnl).toBeCloseTo(sale.proceeds - entry.cost - entry.fee - sale.fee, 6);
+  expect(account.cash).toBeCloseTo(policy.initialBankroll + realizedPnl, 6);
+  expect(account.positions).toHaveLength(0);
+  expect(saleAt).toBeLessThan(contract.expiresAt);
 });
 
 test('candidate EXIT can execute under its explicit exit version while the incumbent continues HOLD', () => {

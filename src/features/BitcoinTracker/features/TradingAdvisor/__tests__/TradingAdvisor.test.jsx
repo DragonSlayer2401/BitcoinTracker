@@ -114,7 +114,7 @@ test('puts a fresh buy, price limit, fees and paper budget ahead of forecast res
   expect(metric('Estimated fees')).toHaveTextContent('$0.168');
   expect(screen.getByText('After the entry fills:')).toBeInTheDocument();
   expect(screen.getByText('Sell 10 UP contracts at 83¢ or better.')).toBeInTheDocument();
-  expect(screen.getByText(/This order is not placed/)).toBeInTheDocument();
+  expect(screen.getByText(/No order has been placed/)).toBeInTheDocument();
   expect(screen.getByText(/Paper adviser · no real orders/)).toBeInTheDocument();
   expect(screen.getByText(/not your Kalshi holdings/)).toBeInTheDocument();
   expect(
@@ -186,9 +186,8 @@ test('holds an existing position while clearly comparing expected holding and se
   });
   render(<TradingAdvisor {...props} />);
   expect(screen.getByRole('heading', { name: 'HOLD UP' })).toBeInTheDocument();
-  expect(
-    screen.getByText('Selling does not clear the required fees and uncertainty margin.'),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/Keep the position/)).toBeInTheDocument();
+  expect(screen.queryByText(/required fees and uncertainty margin/)).not.toBeInTheDocument();
   expect(metric('Expected settlement payout')).toHaveTextContent('$7.50');
   expect(metric('Estimated sale proceeds, net')).toHaveTextContent('$6.40');
   const row = within(screen.getByRole('rowheader', { name: market.ticker }).closest('tr'));
@@ -236,7 +235,7 @@ test('does not suggest the full pre-sale quantity again when advice reduces part
   expect(screen.queryByText(/Sell 10 UP contracts/)).not.toBeInTheDocument();
 });
 
-test('HOLD explains the unmet sale margin even when selling has a small positive raw advantage', () => {
+test('HOLD uses plain language without overstating a small difference between selling and holding', () => {
   mockQuery({
     data: {
       ...report,
@@ -252,13 +251,11 @@ test('HOLD explains the unmet sale margin even when selling has a small positive
   render(<TradingAdvisor {...props} />);
   expect(metric('Estimated sale proceeds, net')).toHaveTextContent('$7.51');
   expect(metric('Expected settlement payout')).toHaveTextContent('$7.50');
-  expect(
-    screen.getByText('Selling does not clear the required fees and uncertainty margin.'),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/Keep the position/)).toBeInTheDocument();
   expect(screen.queryByText(/Holding is estimated to be worth more/)).not.toBeInTheDocument();
 });
 
-test('does not display an expired conditional sell limit even while the main advice remains fresh', () => {
+test('keeps a standing sell limit when its quote expires but the same entry plan remains active', () => {
   mockQuery({
     data: {
       ...report,
@@ -267,7 +264,9 @@ test('does not display an expired conditional sell limit even while the main adv
   });
   render(<TradingAdvisor {...props} />);
   expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeInTheDocument();
-  expect(screen.queryByRole('region', { name: 'Sell limit order' })).not.toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Set a sell limit at 83¢' })).toBeVisible();
+  expect(screen.getByText('After the entry fills:')).toBeVisible();
+  expect(screen.queryByText(/Recheck by/)).not.toBeInTheDocument();
 });
 
 test('distinguishes suggestions, simulated fills, unfilled orders and completed outcomes in activity', () => {
@@ -343,28 +342,44 @@ test.each([
   ],
   ['changed target', { latestAdvice: { ...advice, contract: { ...market, target: 49_999 } } }],
 ])(
-  'shows an unavailable assessment for %s without repeating the old buy or its price target',
+  'keeps a %s plan only for its original open event without repeating old quotes',
   (_label, changes) => {
     mockQuery({ data: { ...report, ...changes } });
     render(<TradingAdvisor {...props} />);
-    expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+    const appliesToCurrentEvent = ![
+      'future evaluation',
+      'other contract',
+      'changed target',
+    ].includes(_label);
+    if (appliesToCurrentEvent) {
+      expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeInTheDocument();
+      expect(screen.getByText('Current plan')).toBeInTheDocument();
+    } else {
+      expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+      expect(screen.queryByText('Current plan')).not.toBeInTheDocument();
+    }
+    expect(
+      screen.queryByText(/Stale assessment|not a current instruction|evidence.*expired/),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText('Maximum buy price')).not.toBeInTheDocument();
     expect(screen.queryByText('Conditional exit plan')).not.toBeInTheDocument();
   },
 );
 
 test.each(['filled', 'no-fill'])(
-  'does not repeat a buy that already has execution status %s',
+  'stops asking for a new buy after its order is %s',
   (executionStatus) => {
     mockQuery({ data: { ...report, latestAdvice: { ...advice, executionStatus } } });
     render(<TradingAdvisor {...props} />);
-    expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
     expect(
-      screen.getByText(
-        executionStatus === 'filled' ? /recorded simulated fill/ : /last suggestion did not fill/,
-      ),
+      screen.getByRole('heading', {
+        name: executionStatus === 'filled' ? 'UP PURCHASED' : 'ORDER NOT FILLED',
+      }),
     ).toBeInTheDocument();
+    expect(screen.queryByText('Current plan')).not.toBeInTheDocument();
+    expect(screen.queryByText('Maximum buy price')).not.toBeInTheDocument();
+    expect(screen.getByText('Recorded plan')).toBeInTheDocument();
   },
 );
 
@@ -372,7 +387,7 @@ test.each([
   ['buy', 'yes', 'UP', 'Recorded entry cost, including fees: $5.968.'],
   ['sell', 'no', 'DOWN', 'Recorded sale proceeds, after fees: $5.632.'],
 ])(
-  'retains the actual completed %s details while guidance remains an unavailable assessment',
+  'retains the actual completed %s details alongside its historical assessment',
   (action, side, sideLabel, amountLabel) => {
     mockQuery({
       data: {
@@ -409,7 +424,13 @@ test.each([
       },
     });
     render(<TradingAdvisor {...props} now={NOW + 3000} />);
-    expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: action === 'buy' ? 'BUY UP' : 'EXIT DOWN' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: action === 'buy' ? 'UP PURCHASED' : 'DOWN SOLD' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Recorded plan')).toBeInTheDocument();
     const history = within(screen.getByRole('region', { name: 'Last simulated fill' }));
     expect(
       history.getByText(
@@ -435,20 +456,21 @@ test('a fresh no-trade decision explains the missing edge rather than blaming st
         ...advice,
         action: 'wait',
         side: null,
-        reason: 'insufficient_entry_edge_or_depth',
+        reason: 'insufficient_entry_edge',
         executionStatus: null,
       },
     },
   });
   render(<TradingAdvisor {...props} />);
   expect(screen.getByRole('heading', { name: 'NO TRADE' })).toBeInTheDocument();
-  expect(screen.getByText(/No suitable entry/)).toBeInTheDocument();
+  expect(screen.getByText(/Insufficient edge/)).toBeInTheDocument();
   expect(screen.getByText('Fresh evaluation')).toBeInTheDocument();
 });
 
 test('shows startup instructions with an explicit budget and unknown balances before a report exists', () => {
   mockQuery({ data: undefined });
   render(<TradingAdvisor {...props} />);
+  expect(screen.getByRole('heading', { name: 'Awaiting first assessment' })).toBeInTheDocument();
   expect(metric('Total budget')).toHaveTextContent('$100.00');
   expect(metric('Available cash')).toHaveTextContent('—');
   expect(
@@ -458,10 +480,14 @@ test('shows startup instructions with an explicit budget and unknown balances be
   expect(screen.queryByText(/No open simulated positions/)).not.toBeInTheDocument();
 });
 
-test('an API error suppresses cached buy guidance and provides a retry', () => {
+test('an API error retains the last buy assessment without its prices and provides a retry', () => {
   const query = mockQuery({ isError: true });
   render(<TradingAdvisor {...props} />);
-  expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeInTheDocument();
+  expect(screen.getByText('Current plan')).toBeInTheDocument();
+  expect(screen.getByText(/Updates interrupted/)).toBeInTheDocument();
+  expect(screen.queryByText(/Stale assessment|not a current instruction/)).not.toBeInTheDocument();
+  expect(screen.queryByText('Maximum buy price')).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh adviser' }));
   expect(query.refetch).toHaveBeenCalledTimes(1);
 });
@@ -490,8 +516,8 @@ test.each([
   mockQuery({ data: { ...report, asOf } });
   render(<TradingAdvisor {...props} />);
   expect(screen.getByText('Outdated account data')).toBeInTheDocument();
-  expect(screen.getByRole('heading', { name: 'Assessment unavailable' })).toBeInTheDocument();
-  expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeInTheDocument();
+  expect(screen.queryByText('Maximum buy price')).not.toBeInTheDocument();
 });
 
 test('a retry keeps cached quantities marked stale until a successful fresh report arrives', () => {
@@ -573,3 +599,259 @@ test('does not present zero completed comparisons as measured strategy improveme
   expect(screen.getByText(/No completed comparisons yet/)).toBeInTheDocument();
   expect(screen.queryByText('Adviser advantage')).not.toBeInTheDocument();
 });
+
+function reportWithAiGuidance(overrides = {}) {
+  const aiAdvice = {
+    ...advice,
+    id: 'ai-advice-1',
+    action: 'hold',
+    side: 'no',
+    quantity: 2,
+    reason: 'hold_value_exceeds_sale',
+    exitPlan: null,
+    executionStatus: null,
+  };
+  const guidance = {
+    ...report,
+    accountId: 'trial-1:language-model',
+    latestAdvice: aiAdvice,
+    portfolio: {
+      ...report.portfolio,
+      cash: 88,
+      openRisk: 2,
+      reservedCapital: 0,
+      realizedPnl: -1,
+      positions: [
+        {
+          id: 'ai-position-1',
+          contract: market,
+          side: 'no',
+          quantity: 2,
+          availableQuantity: 2,
+          averageEntryPrice: 0.4,
+          remainingCost: 0.82,
+        },
+      ],
+    },
+    performance: {
+      ...report.performance,
+      totalFees: 0.25,
+      inferenceCost: 0.1,
+      netProfit: -1.1,
+    },
+    source: {
+      kind: 'ai',
+      status: 'accepted',
+      pending: false,
+      providerStatus: 'configured',
+      model: 'configured-model',
+      decision: { rationale: 'Persistent selling pressure supports keeping DOWN.' },
+    },
+    ...overrides,
+  };
+  return {
+    ...report,
+    historyTrials: {
+      provider: { status: 'configured', model: 'configured-model' },
+      strategies: [{ id: 'language-model', label: 'AI paper account', guidance }],
+    },
+  };
+}
+
+test('defaults to AI guidance with its own cash, positions and costs and can switch to baseline', () => {
+  mockQuery({ data: reportWithAiGuidance() });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByRole('button', { name: 'AI-assisted' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  expect(screen.getByRole('heading', { name: 'HOLD DOWN' })).toBeVisible();
+  expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+  expect(metric('Available cash')).toHaveTextContent('$88.00');
+  expect(metric('Position size')).toHaveTextContent('2 contracts');
+  expect(screen.getByText('AI plan')).toBeVisible();
+  expect(
+    screen.queryByText('Persistent selling pressure supports keeping DOWN.'),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole('rowheader', { name: market.ticker })).toBeVisible();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Performance' }));
+  expect(metric('Estimated fees paid')).toHaveTextContent('$0.25');
+  expect(metric('AI usage cost')).toHaveTextContent('$0.10');
+  expect(metric('Net P&L after AI costs')).toHaveTextContent('-$1.10');
+  fireEvent.click(screen.getByRole('button', { name: 'Close performance' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Numerical baseline' }));
+  expect(screen.getByRole('heading', { name: 'BUY UP' })).toBeVisible();
+  expect(metric('Available cash')).toHaveTextContent('$93.832');
+  expect(screen.queryByRole('heading', { name: 'HOLD DOWN' })).not.toBeInTheDocument();
+  expect(
+    screen.queryByText('Persistent selling pressure supports keeping DOWN.'),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole('rowheader', { name: market.ticker })).not.toBeInTheDocument();
+});
+
+test('AI account performance retains access to current and previous independent experiments', () => {
+  const current = reportWithAiGuidance({ policy: { ...policy, maxEntryContracts: 1 } });
+  mockQuery({
+    data: {
+      ...current,
+      trials: {
+        policyId: 'research-policy-one-contract',
+        registeredAt: NOW,
+        initialBankroll: 100,
+        maxEntryContracts: 1,
+        previousExperiments: [{ policyId: 'original-strategy-trial', registeredAt: NOW - 1000 }],
+      },
+      historyTrials: {
+        ...current.historyTrials,
+        id: 'research-history-one-contract',
+        registeredAt: NOW,
+        initialBankroll: 100,
+        maxEntryContracts: 1,
+        previousExperiments: [{ id: 'original-history-trial', registeredAt: NOW - 1000 }],
+      },
+    },
+  });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByRole('button', { name: 'AI-assisted' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  expect(screen.getByText(/Research entry limit: 1 contract\./)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Performance' }));
+  expect(screen.getByText(/Experiment research-policy-one-contract/)).toBeVisible();
+  expect(screen.getByText(/Experiment research-history-one-contract/)).toBeVisible();
+  fireEvent.click(screen.getByText(/Previous strategy experiment/));
+  fireEvent.click(screen.getByText(/Previous history experiment/));
+  expect(screen.getByText(/Experiment original-strategy-trial/)).toBeVisible();
+  expect(screen.getByText(/Experiment original-history-trial/)).toBeVisible();
+});
+
+test.each([true, false])(
+  'keeps the current AI plan while pending=%s without proposal chatter or commentary',
+  (pending) => {
+    mockQuery({
+      data: reportWithAiGuidance({
+        source: {
+          kind: 'ai',
+          pending,
+          decision: { rationale: 'Accepted hold reasoning.' },
+          latestDecision: { status: 'proposed', rationale: 'Unvalidated buy proposal.' },
+        },
+      }),
+    });
+    render(<TradingAdvisor {...props} now={NOW + 20000} />);
+    expect(screen.getByRole('heading', { name: 'HOLD DOWN' })).toBeVisible();
+    expect(screen.getByText(/· Updating/)).toBeVisible();
+    expect(screen.queryByText(/New AI assessment|New AI proposal/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Accepted hold reasoning.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unvalidated buy proposal.')).not.toBeInTheDocument();
+    expect(screen.getByText('Current plan')).toBeVisible();
+    expect(screen.queryByText('Stale assessment')).not.toBeInTheDocument();
+    expect(screen.queryByText('Position size')).not.toBeInTheDocument();
+  },
+);
+
+test.each([
+  ['event ended', { now: market.expiresAt }, 'EVENT ENDED'],
+  ['new event', { market: { ...market, ticker: 'KXBTC15M-NEXT' } }, 'REVIEWING NEW EVENT'],
+])(
+  'moves an AI plan to history after %s without repeating its action or rationale',
+  (_label, changes, heading) => {
+    mockQuery({ data: reportWithAiGuidance() });
+    render(<TradingAdvisor {...props} {...changes} />);
+    expect(screen.getByRole('heading', { name: heading })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'HOLD DOWN' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Persistent selling pressure supports keeping DOWN.'),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Position size')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plan conditions')).not.toBeInTheDocument();
+    expect(screen.getByText(/Recorded for/)).toHaveTextContent(market.ticker);
+  },
+);
+
+test('labels a numerical fallback as part of the AI account instead of claiming AI selected it', () => {
+  mockQuery({
+    data: reportWithAiGuidance({
+      source: {
+        kind: 'numerical-fallback',
+        decision: { fallbackReason: 'request_timeout', rationale: 'Rejected AI explanation.' },
+      },
+    }),
+  });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByText('Numerical fallback')).toBeVisible();
+  expect(screen.getByText('request timeout')).toBeVisible();
+  expect(screen.queryByText('Rejected AI explanation.')).not.toBeInTheDocument();
+  expect(metric('Available cash')).toHaveTextContent('$88.00');
+});
+
+test('an enabled AI account awaiting its first report never borrows the baseline buy or balances', () => {
+  mockQuery({
+    data: {
+      ...report,
+      historyTrials: { provider: { status: 'configured' }, strategies: [] },
+    },
+  });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByRole('heading', { name: 'Awaiting first assessment' })).toBeVisible();
+  expect(metric('Available cash')).toHaveTextContent('—');
+  expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+  expect(screen.getByText('Awaiting AI assessment')).toBeVisible();
+});
+
+test('a local no-trade decision is not presented as an AI response or failed request', () => {
+  mockQuery({
+    data: reportWithAiGuidance({
+      latestAdvice: {
+        ...advice,
+        action: 'wait',
+        side: null,
+        reason: 'insufficient_entry_edge',
+        executionStatus: null,
+      },
+      source: {
+        kind: 'numerical',
+        status: 'local',
+        model: 'configured-model',
+        providerReason: null,
+        decision: { status: 'local' },
+      },
+    }),
+  });
+  render(<TradingAdvisor {...props} />);
+  expect(screen.getByRole('heading', { name: 'NO TRADE' })).toBeVisible();
+  expect(screen.getByText('Numerical plan')).toBeVisible();
+  expect(screen.queryByText('AI plan')).not.toBeInTheDocument();
+  expect(screen.queryByText('Numerical fallback')).not.toBeInTheDocument();
+  expect(screen.queryByText('Awaiting AI assessment')).not.toBeInTheDocument();
+  expect(screen.queryByText(/configured-model/)).not.toBeInTheDocument();
+});
+
+test.each(['ai', 'numerical-fallback'])(
+  'shows the exact provider failure alongside the retained %s assessment',
+  (kind) => {
+    mockQuery({
+      data: reportWithAiGuidance({
+        source: {
+          kind,
+          providerReason: 'provider_quota_exhausted',
+          decision: {
+            rationale: 'Previous accepted reasoning.',
+            fallbackReason: 'request_failed',
+          },
+        },
+      }),
+    });
+    render(<TradingAdvisor {...props} now={NOW + 20000} />);
+    expect(
+      screen.getByText(/no available credits or has reached its spending limit/),
+    ).toBeVisible();
+    expect(screen.queryByText(/request failed/)).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'HOLD DOWN' })).toBeVisible();
+    expect(screen.getByText('Current plan')).toBeVisible();
+    expect(screen.queryByText('Stale assessment')).not.toBeInTheDocument();
+    if (kind === 'ai') expect(screen.getByText('AI plan')).toBeVisible();
+  },
+);

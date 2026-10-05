@@ -3,6 +3,7 @@ import {
   createTradingPolicyTrial,
   getTradingPolicyComparison,
   getTradingPolicyEligibility,
+  getTradingPolicyPendingExecutions,
   getTradingPolicyTrialReport,
   TRADING_POLICY_TRIAL_RULES,
 } from '@/services/research/tradingAdvisor/tradingPolicyTrials.utils';
@@ -111,6 +112,177 @@ test('shares one later observed book across independent accounts and counts fees
   expect(state.strategies.standard.account.cash).toBeCloseTo(100 + score.netProfit, 7);
   expect(state.strategies.standard.account.pendingComparisons).toHaveLength(0);
   expect(state.contracts[0].outcome.result).toBe('yes');
+});
+
+test('shares an execution request only with strategies whose minimum delay has elapsed', () => {
+  const at = START + 60000;
+  const previous = initial();
+  previous.strategies['selective-entry'].account.lastAdviceAt = at - 14000;
+  let state = observe(previous, at);
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(3);
+  state = observe(state, at + 1000);
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(4);
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'earlier-orders',
+    observedAt: at + 2000,
+  });
+  const pending = getTradingPolicyPendingExecutions(state);
+  expect(pending.filter(({ attempt }) => attempt?.sourceId === 'earlier-orders')).toHaveLength(3);
+  expect(pending.find(({ advice }) => advice.policy.strategyId === 'selective-entry').attempt).toBe(
+    null,
+  );
+
+  state = observe(state, at + 3500, {
+    forecast: undefined,
+    sourceId: 'earlier-orders',
+    book: { ...bookAt(at + 3500), requestedAt: at + 2000 },
+  });
+  for (const id of ['standard', 'early-exit', 'cautious-sizing']) {
+    expect(state.strategies[id].account.positions).toHaveLength(1);
+    expect(state.strategies[id].account.pendingIntents).toHaveLength(0);
+  }
+  expect(state.strategies['selective-entry'].account.positions).toHaveLength(0);
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(1);
+
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'later-order',
+    observedAt: at + 3500,
+  });
+  state = observe(state, at + 3501, {
+    forecast: undefined,
+    sourceId: 'later-order',
+    book: { ...bookAt(at + 3501), requestedAt: at + 3500 },
+  });
+  expect(state.strategies['selective-entry'].account.positions).toHaveLength(1);
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(0);
+});
+
+test('a failed shared request cancels every claimed order without fetching a later opportunity', () => {
+  const at = START + 60000;
+  let state = observe(initial(), at);
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'too-early',
+    observedAt: at + 1999,
+  });
+  expect(getTradingPolicyPendingExecutions(state).every(({ attempt }) => attempt === null)).toBe(
+    true,
+  );
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'failed-request',
+    observedAt: at + 2000,
+  });
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(4);
+  for (const { attempt } of getTradingPolicyPendingExecutions(state))
+    expect(attempt).toMatchObject({
+      sourceId: 'failed-request',
+      requestedAt: at + 2000,
+      deadline: at + policy.maximumFillDelayMs + 1,
+    });
+  state = observe(state, at + 2001, {
+    forecast: undefined,
+    sourceId: 'failed-request',
+    book: null,
+  });
+  state = observe(state, at + 3000, { forecast: undefined });
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(0);
+  for (const strategy of Object.values(state.strategies)) {
+    expect(strategy.account.cash).toBe(100);
+    expect(strategy.account.positions).toHaveLength(0);
+    expect(state.contracts[0].scores[strategy.id].orderFills).toBe(0);
+  }
+});
+
+test('a lost shared request remains claimed after restart and expires without a favorable retry', () => {
+  const at = START + 60000;
+  let state = observe(initial(), at);
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'lost-request',
+    observedAt: at + 2000,
+  });
+  state = JSON.parse(JSON.stringify(state));
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'restarted-request',
+    observedAt: at + 3000,
+  });
+  state = observe(state, at + 3001, {
+    forecast: undefined,
+    sourceId: 'restarted-request',
+  });
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(4);
+  for (const { attempt } of getTradingPolicyPendingExecutions(state))
+    expect(attempt.sourceId).toBe('lost-request');
+  for (const strategy of Object.values(state.strategies))
+    expect(strategy.account.positions).toHaveLength(0);
+
+  state = observe(state, at + policy.maximumFillDelayMs + 1, {
+    forecast: undefined,
+    book: null,
+  });
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(0);
+  for (const strategy of Object.values(state.strategies)) {
+    expect(strategy.account.cash).toBe(100);
+    expect(strategy.account.positions).toHaveLength(0);
+  }
+});
+
+test.each([
+  ['price beyond the limit', (book) => ({ ...book, yesAsks: [{ price: 0.99, quantity: 100 }] })],
+  ['missing depth', (book) => ({ ...book, yesAsks: [] })],
+  ['unavailable fees', (book) => ({ ...book, fee: { available: false } })],
+])('a shared execution request still rejects %s', (_reason, changeBook) => {
+  const at = START + 60000;
+  let state = observe(initial(), at);
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'checked-request',
+    observedAt: at + 2000,
+  });
+  state = observe(state, at + 2001, {
+    forecast: undefined,
+    sourceId: 'checked-request',
+    book: changeBook({ ...bookAt(at + 2001), requestedAt: at + 2000 }),
+  });
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(0);
+  for (const strategy of Object.values(state.strategies)) {
+    expect(strategy.account.cash).toBe(100);
+    expect(strategy.account.positions).toHaveLength(0);
+    expect(state.contracts[0].scores[strategy.id].orderFills).toBe(0);
+  }
+});
+
+test('a claimed shared book arriving after the execution deadline cannot fill any strategy', () => {
+  const at = START + 60000;
+  let state = observe(initial(), at);
+  state = advanceTradingPolicyTrial(state, {
+    kind: 'execution-request',
+    contract,
+    sourceId: 'late-request',
+    observedAt: at + 2000,
+  });
+  const arrivedAt = at + policy.maximumFillDelayMs + 1;
+  state = observe(state, arrivedAt, {
+    forecast: undefined,
+    sourceId: 'late-request',
+    book: { ...bookAt(arrivedAt), requestedAt: at + 2000 },
+  });
+  expect(getTradingPolicyPendingExecutions(state)).toHaveLength(0);
+  for (const strategy of Object.values(state.strategies)) {
+    expect(strategy.account.cash).toBe(100);
+    expect(strategy.account.positions).toHaveLength(0);
+  }
 });
 
 test('missing timely execution observations release all reserved cash without inventing a fill', () => {

@@ -74,6 +74,49 @@ beforeEach(() => {
 });
 afterEach(() => client.close());
 
+test('reports earlier experiment losses and durable inference costs separately from a new version', async () => {
+  const trial = await repository.ensureTrial(policy, provider, clock);
+  clock = START + 60000;
+  await repository.record(trial.id, observation('entry'));
+  clock += 2000;
+  await repository.record(trial.id, observation('fill', { forecast: null }));
+  clock = contract.expiresAt;
+  await repository.record(trial.id, {
+    id: 'outcome',
+    kind: 'settlement',
+    market: outcomeAt(clock, 'no'),
+    observedAt: clock,
+  });
+  await repository.reserveBudget(reservation(`${trial.id}:unresolved-cost`));
+  const prior = await repository.readState(trial.id);
+  expect(prior.strategies.incumbent.account.realizedPnl).toBeLessThan(0);
+  clock += 1;
+  const next = await repository.ensureTrial(
+    policy,
+    { ...provider, promptVersion: 'next-history-version' },
+    clock,
+  );
+
+  const reports = await repository.getReports();
+  expect(reports.map((report) => report.id)).toEqual([next.id, trial.id]);
+  expect(reports[0]).toMatchObject({ policyId: policy.id, initialBankroll: 50 });
+  expect(reports[0].strategies.find((strategy) => strategy.id === 'incumbent')).toMatchObject({
+    cash: 50,
+    realizedPnl: 0,
+  });
+  expect(reports[1].strategies.find((strategy) => strategy.id === 'incumbent')).toMatchObject({
+    cash: prior.strategies.incumbent.account.cash,
+    realizedPnl: prior.strategies.incumbent.account.realizedPnl,
+  });
+  expect(reports[1].strategies.find((strategy) => strategy.id === 'language-model')).toMatchObject({
+    inferenceCost: 0.03,
+    netProfit: -0.03,
+    costDiscrepancy: true,
+    readyForReview: false,
+  });
+  expect(await repository.readState(trial.id)).toEqual(prior);
+});
+
 test('durably reserves worst-case spend and permits only one in-flight request across repository instances', async () => {
   const other = createAdvisorHistoryTrialRepository({ client, now: () => clock });
   const results = await Promise.all([
@@ -320,9 +363,6 @@ test('the real provider adapter reconciles both known and unknown costs through 
     optionId: 'hold',
     snapshotId: 'snapshot-test',
     evidenceRefs: ['account'],
-    rationale: 'The evidence still supports the existing plan.',
-    thesis: 'The original reason for entry remains supported.',
-    invalidationConditions: ['Sustained deterioration in the observed evidence.'],
     reviewHorizon: '15s',
   };
   const fetchImpl = jest.fn(
@@ -352,6 +392,10 @@ test('the real provider adapter reconciles both known and unknown costs through 
     completeReservation: repository.completeReservation,
   });
   const evidence = () => ({
+    available: true,
+    options: [{ id: 'hold', action: 'HOLD' }],
+    evidenceIds: ['account'],
+    account: { id: 'account' },
     snapshotId: 'snapshot-test',
     observedAt: clock,
     expiresAt: clock + 15000,
@@ -448,6 +492,11 @@ test('unarchived inference charges survive restart and reduce reported profit co
   expect(language.inferenceCost).toBe(0.03);
   expect(language.recordedInferenceCost).toBe(0);
   expect(language.netProfit).toBe(-0.03);
+  expect(language.guidance.performance).toMatchObject({
+    inferenceCost: 0.03,
+    netProfit: -0.03,
+    costDiscrepancy: true,
+  });
   expect(language.readyForReview).toBe(false);
   expect((await repository.readState(trialId)).strategies['language-model'].inferenceCost).toBe(0);
 });

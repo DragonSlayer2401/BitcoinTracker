@@ -5,7 +5,7 @@ import {
   hasFreshAdvisorAdvice,
 } from './advisorDisplay.utils';
 
-const operationalReasons = new Set([
+export const ADVISOR_OPERATIONAL_REASONS = [
   'pending_execution',
   'position_already_reserved',
   'loss_cooldown',
@@ -18,7 +18,9 @@ const operationalReasons = new Set([
   'risk_valuation_unavailable_or_stale',
   'portfolio_unavailable',
   'observing_confirmation',
-]);
+  'outside_active_contract',
+];
+const operationalReasons = new Set(ADVISOR_OPERATIONAL_REASONS);
 const sameContract = (left, right) =>
   left &&
   right &&
@@ -27,11 +29,17 @@ const sameContract = (left, right) =>
   left.startsAt === right.startsAt &&
   left.expiresAt === right.expiresAt;
 const isTime = (value) => Number.isFinite(value) && value > 0;
+const planReviewCondition =
+  'Keep this plan until a new assessment replaces it, an order completes, the position changes or this event ends. Prices are checked again before an order.';
 
 export const isAdvisorOperationalWait = (advice) =>
   advice?.action === 'wait' && operationalReasons.has(advice.reason);
 
-/** Persist a bounded plan independently of routine execution messages; never extend its evidence. */
+export const isMeaningfulAdvisorPlan = (plan) =>
+  plan?.version === 'advisor-plan-v1' &&
+  ['buy', 'hold', 'reduce', 'exit', 'no-trade'].includes(plan.action);
+
+/** Preserve the strategy through routine waits without renewing its original order evidence. */
 export function createAdvisorPlan(advice, previousPlan = null) {
   if (
     !advice ||
@@ -42,16 +50,13 @@ export function createAdvisorPlan(advice, previousPlan = null) {
     return null;
   if (
     isAdvisorOperationalWait(advice) &&
-    previousPlan?.version === 'advisor-plan-v1' &&
-    sameContract(advice.contract, previousPlan.contract) &&
-    previousPlan.assessedAt <= advice.evaluatedAt &&
-    advice.evaluatedAt < previousPlan.validUntil &&
-    advice.evaluatedAt - previousPlan.assessedAt < 30000
+    isMeaningfulAdvisorPlan(previousPlan) &&
+    previousPlan.assessedAt <= advice.evaluatedAt
   )
     return previousPlan;
   const action =
     advice.action === 'sell'
-      ? advice.reason === 'reduce_at_better_than_hold_value'
+      ? ['reduce_at_better_than_hold_value', 'candidate_reduce_thesis'].includes(advice.reason)
         ? 'reduce'
         : 'exit'
       : advice.action === 'wait'
@@ -100,6 +105,7 @@ export function createAdvisorPlan(advice, previousPlan = null) {
           : [];
   return {
     version: 'advisor-plan-v1',
+    policyId: advice.policyId ?? null,
     adviceId: advice.id,
     contract: advice.contract,
     action,
@@ -111,7 +117,7 @@ export function createAdvisorPlan(advice, previousPlan = null) {
     conditions,
     invalidationConditions: [
       'Reassess if the probability, executable price, fees or available position changes.',
-      'This assessment expires when its evidence becomes stale or this event closes.',
+      planReviewCondition,
     ],
     advice: Object.fromEntries(
       fields.filter((field) => advice[field] !== undefined).map((field) => [field, advice[field]]),
@@ -128,7 +134,7 @@ export function getAdvisorPlanHeading(plan) {
     reduce: 'REDUCE',
     exit: 'EXIT',
     'no-trade': 'NO TRADE',
-    unavailable: 'Assessment unavailable',
+    unavailable: 'Awaiting first assessment',
   };
   const name = names[plan?.action] ?? names.unavailable;
   if (plan?.action === 'conditional-buy') return `BUY ${side} IF…`;
@@ -143,7 +149,7 @@ const readinessLabels = {
   cooldown: 'Cooldown',
   filled: 'Filled',
   canceled: 'Canceled',
-  stale: 'Stale assessment',
+  stale: 'Checking current prices',
   closed: 'Event closed',
 };
 
@@ -171,16 +177,32 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
       report?.portfolio?.positions?.some((position) => position.entryAdviceId === sourceId));
   const canceled = activity?.kind === 'no-fill' || executionStatus === 'no-fill';
   const matching = sameContract(plan?.contract, market);
+  const assessedAccountVersion = plan?.accountVersion ?? advice?.accountVersion;
   const accountChanged =
-    Number.isSafeInteger(plan?.accountVersion) &&
+    Number.isSafeInteger(assessedAccountVersion) &&
     Number.isSafeInteger(report?.portfolio?.accountVersion) &&
-    plan.accountVersion !== report.portfolio.accountVersion;
+    assessedAccountVersion !== report.portfolio.accountVersion;
+  const policyChanged = Boolean(
+    plan?.policyId && report?.policy?.id && plan.policyId !== report.policy.id,
+  );
   const open = market && market.startsAt <= now && market.expiresAt > now;
+  const position = report?.portfolio?.positions?.find((item) => item.id === advice?.positionId);
+  const positionChanged = Boolean(
+    advice?.positionId &&
+    Array.isArray(report?.portfolio?.positions) &&
+    (!position ||
+      position.quantity <= 0 ||
+      position.side !== plan.side ||
+      (Number.isFinite(advice.quantity) && position.quantity < advice.quantity)),
+  );
   const fresh =
     !isError &&
     plan &&
     matching &&
     !accountChanged &&
+    !policyChanged &&
+    !positionChanged &&
+    !plan.historicalOnly &&
     now < plan.validUntil &&
     hasFreshAdvisorAdvice({
       advice: { ...advice, executionStatus: null },
@@ -197,33 +219,27 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
   if (isLoading) {
     readiness = 'confirmation';
     explanation = 'Loading the latest recorded assessment.';
-  } else if (isError) {
-    readiness = 'stale';
-    explanation =
-      'A fresh adviser report or current event is unavailable. Refresh before relying on a suggestion.';
   } else if (!report?.startedAt || report?.collector?.status === 'not-started') {
     readiness = 'confirmation';
     explanation = 'The paper adviser has not started collecting decisions yet.';
-  } else if (!open) {
+  } else if (market && !open) {
     readiness = 'closed';
     explanation = 'Waiting for the next open Kalshi event.';
   } else if (filled) {
     readiness = 'filled';
-    explanation =
-      'The last suggestion has a recorded simulated fill. Reassessing the resulting position before another action.';
+    explanation = 'The paper order filled. Reviewing the resulting position for the next plan.';
   } else if (canceled) {
     readiness = 'canceled';
     explanation =
-      'The last suggestion did not fill. Its unfilled quantity was canceled; a new assessment is needed.';
+      'The paper order did not fill. Its remaining quantity was canceled; reviewing the next opportunity.';
   } else if (!fresh) {
     readiness = 'stale';
-    explanation = accountChanged
-      ? 'The account changed after this assessment. A new position assessment is needed.'
-      : plan && !matching
-        ? 'The event or target changed. The previous plan does not apply to this market.'
-        : plan && now >= plan.validUntil
-          ? 'The evidence behind the previous plan expired. A fresh assessment is needed.'
-          : 'No fresh assessment is available from the collector. Its previous plan is historical.';
+    explanation =
+      policyChanged || positionChanged
+        ? 'Reviewing the changed account before choosing the next plan.'
+        : plan && market && !matching
+          ? 'Reviewing the new event and its target.'
+          : 'Checking current prices and account limits before another paper order.';
   } else if (cooldown) {
     readiness = 'cooldown';
   } else if (
@@ -243,21 +259,95 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
   if (current?.action === 'buy' && ['fresh-quote', 'confirmation'].includes(readiness)) {
     current = { ...current, action: 'conditional-buy' };
   }
+  const recorded = isMeaningfulAdvisorPlan(plan) && plan.assessedAt <= now ? plan : null;
+  // A quote timeout is an execution boundary, not a change of strategy. Account
+  // versions also advance on routine WAIT/HOLD writes, so only changed positions
+  // or configuration invalidate the ongoing plan here. Exact versions still gate orders.
+  let lifecycle = 'awaiting';
+  if (recorded) {
+    if (market && !matching) lifecycle = 'changed-event';
+    else if (now >= recorded.contract.expiresAt) lifecycle = 'closed';
+    else if (filled) lifecycle = 'filled';
+    else if (canceled) lifecycle = 'canceled';
+    else if (policyChanged || positionChanged) lifecycle = 'changed-account';
+    else if (now >= recorded.contract.startsAt) lifecycle = 'active';
+  }
+  const active =
+    lifecycle === 'active'
+      ? {
+          ...recorded,
+          // Apply updated wording to older saved plans without rewriting their evidence.
+          invalidationConditions: (recorded.invalidationConditions ?? []).map((condition) =>
+            condition ===
+            'This assessment expires when its evidence becomes stale or this event closes.'
+              ? planReviewCondition
+              : condition,
+          ),
+        }
+      : null;
+  const displayed = active ?? recorded;
+  const side = getAdvisorSideLabel(recorded?.side);
+  const completionHeading =
+    recorded?.action === 'buy'
+      ? `${side} PURCHASED`
+      : recorded?.action === 'reduce'
+        ? `${side} REDUCED`
+        : `${side} SOLD`;
+  const lifecycleHeadings = {
+    filled: completionHeading,
+    canceled: 'ORDER NOT FILLED',
+    closed: 'EVENT ENDED',
+    'changed-event': 'REVIEWING NEW EVENT',
+    'changed-account': 'REVIEWING ACCOUNT',
+    awaiting: 'Awaiting first assessment',
+  };
+  const lifecycleExplanations = {
+    filled: 'The paper order filled. Reviewing the resulting position for the next plan.',
+    canceled:
+      'The paper order did not fill. Its remaining quantity was canceled; reviewing the next opportunity.',
+    closed: 'This event has ended. Waiting for its official result and the next event.',
+    'changed-event': 'Reviewing the new event and its target.',
+    'changed-account': 'The position or account settings changed. Reviewing the next plan.',
+  };
+  const interrupted =
+    isError ||
+    !market ||
+    report?.collector?.status !== 'running' ||
+    !isTime(report?.collector?.heartbeatAt) ||
+    report.collector.heartbeatAt > now ||
+    now - report.collector.heartbeatAt >= 30000;
+  const updateMessage = active
+    ? interrupted
+      ? 'Updates interrupted · keeping the current plan'
+      : isLoading
+        ? 'Updating prices · plan unchanged'
+        : !current
+          ? 'Plan unchanged · checking current prices'
+          : null
+    : null;
   return {
+    active,
+    lifecycle,
+    executionReady: Boolean(current),
+    updateMessage,
     current,
-    historical: !current && plan ? plan : null,
+    displayed,
+    historical: !active ? displayed : null,
+    previousEvent: Boolean(displayed && market && !matching),
     advice: current?.advice ?? null,
-    heading: getAdvisorPlanHeading(current),
+    heading: active ? getAdvisorPlanHeading(active) : lifecycleHeadings[lifecycle],
     readiness,
     readinessLabel: readinessLabels[readiness],
-    explanation: current ? getAdvisorReason(current.reason) : explanation,
+    explanation: active
+      ? getAdvisorReason(active.reason)
+      : (lifecycleExplanations[lifecycle] ?? explanation),
     blocker: ['cooldown', 'pending', 'fresh-quote', 'confirmation'].includes(readiness)
       ? getAdvisorReason(reason)
       : current
         ? null
         : explanation,
     completedFill: activity?.kind === 'fill' ? activity : null,
-    assessedAt: plan?.assessedAt ?? latest?.evaluatedAt ?? null,
-    reviewAt: current?.reviewAt ?? null,
+    assessedAt: displayed?.assessedAt ?? null,
+    reviewAt: active?.reviewAt ?? null,
   };
 }

@@ -3,6 +3,7 @@ import {
   getTradingAdvice,
   getTradingBookProblem,
   getTradingExecutionQuote,
+  getTradingExitPlan,
   getTradingPortfolioProblem,
   getTradingQuoteAmounts,
   isTradingAdvisorPolicy,
@@ -287,6 +288,16 @@ export function getAdvisorCandidateEvidence({
     const quantity = Math.min(position.availableQuantity ?? position.quantity, policy.maxContracts);
     const probability =
       position.side === 'yes' ? forecast.aboveProbability : 1 - forecast.aboveProbability;
+    const opposingAsks = book[position.side === 'yes' ? 'noAsks' : 'yesAsks'].filter(
+      (level) => level.quantity > 0,
+    );
+    const bestBid = opposingAsks.length
+      ? 1 - Math.min(...opposingAsks.map((level) => level.price))
+      : null;
+    // A HOLD target must rest above today's raw bid rather than immediately sell
+    // when the AI disagrees with the numerical policy's exit recommendation.
+    const minimumLimitPrice =
+      bestBid === null ? null : (Math.floor((bestBid + 1e-10) * 100) + 1) / 100;
     const hold = canonical({
       action: 'hold',
       side: position.side,
@@ -295,7 +306,21 @@ export function getAdvisorCandidateEvidence({
       positionId: position.id,
       holdExpectedValue: money(position.quantity * probability),
       reason: 'candidate_thesis_holds',
-      exitPlan: current.exitPlan,
+      // HOLD manages the available position, even when the numerical policy would
+      // sell only a smaller portion or is waiting for an existing order.
+      exitPlan: getTradingExitPlan({
+        side: position.side,
+        quantity,
+        probability,
+        book,
+        now,
+        policy,
+        contract,
+        minimumLimitPrice,
+        costBasis: finite(position.costBasis)
+          ? money((position.costBasis * quantity) / position.quantity)
+          : null,
+      }),
     });
     options.push({ id: `hold-${position.side}`, action: 'HOLD', advice: hold });
     if (

@@ -14,6 +14,7 @@
     "format:check": "prettier --check .",
     "research:collect": "node --conditions=react-server scripts/collect-research.mjs",
     "research:compare-directions": "node --conditions=react-server scripts/research/compare-directions.mjs",
+    "research:compare-patterns": "node --conditions=react-server scripts/research/compare-patterns.mjs",
     "kalshi:check": "node --conditions=react-server scripts/check-kalshi.mjs"
   },
   "engines": {

@@ -28,6 +28,40 @@ beforeEach(async () => {
 });
 afterEach(() => client.close());
 
+test('reports each funded experiment separately without replacing earlier balances or evidence', async () => {
+  clock = START + 60000;
+  await service.observe({ contract, book: bookAt(clock), forecast: forecastAt(clock) });
+  clock += 2000;
+  await service.observe({ contract, book: bookAt(clock) });
+  clock = contract.expiresAt;
+  await service.settle({ market: outcomeAt(clock, 'no') });
+  const prior = await repository.readState(policy.id);
+  expect(prior.strategies.standard.account.realizedPnl).toBeLessThan(0);
+  const nextPolicy = createTradingAdvisorPolicy({
+    allocation: 50,
+    riskLevel: 'balanced',
+    runId: 'next-storage-trial',
+  });
+  clock += 1;
+  await repository.ensureTrial(nextPolicy, clock);
+
+  const reports = await repository.getReports();
+  expect(reports.map((report) => report.policyId)).toEqual([nextPolicy.id, policy.id]);
+  expect(reports[0]).toMatchObject({ initialBankroll: 50, maxEntryContracts: null });
+  expect(reports[0].strategies.find((strategy) => strategy.id === 'standard')).toMatchObject({
+    accountId: `${nextPolicy.id}:standard`,
+    cash: 50,
+    realizedPnl: 0,
+    fillCount: 0,
+  });
+  expect(reports[1].strategies.find((strategy) => strategy.id === 'standard')).toMatchObject({
+    accountId: `${policy.id}:standard`,
+    cash: prior.strategies.standard.account.cash,
+    realizedPnl: prior.strategies.standard.account.realizedPnl,
+  });
+  expect(await repository.readState(policy.id)).toEqual(prior);
+});
+
 test('registration survives restart and rejects rewriting the same strategy or using a future registration', async () => {
   expect((await repository.readState(policy.id)).registeredAt).toBe(START - 1000);
   const restarted = createTradingPolicyTrialRepository({ client, now: () => clock });
@@ -76,6 +110,81 @@ test('later execution and official outcome preserve fees and account balances ac
     7,
   );
   expect(await restarted.getActivePolicy(policy, clock)).toEqual(policy);
+});
+
+test('a shared execution claim survives repository restart and expires without another opportunity', async () => {
+  clock = START + 60000;
+  const evaluatedAt = clock;
+  await service.observe({ contract, book: bookAt(clock), forecast: forecastAt(clock) });
+  expect(await service.getPendingExecutions()).toHaveLength(4);
+  clock += policy.minimumFillDelayMs;
+  const claim = await service.claimExecutionObservation(contract, clock);
+  expect(claim).toMatchObject({
+    sourceId: expect.any(String),
+    requestedAt: clock,
+    deadline: evaluatedAt + policy.maximumFillDelayMs + 1,
+  });
+
+  const restartedRepository = createTradingPolicyTrialRepository({ client, now: () => clock });
+  const restarted = createTradingPolicyTrialService({
+    repository: restartedRepository,
+    now: () => clock,
+  });
+  await restarted.ensureTrial(policy);
+  for (const { attempt } of await restarted.getPendingExecutions()) expect(attempt).toEqual(claim);
+  clock += 1000;
+  expect(await restarted.claimExecutionObservation(contract, clock)).toBeNull();
+  await restarted.observe({ contract, book: bookAt(clock) });
+  const pending = await restarted.getPendingExecutions();
+  expect(pending).toHaveLength(4);
+  for (const { attempt } of pending) expect(attempt).toEqual(claim);
+  const unresolved = await restartedRepository.readState(policy.id);
+  for (const strategy of Object.values(unresolved.strategies))
+    expect(strategy.account.positions).toHaveLength(0);
+
+  clock = evaluatedAt + policy.maximumFillDelayMs + 1;
+  await restarted.observe({ contract, book: null });
+  expect(await restarted.getPendingExecutions()).toHaveLength(0);
+  const expired = await restartedRepository.readState(policy.id);
+  for (const strategy of Object.values(expired.strategies)) {
+    expect(strategy.account.cash).toBe(50);
+    expect(strategy.account.positions).toHaveLength(0);
+    expect(expired.contracts[0].scores[strategy.id].orderFills).toBe(0);
+  }
+});
+
+test('a matching failed shared observation releases reservations exactly once and cannot be reclaimed', async () => {
+  clock = START + 60000;
+  await service.observe({ contract, book: bookAt(clock), forecast: forecastAt(clock) });
+  clock += policy.minimumFillDelayMs;
+  const claim = await service.claimExecutionObservation(contract, clock);
+  clock += 1;
+  const observation = {
+    contract,
+    sourceId: claim.sourceId,
+    book: null,
+    observedAt: clock,
+  };
+  await service.observe(observation);
+  const resolved = await repository.readState(policy.id);
+  await service.observe(observation);
+  expect(await repository.readState(policy.id)).toEqual(resolved);
+  expect(await service.getPendingExecutions()).toHaveLength(0);
+  for (const strategy of Object.values(resolved.strategies)) {
+    expect(strategy.account.cash).toBe(50);
+    expect(strategy.account.positions).toHaveLength(0);
+    expect(resolved.contracts[0].scores[strategy.id].orderFills).toBe(0);
+  }
+
+  clock += 1000;
+  expect(await service.claimExecutionObservation(contract, clock)).toBeNull();
+  await service.observe({ contract, book: bookAt(clock) });
+  const later = await repository.readState(policy.id);
+  for (const strategy of Object.values(later.strategies)) {
+    expect(strategy.account.cash).toBe(50);
+    expect(strategy.account.positions).toHaveLength(0);
+    expect(later.contracts[0].scores[strategy.id].orderFills).toBe(0);
+  }
 });
 
 test('freezes inputs before asynchronous persistence rather than accepting mutation after capture', async () => {

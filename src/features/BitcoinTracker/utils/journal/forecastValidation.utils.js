@@ -26,6 +26,7 @@ import {
 } from './modelValidation.utils';
 import { isKalshiDerivativesModelVersion } from '../kalshi/forecast.utils';
 import { DERIVATIVES_LEARNING_FEATURE_VERSION } from '../learning/features.utils';
+import { PATTERN_MODEL_VERSION } from '../learning/patternVersions.utils';
 import {
   isRecord,
   isTimestamp,
@@ -127,6 +128,8 @@ function hasCompatibleForecastModel(value, startsAt) {
   const hasNoFixedPrediction = ['analyzing', 'withheld'].includes(value.status);
   const usesDerivatives =
     isKalshiDerivativesModelVersion(value.modelVersion) ||
+    (value.modelVersion === PATTERN_MODEL_VERSION &&
+      value.learning?.baselineFeatureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION) ||
     value.learning?.featureVersion === DERIVATIVES_LEARNING_FEATURE_VERSION;
   if (
     usesSnapshotCapture !== isSnapshotModelVersion(value.modelVersion) ||

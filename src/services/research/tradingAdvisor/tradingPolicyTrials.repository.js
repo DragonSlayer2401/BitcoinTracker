@@ -6,7 +6,11 @@ import {
   runResearchSchemaStatements,
 } from '../research.connection';
 import { getCanonicalResearchJson, ResearchDataError } from '../research.validation';
-import { advanceTradingPolicyTrial, createTradingPolicyTrial } from './tradingPolicyTrials.utils';
+import {
+  advanceTradingPolicyTrial,
+  createTradingPolicyTrial,
+  getTradingPolicyTrialReport,
+} from './tradingPolicyTrials.utils';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const encode = (value) => {
@@ -221,6 +225,16 @@ export function createTradingPolicyTrialRepository({ client, now = Date.now }) {
     },
     readState: (policyId) =>
       read((transaction) => one(transaction, 'advisor_profit_trial_state', policyId)),
+    getReports: () =>
+      read(async (transaction) => {
+        const result = await transaction.execute(
+          `SELECT state.payload, state.content_hash
+           FROM advisor_profit_trials AS trial
+           JOIN advisor_profit_trial_state AS state ON state.policy_id = trial.policy_id
+           ORDER BY trial.registered_at DESC, trial.rowid DESC`,
+        );
+        return result.rows.map((row) => getTradingPolicyTrialReport(decode(row), now()));
+      }),
     getSelection: (policyId, evaluatedAt) =>
       read((transaction) => getTradingPolicySelection(transaction, policyId, evaluatedAt)),
   };

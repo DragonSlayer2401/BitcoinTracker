@@ -62,7 +62,7 @@ Collector-control tests mock process ownership, IPC shutdown, duplicate launch, 
 same-origin checks. Local Start/Stop browser smoke tests are separate from these mocked checks.
 
 At desktop and mobile sizes check Setup validation, keyboard controls, visible saved/unsaved state,
-collector status, sell price in cents, net proceeds vs profit, expired-plan suppression and
+collector status, sell price in cents, net proceeds vs profit, expired order-quote suppression and
 Performance trial progress. No newly displayed percentage should imply proven trading profit.
 
 ## History-aware adviser checks
@@ -77,7 +77,22 @@ has no pending order. Shared execution claims must prevent duplicate fetches or 
 after a lost request. Partial fills cancel remainders; expired orders release cash. Late API charges
 must affect net profit and drawdown even after the last settlement.
 
-Check plan/readiness separation, consumed BUY intentions, unchanged HOLD plans with no validity
-extension, stale-plan labels, disabled provider state and visible independent-account results.
+Check plan/readiness separation: BUY/HOLD guidance persists through quote expiry, routine
+account-version increments and interrupted refreshes without extending execution validity. Actual
+fills, position changes and event rollover must replace the old instruction with explicit status.
+Also check disabled provider state and visible independent-account results.
+Advance BUY/HOLD sell targets should persist with the active plan across quote expiry while
+immediate execution figures remain freshness-gated. Check UP/DOWN identity, available vs reserved
+quantity, no target above payout, fee-inclusive profit vs proceeds, and target removal after a
+fill or event change. AI HOLD targets must not inherit a partial REDUCE quantity. Verify an AI
+HOLD target rests above the raw best bid even when numerical advice favors SELL, with fees
+recomputed for the final target and no invented limit beyond the contract's price range. An AI
+scalp can fill and realize a profit after entry/exit fees before settlement without relaxing the
+baseline's decision rule. Loss guidance must not portray a low sell limit as a stop order.
+Check that compact provider output contains only the selection, supplied evidence references
+and review timing, and that invalid action/option pairs or invented references are rejected.
+Old and new AI narrative must not appear in the dashboard. Local NO TRADE updates should make
+no provider calls or spend reservations when no other option exists, resume AI selection when
+an opportunity appears, and preserve in-flight requests. AI HOLD/REDUCE/EXIT remain selectable.
 Actual API latency, account entitlement and prospective profit evidence require a separately
 configured collector run; passing tests does not establish a profitable policy.

@@ -458,6 +458,7 @@ test('a legacy Coinbase artifact cannot adjust a Kalshi forecast or appear as it
     candidate: null,
     earlyCandidate: null,
     challengers: { active: null, candidates: [] },
+    patterns: { candidates: [], active: null, suites: [] },
   });
 });
 

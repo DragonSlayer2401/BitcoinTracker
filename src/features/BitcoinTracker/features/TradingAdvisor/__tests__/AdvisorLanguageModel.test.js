@@ -3,6 +3,7 @@ import {
   ADVISOR_LANGUAGE_MODEL_PRICING,
   ADVISOR_LANGUAGE_MODEL_PROMPT_VERSION,
   ADVISOR_LANGUAGE_MODEL_PROMPT_HASH,
+  ADVISOR_LANGUAGE_MODEL_OUTPUT_SCHEMA,
   createAdvisorLanguageModelProvider,
   getAdvisorLanguageModelConfiguration,
   getAdvisorLanguageModelPublicConfiguration,
@@ -21,12 +22,14 @@ const config = (extra = {}) =>
     ...extra,
   });
 const evidence = (extra = {}) => ({
+  available: true,
   snapshotId: 'snapshot-1',
   observedAt: START,
   expiresAt: START + 15000,
   accountVersion: 2,
   options: [{ id: 'hold', action: 'HOLD' }],
   points: [{ id: 'point-1', observedAt: START }],
+  evidenceIds: ['point-1'],
   ...extra,
 });
 const output = (extra = {}) => ({
@@ -34,9 +37,6 @@ const output = (extra = {}) => ({
   optionId: 'hold',
   snapshotId: 'snapshot-1',
   evidenceRefs: ['point-1'],
-  rationale: 'The current evidence still supports the entry reason.',
-  thesis: 'The original trade thesis remains supported.',
-  invalidationConditions: ['Sustained probability deterioration or unavailable exit liquidity.'],
   reviewHorizon: '15s',
   ...extra,
 });
@@ -134,6 +134,16 @@ test('request uses the verified model, strict schema, fixed prompt, no storage o
   });
   expect(body.tools).toBeUndefined();
   expect(body.text.format).toMatchObject({ type: 'json_schema', strict: true });
+  expect(body.text.format.schema).toEqual(ADVISOR_LANGUAGE_MODEL_OUTPUT_SCHEMA);
+  expect(body.text.format.schema.required).toEqual([
+    'action',
+    'optionId',
+    'snapshotId',
+    'evidenceRefs',
+    'reviewHorizon',
+  ]);
+  expect(Object.keys(body.text.format.schema.properties)).toEqual(body.text.format.schema.required);
+  expect(body.text.format.schema.additionalProperties).toBe(false);
   expect(body.instructions).toContain('untrusted data');
   expect(body.instructions).toContain('A prior loss is never a reason to hold');
   expect(request.promptVersion).toBe(ADVISOR_LANGUAGE_MODEL_PROMPT_VERSION);
@@ -145,13 +155,166 @@ test('request uses the verified model, strict schema, fixed prompt, no storage o
   expect(request.body).not.toContain(SECRET);
 });
 
+test('sends compact choices without prose or duplicate execution state while retaining financial evidence', () => {
+  const contract = {
+    ticker: 'BTC-TEST',
+    target: 84000,
+    startsAt: START - 30000,
+    expiresAt: START + 60000,
+  };
+  const policy = { probabilityReserve: 0.1, maxPositionCost: 10, minimumExitAdvantage: 0.02 };
+  const exitPlan = {
+    limitPrice: 0.71,
+    netProceeds: 3.45,
+    estimatedFee: 0.1,
+    costBasis: 3,
+    explanation: 'OLD EXIT NARRATION',
+    fillAssumption: 'OLD FILL NARRATION',
+  };
+  const supplied = evidence({
+    contract,
+    policy,
+    points: [
+      {
+        id: 'point-1',
+        observedAt: START,
+        snapshotId: 'repeated-snapshot',
+        aboveProbability: 0.65,
+        yesSaleNet: 0.6,
+        minuteVolatility: 0.01,
+        yesAskDepth: 120,
+        rationale: 'OLD POINT NARRATION',
+      },
+    ],
+    account: {
+      id: 'account-1',
+      cash: 90,
+      reservedCapital: 2,
+      openRisk: 8,
+      executableEquity: 98,
+      drawdown: 2,
+    },
+    position: {
+      id: 'position-1',
+      side: 'yes',
+      quantity: 5,
+      costBasis: 3,
+      averagePrice: 0.6,
+      ageMs: 30000,
+      entryProbability: 0.75,
+      entryRationale: 'OLD ENTRY NARRATION',
+      entryThesis: 'OLD THESIS NARRATION',
+    },
+    previousPlan: {
+      id: 'plan-1',
+      action: 'HOLD',
+      side: 'yes',
+      quantity: 5,
+      assessedAt: START - 15000,
+      expired: false,
+      rationale: 'OLD PLAN NARRATION',
+      thesis: 'OLD PLAN THESIS',
+      invalidationConditions: ['OLD CONDITION NARRATION'],
+    },
+    probabilityChange: -0.1,
+    options: [
+      {
+        id: 'hold',
+        action: 'HOLD',
+        advice: {
+          id: 'execution-id',
+          contract,
+          policy,
+          accountVersion: 2,
+          evaluatedAt: START,
+          validUntil: START + 15000,
+          side: 'yes',
+          quantity: 5,
+          probability: 0.65,
+          limitPrice: 0.61,
+          maxCost: 0,
+          quotedFee: 0.08,
+          expectedProceeds: 3,
+          minimumNetProceeds: 2.95,
+          holdExpectedValue: 3.25,
+          expectedNetValue: -0.25,
+          conservativeExpectedNetValue: -0.75,
+          exitPlan,
+        },
+      },
+    ],
+    evidenceIds: ['point-1', 'account-1', 'position-1', 'plan-1'],
+  });
+  const original = JSON.stringify(supplied);
+  const request = getAdvisorLanguageModelRequest(supplied, config());
+  const compact = JSON.parse(JSON.parse(request.body).input[0].content[0].text).evidence;
+  expect(compact).toMatchObject({
+    contract,
+    policy,
+    account: supplied.account,
+    probabilityChange: -0.1,
+    position: {
+      side: 'yes',
+      quantity: 5,
+      costBasis: 3,
+      averagePrice: 0.6,
+      ageMs: 30000,
+      entryProbability: 0.75,
+    },
+    previousPlan: {
+      action: 'HOLD',
+      side: 'yes',
+      quantity: 5,
+      assessedAt: START - 15000,
+      expired: false,
+    },
+    points: [
+      {
+        id: 'point-1',
+        observedAt: START,
+        aboveProbability: 0.65,
+        yesSaleNet: 0.6,
+        minuteVolatility: 0.01,
+        yesAskDepth: 120,
+      },
+    ],
+    options: [
+      {
+        id: 'hold',
+        action: 'HOLD',
+        terms: {
+          side: 'yes',
+          quantity: 5,
+          probability: 0.65,
+          limitPrice: 0.61,
+          maxCost: 0,
+          quotedFee: 0.08,
+          expectedProceeds: 3,
+          minimumNetProceeds: 2.95,
+          holdExpectedValue: 3.25,
+          expectedNetValue: -0.25,
+          conservativeExpectedNetValue: -0.75,
+          exitPlan: { limitPrice: 0.71, netProceeds: 3.45, estimatedFee: 0.1, costBasis: 3 },
+        },
+      },
+    ],
+  });
+  expect(compact.options[0].terms).not.toHaveProperty('policy');
+  expect(compact.options[0].terms).not.toHaveProperty('contract');
+  expect(compact.options[0].terms).not.toHaveProperty('accountVersion');
+  expect(JSON.stringify(compact)).not.toContain('NARRATION');
+  expect(JSON.stringify(compact)).not.toContain('OLD PLAN THESIS');
+  expect(JSON.stringify(compact).length).toBeLessThan(original.length);
+  expect(JSON.stringify(supplied)).toBe(original);
+});
+
 test('bounds the entire UTF-8 request and refuses circular, future, expired or oversized evidence without spending', async () => {
   const settings = config({ ADVISOR_LLM_MAX_REQUEST_BYTES: '8192' });
   expect(
     getAdvisorLanguageModelRequest(evidence({ points: [{ text: '界'.repeat(5000) }] }), settings),
   ).toBeNull();
   const circular = evidence();
-  circular.cycle = circular;
+  circular.policy = circular;
   expect(getAdvisorLanguageModelRequest(circular, settings)).toBeNull();
   const fixture = setup();
   expect((await fixture.invoke({ evidence: evidence({ observedAt: START + 1 }) })).status).toBe(
@@ -176,6 +339,17 @@ test('disabled mode and absent durable budget enforcement can never call a provi
   expect(unguarded.fetchImpl).not.toHaveBeenCalled();
 });
 
+test.each([{ available: false }, { available: undefined }, { options: [] }, { options: null }])(
+  'does not spend on evidence without available choices: %j',
+  async (unavailable) => {
+    const fixture = setup();
+    const result = await fixture.invoke({ evidence: evidence(unavailable) });
+    expect(result.status).toBe('invalid_input');
+    expect(fixture.reserveBudget).not.toHaveBeenCalled();
+    expect(fixture.fetchImpl).not.toHaveBeenCalled();
+  },
+);
+
 test('reserves worst-case spend before inference and records exact usage, identity and current timestamps', async () => {
   const fixture = setup();
   fixture.fetchImpl.mockImplementation(async () => {
@@ -194,7 +368,7 @@ test('reserves worst-case spend before inference and records exact usage, identi
     usage: { inputTokens: 1000, outputTokens: 300 },
     inferenceCostUsd: 0.005,
     responseId: 'resp_test',
-    output: output(),
+    output: expect.objectContaining(output()),
   });
   expect(fixture.reserveBudget.mock.invocationCallOrder[0]).toBeLessThan(
     fixture.fetchImpl.mock.invocationCallOrder[0],
@@ -220,7 +394,45 @@ test('reserves worst-case spend before inference and records exact usage, identi
     }),
   );
   expect(JSON.stringify(result)).not.toContain(SECRET);
+  expect(result.output.rationale).toBe(
+    'The AI selected this supplied option using the cited market evidence.',
+  );
+  expect(result.output.thesis).toBe(
+    'Reassess the selected option against updated market and account evidence.',
+  );
 });
+
+test.each([
+  [{ optionId: 'unavailable-exit' }, 'unknown_snapshot_or_option'],
+  [{ action: 'EXIT' }, 'unknown_snapshot_or_option'],
+  [{ evidenceRefs: ['invented-point'] }, 'unknown_evidence_reference'],
+  [{ evidenceRefs: ['point-1', 'point-1'] }, 'output_schema_invalid'],
+  [{ snapshotId: 'another-snapshot' }, 'snapshot_identity_changed'],
+  [{ rationale: 'The model must not generate narration.' }, 'output_schema_invalid'],
+  [{ reviewHorizon: '1h' }, 'output_schema_invalid'],
+])(
+  'rejects unsupplied or noncompact choices before they become recommendations: %j',
+  async (patch, reason) => {
+    const fixture = setup();
+    fixture.fetchImpl.mockResolvedValue(
+      response({
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: JSON.stringify(output(patch)) }],
+          },
+        ],
+      }),
+    );
+    expect(await fixture.invoke()).toMatchObject({
+      status: 'invalid_response',
+      reason,
+      output: null,
+      inferenceCostUsd: 0.005,
+    });
+  },
+);
 
 test('durable denial or a reservation error never invokes the model and never leaks database errors', async () => {
   const denied = setup({
@@ -397,6 +609,7 @@ test('HTTP errors, oversized replies and failed accounting return safe failures 
   http.fetchImpl.mockResolvedValue(new Response(SECRET, { status: 401 }));
   const error = await http.invoke();
   expect(error.status).toBe('provider_error');
+  expect(error.reason).toBe('provider_authentication_failed');
   expect(JSON.stringify(error)).not.toContain(SECRET);
   expect(http.fetchImpl).toHaveBeenCalledTimes(1);
   const oversized = setup();
@@ -411,4 +624,41 @@ test('HTTP errors, oversized replies and failed accounting return safe failures 
   expect(failedResult.status).toBe('budget_unavailable');
   expect(failedResult.output).toBeNull();
   expect(JSON.stringify(failedResult)).not.toContain(SECRET);
+});
+
+test.each([
+  [400, 'invalid_json_schema', 'provider_request_rejected'],
+  [403, 'invalid_request_error', 'provider_access_denied'],
+  [429, 'insufficient_quota', 'provider_quota_exhausted'],
+  [429, 'rate_limit_exceeded', 'provider_rate_limited'],
+])('records actionable, sanitized HTTP diagnostics for %s', async (status, code, reason) => {
+  const fixture = setup();
+  fixture.fetchImpl.mockResolvedValue(
+    new Response(JSON.stringify({ error: { code, message: SECRET } }), { status }),
+  );
+  const result = await fixture.invoke();
+  expect(result).toMatchObject({
+    status: 'provider_error',
+    reason,
+    httpStatus: status,
+    providerErrorCode: code,
+  });
+  expect(JSON.stringify(result)).not.toContain(SECRET);
+  expect(fixture.fetchImpl).toHaveBeenCalledTimes(1);
+});
+
+test('quota failures pause paid requests until provider restart, including message-only quota errors', async () => {
+  const fixture = setup();
+  fixture.fetchImpl.mockResolvedValue(
+    new Response(JSON.stringify({ error: 'API account quota exhausted; check billing.' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  );
+  expect((await fixture.invoke()).reason).toBe('provider_quota_exhausted');
+  fixture.setClock(START + 60000);
+  const retry = await fixture.invoke({ requestId: 'request-2' });
+  expect(retry).toMatchObject({ reason: 'provider_quota_exhausted', inferenceCostUsd: 0 });
+  expect(fixture.fetchImpl).toHaveBeenCalledTimes(1);
+  expect(fixture.reserveBudget).toHaveBeenCalledTimes(1);
 });

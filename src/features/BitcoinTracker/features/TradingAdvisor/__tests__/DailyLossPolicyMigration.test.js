@@ -6,7 +6,10 @@ import { getAdvisorPortfolio } from '@/services/research/tradingAdvisor/tradingA
 import { createConfiguredTradingAdvisorService } from '@/services/research/tradingAdvisor/tradingAdvisor.service';
 import { createTradingPolicyTrialRepository } from '@/services/research/tradingAdvisor/tradingPolicyTrials.repository';
 import { createTradingPolicyTrialService } from '@/services/research/tradingAdvisor/tradingPolicyTrials.service';
-import { createTradingAdvisorPolicy } from '../utils/advisorPolicy.utils';
+import {
+  createAdvisorResearchPolicy,
+  createTradingAdvisorPolicy,
+} from '../utils/advisorPolicy.utils';
 import { getTradingAdvice, TRADING_ADVISOR_POLICY } from '../utils/tradingAdvisor.utils';
 import { START, contract, bookAt, forecastAt, outcomeAt } from './TradingAdvisor.fixtures';
 
@@ -375,6 +378,8 @@ test('a migrated v2 policy starts fresh prospective trials and leaves the old sa
   expect(report.policy.id).not.toBe(previous.policy.id);
   expect(report.policy.dailyLossLimitEnabled).toBe(false);
   expect(report.trials.registeredAt).toBe(clock);
+  expect(report.trials.policyId).toBe(createAdvisorResearchPolicy(report.policy).id);
+  expect(report.trials.maxEntryContracts).toBe(1);
   expect(report.trials.enrolledContracts).toBe(0);
   expect(report.trials.activeStrategyId).toBe('standard');
   expect(await trialRepository.readState(previous.policy.id)).toEqual(oldState);

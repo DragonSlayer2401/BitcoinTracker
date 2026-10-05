@@ -1,6 +1,7 @@
 const money = (value) => Math.round(value * 1e6) / 1e6;
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const timestamp = (value) => Number.isSafeInteger(value) && value > 0;
+const researchPolicySuffix = '-research-one-contract-v1';
 
 export const ADVISOR_STRATEGIES = Object.freeze([
   'standard',
@@ -84,10 +85,22 @@ export function createTradingAdvisorPolicy({
 
 /** Recognize only the published risk profiles and one-change experiment variants. */
 export function isAdvisorV2Policy(policy) {
+  const hasResearchSizing = policy?.maxEntryContracts !== undefined;
+  if (
+    hasResearchSizing &&
+    (policy.maxEntryContracts !== 1 ||
+      typeof policy.id !== 'string' ||
+      !policy.id.endsWith(researchPolicySuffix))
+  )
+    return false;
+  const originalId = hasResearchSizing
+    ? policy.id.slice(0, -researchPolicySuffix.length)
+    : policy?.id;
   if (
     policy?.version !== 2 ||
-    typeof policy.id !== 'string' ||
-    !/^kalshi-advisor-v2(?:-[a-z0-9][a-z0-9-]{0,79})?$/.test(policy.id)
+    typeof originalId !== 'string' ||
+    !/^kalshi-advisor-v2(?:-[a-z0-9][a-z0-9-]{0,79})?$/.test(originalId) ||
+    (!hasResearchSizing && originalId.endsWith(researchPolicySuffix))
   )
     return false;
   try {
@@ -97,7 +110,7 @@ export function isAdvisorV2Policy(policy) {
       variant: policy.strategyId,
       dailyLossLimitEnabled: policy.dailyLossLimitEnabled ?? true,
       runId:
-        policy.id === 'kalshi-advisor-v2' ? null : policy.id.slice('kalshi-advisor-v2-'.length),
+        originalId === 'kalshi-advisor-v2' ? null : originalId.slice('kalshi-advisor-v2-'.length),
     });
     if (
       policy.dailyLossLimitEnabled !== undefined &&
@@ -107,11 +120,22 @@ export function isAdvisorV2Policy(policy) {
     return Object.entries(expected).every(([key, value]) =>
       key === 'dailyLossLimitEnabled' && policy.dailyLossLimitEnabled === undefined
         ? true
-        : policy[key] === value,
+        : (key === 'id' ? originalId : policy[key]) === value,
     );
   } catch {
     return false;
   }
+}
+
+/** A new prospective trial identity changes entry size without resetting the original account. */
+export function createAdvisorResearchPolicy(policy) {
+  if (!isAdvisorV2Policy(policy)) throw new Error('Research requires a valid V2 adviser policy.');
+  if (policy.maxEntryContracts === 1) return policy;
+  return Object.freeze({
+    ...policy,
+    id: `${policy.id}${researchPolicySuffix}`,
+    maxEntryContracts: 1,
+  });
 }
 
 /** All BTC positions share the same loss budget; displayed gains never offset missing prices. */

@@ -8,9 +8,16 @@ import { getResearchWriteTransaction, runResearchConnectionOperation } from './r
 import { initializeResearchSchema } from './research.schema';
 import { createChallengerTrialRepository } from './challengerTrial.repository';
 import { createChallengerDevelopmentRepository } from './challengerDevelopment.repository';
+import { createPatternResearchRepository } from './patterns/patternResearch.repository';
 import { isCollectorHeartbeat } from '@/features/BitcoinTracker/utils/collectorHealth.utils';
 import { EARLY_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/earlyModel.utils';
 import { CHALLENGER_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
+import {
+  PATTERN_MODEL_VERSION,
+  LEGACY_PATTERN_MODEL_VERSION,
+} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
+import { getPatternSuiteRegistrations } from '@/features/BitcoinTracker/utils/learning/patternCohorts.utils';
+import { evaluatePatternPromotion } from '@/features/BitcoinTracker/utils/learning/patternPromotion.utils';
 import {
   ResearchDataError,
   getCanonicalResearchJson,
@@ -159,6 +166,7 @@ async function insertEvidenceEvent(transaction, entry) {
 }
 
 export function createResearchRepository({ client, mode = 'local-database' }) {
+  const patternRepository = createPatternResearchRepository({ client });
   let schemaInitialization;
   let pendingWrite = Promise.resolve();
 
@@ -564,6 +572,7 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
         maximumRows,
       );
     },
+    getPatternPaperObservations: () => patternRepository.readPaperObservations(),
     async writeModelArtifact(artifact) {
       return runWriteOperation(async () => {
         const json = validateModelArtifact(artifact);
@@ -612,6 +621,30 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
         LEFT JOIN model_retirements USING(model_id) ORDER BY model_artifacts.sequence`);
       return result.rows.map(getStoredModel);
     },
+    async readPatternSuiteRegistrations() {
+      await initialize();
+      const result = await client.execute(
+        'SELECT payload, saved_at FROM model_artifacts ORDER BY sequence',
+      );
+      return getPatternSuiteRegistrations(
+        result.rows.map((row) => ({
+          ...JSON.parse(row.payload),
+          registeredAt: Number(row.saved_at),
+        })),
+      );
+    },
+    async readModelActivationHistory() {
+      await initialize();
+      const result =
+        await client.execute(`SELECT model_activations.sequence, model_id, activated_at, retired_at
+        FROM model_activations LEFT JOIN model_retirements USING(model_id) ORDER BY model_activations.sequence`);
+      return result.rows.map((row) => ({
+        sequence: Number(row.sequence),
+        modelId: row.model_id,
+        activatedAt: Number(row.activated_at),
+        retiredAt: row.retired_at === null ? null : Number(row.retired_at),
+      }));
+    },
     async getActiveModelArtifact() {
       await initialize();
       const result = await client.execute(
@@ -631,7 +664,17 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
         },
       };
     },
-    async activateModelArtifact(id, { activatedAt, shadowEvaluation } = {}) {
+    async activatePatternModelArtifact(id, { activatedAt, shadowEvaluation } = {}) {
+      return repository.activateModelArtifact(id, {
+        activatedAt,
+        shadowEvaluation,
+        patternActivation: true,
+      });
+    },
+    async activateModelArtifact(
+      id,
+      { activatedAt, shadowEvaluation, patternActivation = false } = {},
+    ) {
       if (
         !isResearchIdentifier(id) ||
         !isResearchTimestamp(activatedAt) ||
@@ -658,6 +701,14 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
           if (stored.rows[0].retired_at != null)
             throw new ResearchDataError('A retired model cannot be activated again.', 409);
           const artifact = JSON.parse(stored.rows[0].payload);
+          if (
+            artifact.version === LEGACY_PATTERN_MODEL_VERSION ||
+            (artifact.version === PATTERN_MODEL_VERSION && !patternActivation)
+          )
+            throw new ResearchDataError(
+              'Pattern models remain shadow-only unless deliberately activated through the current guarded pattern promotion path.',
+              409,
+            );
           if (activatedAt <= artifact.trainedAt)
             throw new ResearchDataError('Model activation must follow training.');
           const current = await transaction.execute(`SELECT payload, activated_at, retired_at
@@ -667,6 +718,73 @@ export function createResearchRepository({ client, mode = 'local-database' }) {
           const latest = current.rows[0];
           if (latest && activatedAt < Number(latest.activated_at))
             throw new ResearchDataError('Activation cannot replace a newer activation.', 409);
+          if (artifact.version === PATTERN_MODEL_VERSION) {
+            const previous = await transaction.execute({
+              sql: 'SELECT 1 FROM model_activations WHERE model_id = ? LIMIT 1',
+              args: [id],
+            });
+            if (previous.rows.length)
+              throw new ResearchDataError(
+                'A frozen pattern cohort can activate its model only once.',
+                409,
+              );
+            const persistedModels =
+              await transaction.execute(`SELECT payload, saved_at, retired_at FROM model_artifacts
+              LEFT JOIN model_retirements USING(model_id) ORDER BY model_artifacts.sequence`);
+            const candidates = persistedModels.rows.map((row) => ({
+              ...JSON.parse(row.payload),
+              ...(row.retired_at != null
+                ? { retirement: { retiredAt: Number(row.retired_at) } }
+                : {}),
+            }));
+            const patternSuites = getPatternSuiteRegistrations(
+              persistedModels.rows.map((row) => ({
+                ...JSON.parse(row.payload),
+                registeredAt: Number(row.saved_at),
+              })),
+            );
+            const persistedEvents = await transaction.execute(`SELECT payload FROM evidence_events
+              WHERE json_extract(payload, '$.event') IN ('decision', 'outcome') ORDER BY sequence LIMIT 250001`);
+            if (persistedEvents.rows.length > 250000)
+              throw new ResearchDataError(
+                'Pattern promotion exceeds the supported evidence audit size.',
+                409,
+              );
+            const incumbent =
+              latest && latest.retired_at == null
+                ? {
+                    ...JSON.parse(latest.payload),
+                    activation: { activatedAt: Number(latest.activated_at) },
+                  }
+                : null;
+            const verified = evaluatePatternPromotion(
+              artifact,
+              persistedEvents.rows.map((row) => JSON.parse(row.payload)),
+              {
+                now: shadowEvaluation.evaluatedAt,
+                patternSuites,
+                candidates,
+                incumbent,
+                activationHistory: (
+                  await transaction.execute(`SELECT model_activations.sequence, model_id, activated_at, retired_at
+                  FROM model_activations LEFT JOIN model_retirements USING(model_id) ORDER BY model_activations.sequence`)
+                ).rows.map((row) => ({
+                  sequence: Number(row.sequence),
+                  modelId: row.model_id,
+                  activatedAt: Number(row.activated_at),
+                  retiredAt: row.retired_at === null ? null : Number(row.retired_at),
+                })),
+              },
+            );
+            if (
+              !verified.eligibleForPromotion ||
+              getCanonicalResearchJson(verified) !== getCanonicalResearchJson(shadowEvaluation)
+            )
+              throw new ResearchDataError(
+                'Pattern activation requires a matching passing evaluation recomputed from persisted prospective evidence and the unchanged incumbent.',
+                409,
+              );
+          }
           if (artifact.version === CHALLENGER_MODEL_VERSION) {
             const prior = await transaction.execute({
               sql: 'SELECT 1 FROM model_activations WHERE model_id = ? LIMIT 1',
@@ -880,11 +998,19 @@ export const writeModelArtifact = async (artifact) =>
 export const saveModelArtifact = writeModelArtifact;
 export const readModelArtifact = async (id) => (await getDefaultRepository()).readModelArtifact(id);
 export const readModelArtifacts = async () => (await getDefaultRepository()).readModelArtifacts();
+export const readPatternSuiteRegistrations = async () =>
+  (await getDefaultRepository()).readPatternSuiteRegistrations();
+export const readModelActivationHistory = async () =>
+  (await getDefaultRepository()).readModelActivationHistory();
+export const getPatternPaperObservations = async () =>
+  (await getDefaultRepository()).getPatternPaperObservations();
 export const getActiveModelArtifact = async () =>
   (await getDefaultRepository()).getActiveModelArtifact();
 export const getActiveModel = getActiveModelArtifact;
 export const activateModelArtifact = async (id, activation) =>
   (await getDefaultRepository()).activateModelArtifact(id, activation);
+export const activatePatternModelArtifact = async (id, activation) =>
+  (await getDefaultRepository()).activatePatternModelArtifact(id, activation);
 export const retireModelArtifact = async (id, retirement) =>
   (await getDefaultRepository()).retireModelArtifact(id, retirement);
 export const acquireLearningLease = async (parameters) =>

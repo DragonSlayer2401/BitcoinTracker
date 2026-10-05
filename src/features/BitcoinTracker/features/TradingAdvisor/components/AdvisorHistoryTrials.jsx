@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import { Alert, Table } from 'react-bootstrap';
 import { formatDateTime } from '../../../utils/format.utils';
 import {
@@ -6,39 +7,41 @@ import {
   getAdvisorReason,
 } from '../utils/advisorDisplay.utils';
 
-const actionNames = {
-  BUY_YES: 'BUY UP',
-  BUY_NO: 'BUY DOWN',
-  HOLD: 'HOLD',
-  REDUCE: 'REDUCE',
-  EXIT: 'EXIT',
-  NO_TRADE: 'NO TRADE',
-};
 const outcomeNames = {
-  pending: 'Awaiting AI response',
-  proposed: 'Proposal recorded; awaiting current market checks',
+  pending: 'Updating',
+  proposed: 'Updating',
   accepted: 'Accepted for paper account',
   vetoed: 'Blocked by validation or risk checks',
-  fallback: 'Fallback: current rules used',
+  fallback: 'Numerical fallback',
+  local: 'Numerical plan',
 };
 
-/** Experiments remain visibly separate from the account's current plan and cannot promote themselves. */
-export default function AdvisorHistoryTrials({ trials }) {
+function HistoryExperiment({ trials }) {
+  const headingId = useId();
   const candidates = Array.isArray(trials?.strategies) ? trials.strategies : [];
   const providerDisabled = !trials?.provider || trials.provider.status === 'disabled';
   const hasRecordingProblem = Boolean(trials?.recordingError || trials?.recordingGaps > 0);
   const hasCostDiscrepancy = Boolean(trials?.costDiscrepancy);
   return (
-    <section aria-labelledby="advisor-history-trials-heading" className="border-top pt-3 mt-3">
-      <h3 id="advisor-history-trials-heading" className="h6">
+    <section aria-labelledby={headingId} className="border-top pt-3 mt-3">
+      <h3 id={headingId} className="h6">
         Independent paper-trading accounts
       </h3>
       <p className="small mb-2">
         <strong>Simulated trading experiments.</strong> Each policy buys, holds and sells in its own
         paper account. Accepted orders still need a simulated fill; proposals alone do not earn
-        money. These accounts do not replace the current adviser. Promotion requires independent
-        results and explicit review.
+        money. Choose AI-assisted to view its recommendations and matching account on the dashboard;
+        the numerical baseline remains a separate comparison. No policy is proven profitable yet.
       </p>
+      {trials?.id && (
+        <p className="small text-secondary text-break">
+          Experiment {trials.id} · started {formatDateTime(trials.registeredAt)}.
+          {Number.isFinite(trials.initialBankroll) &&
+            ` Each account started with ${formatAdvisorMoney(trials.initialBankroll)} of separate paper funding.`}
+          {Number.isSafeInteger(trials.maxEntryContracts) &&
+            ` Entry limit: ${trials.maxEntryContracts} contract${trials.maxEntryContracts === 1 ? '' : 's'}.`}
+        </p>
+      )}
       {(hasRecordingProblem || hasCostDiscrepancy) && (
         <Alert variant="warning" className="small py-2 mb-2">
           {hasRecordingProblem && (
@@ -119,9 +122,7 @@ export default function AdvisorHistoryTrials({ trials }) {
             const decision = candidate.latestDecision;
             return (
               <details key={candidate.id} className="small mb-2">
-                <summary>
-                  {candidate.label ?? candidate.id}: evidence and last experimental plan
-                </summary>
+                <summary>{candidate.label ?? candidate.id}: costs and activity</summary>
                 <dl className="row g-2 mt-1 mb-2">
                   <div className="col-6">
                     <dt>Trading fees</dt>
@@ -153,39 +154,14 @@ export default function AdvisorHistoryTrials({ trials }) {
                   </div>
                 </dl>
                 {decision ? (
-                  <div className="border rounded p-2">
-                    <p className="fw-semibold mb-1">
-                      Last recorded experiment:{' '}
-                      {actionNames[decision.action] ?? 'No action selected'}
-                    </p>
-                    <p className="mb-1">
-                      {outcomeNames[decision.status] ?? 'Recorded proposal'} ·{' '}
-                      {formatDateTime(decision.assessedAt)}
-                    </p>
-                    <p className="mb-1">
-                      {decision.rationale ?? getAdvisorReason(decision.reason)}
-                    </p>
+                  <div>
                     {decision.fallbackReason && (
                       <p className="mb-1">
                         Why fallback: {getAdvisorReason(decision.fallbackReason)}
                       </p>
                     )}
-                    {decision.thesis && (
-                      <p className="mb-1">
-                        <strong>Trade thesis: </strong>
-                        {decision.thesis}
-                      </p>
-                    )}
-                    {Array.isArray(decision.invalidationConditions) &&
-                      decision.invalidationConditions.length > 0 && (
-                        <p className="mb-1">
-                          <strong>Reassess when: </strong>
-                          {decision.invalidationConditions.join('; ')}
-                        </p>
-                      )}
                     <p className="mb-0 text-secondary">
-                      Recorded review horizon {formatDateTime(decision.reviewAt)}. Historical
-                      experimental output, not a current trade instruction.
+                      Last assessed {formatDateTime(decision.assessedAt)}.
                     </p>
                   </div>
                 ) : (
@@ -197,5 +173,20 @@ export default function AdvisorHistoryTrials({ trials }) {
         </>
       )}
     </section>
+  );
+}
+
+/** Show each frozen experiment independently, including earlier policy and provider versions. */
+export default function AdvisorHistoryTrials({ trials }) {
+  return (
+    <>
+      <HistoryExperiment trials={trials} />
+      {(trials?.previousExperiments ?? []).map((experiment) => (
+        <details key={experiment.id} className="small border-top pt-3 mt-3">
+          <summary>Previous history experiment · {formatDateTime(experiment.registeredAt)}</summary>
+          <HistoryExperiment trials={experiment} />
+        </details>
+      ))}
+    </>
   );
 }

@@ -7,7 +7,11 @@ import {
   createTradingAdvisorService,
 } from '@/services/research/tradingAdvisor/tradingAdvisor.service';
 import { createTradingPolicyTrialRepository } from '@/services/research/tradingAdvisor/tradingPolicyTrials.repository';
+import { createTradingPolicyTrialService } from '@/services/research/tradingAdvisor/tradingPolicyTrials.service';
+import { createAdvisorHistoryTrialRepository } from '@/services/research/tradingAdvisor/advisorHistoryTrials.repository';
+import { createAdvisorHistoryTrialService } from '@/services/research/tradingAdvisor/advisorHistoryTrials.service';
 import { getTradingAdvice, TRADING_ADVISOR_POLICY } from '../utils/tradingAdvisor.utils';
+import { createAdvisorResearchPolicy } from '../utils/advisorPolicy.utils';
 import { START, bookAt, contract, forecastAt, outcomeAt } from './TradingAdvisor.fixtures';
 
 jest.mock('server-only', () => ({}), { virtual: true });
@@ -17,6 +21,7 @@ let repository;
 let trialRepository;
 let service;
 let configuration;
+let trialPolicyId;
 let probability;
 let loadBook;
 let loadMarket;
@@ -52,8 +57,104 @@ async function configure() {
     riskLevel: 'balanced',
     expectedRevision: 0,
   });
+  trialPolicyId = createAdvisorResearchPolicy(configuration.policy).id;
   await advance(); // Register before the next event starts, without reading a book.
   clock = START + 60000;
+}
+
+async function createTrialOrdersWithoutMainOrder() {
+  await configure();
+  await service.stop();
+  // The main account entered earlier, while the registered trial accounts remained flat.
+  service = createConfiguredTradingAdvisorService({
+    repository,
+    loadBook,
+    loadMarket,
+    now: () => clock,
+  });
+  await advance();
+  clock += 2000;
+  await advance();
+  await service.stop();
+
+  clock += 13000;
+  service = makeService();
+  await advance();
+  const main = await service.getReport();
+  expect(main.latestAdvice.action).toBe('hold');
+  expect(main.portfolio.pendingIntents).toHaveLength(0);
+  expect(main.portfolio.positions).toHaveLength(1);
+  const trial = await trialRepository.readState(trialPolicyId);
+  expect(Object.keys(trial.strategies).sort()).toEqual([
+    'cautious-sizing',
+    'early-exit',
+    'selective-entry',
+    'standard',
+  ]);
+  for (const strategy of Object.values(trial.strategies)) {
+    expect(strategy.latestAdvice.action).toBe('buy');
+    expect(strategy.account.pendingIntents).toHaveLength(1);
+  }
+  loadBook.mockClear();
+}
+
+async function createOrdersWithBothTrialFamilies(historyDelayMs = 0) {
+  configuration = await repository.configure({
+    allocation: 50,
+    riskLevel: 'balanced',
+    expectedRevision: 0,
+  });
+  trialPolicyId = configuration.policy.id;
+  const historyRepository = createAdvisorHistoryTrialRepository({ client, now: () => clock });
+  const provider = {
+    configuration: {
+      enabled: false,
+      model: 'test-disabled-model',
+      promptVersion: 'test-prompt-v1',
+      minimumRequestIntervalMs: 30000,
+    },
+    invoke: jest.fn(),
+  };
+  const historyTrials = createAdvisorHistoryTrialService({
+    repository: historyRepository,
+    policy: configuration.policy,
+    provider,
+    now: () => clock,
+  });
+  service = createTradingAdvisorService({
+    repository: {
+      ...repository,
+      async saveAdvice(input) {
+        const advice = await repository.saveAdvice(input);
+        // History observes the saved main decision after its persistence completes.
+        clock += historyDelayMs;
+        return advice;
+      },
+    },
+    policy: configuration.policy,
+    trials: createTradingPolicyTrialService({ repository: trialRepository, now: () => clock }),
+    historyTrials,
+    loadBook,
+    loadMarket,
+    now: () => clock,
+  });
+  await advance();
+  const historyId = (await historyTrials.start()).id;
+  clock = START + 60000;
+  const decidedAt = clock;
+  await advance();
+  expect((await service.getReport()).portfolio.pendingIntents).toHaveLength(1);
+  const policyTrial = await trialRepository.readState(trialPolicyId);
+  for (const strategy of Object.values(policyTrial.strategies))
+    expect(strategy.account.pendingIntents).toHaveLength(1);
+  const history = await historyRepository.readState(historyId);
+  expect(history.strategies.incumbent.account.pendingIntents).toHaveLength(1);
+  expect(history.strategies.incumbent.account.pendingIntents[0].evaluatedAt).toBe(
+    decidedAt + historyDelayMs,
+  );
+  expect(provider.invoke).not.toHaveBeenCalled();
+  loadBook.mockClear();
+  return { historyRepository, historyId, decidedAt };
 }
 
 test('configured v2 advice persists the exact risk portfolio and is reproducible without fetching', async () => {
@@ -96,7 +197,7 @@ test('a partial shared execution releases cash once and keeps the main and shado
   expect(report.portfolio.pendingIntents).toHaveLength(0);
   expect(report.portfolio.positions[0].quantity).toBe(1);
   expect(report.portfolio.cash + report.portfolio.positions[0].costBasis).toBeCloseTo(50, 7);
-  const trial = await trialRepository.readState(configuration.policy.id);
+  const trial = await trialRepository.readState(trialPolicyId);
   expect(trial.strategies.standard.account.positions[0].quantity).toBe(1);
   expect(trial.strategies.standard.account.cash).toBeCloseTo(report.portfolio.cash, 7);
   expect(loadBook).toHaveBeenCalledTimes(2);
@@ -113,6 +214,172 @@ test('a partial shared execution releases cash once and keeps the main and shado
   expect(loadMarket).toHaveBeenCalledTimes(1);
 });
 
+test.each([false, true])(
+  'trial-only orders share one execution book at the minimum delay, including after restart: %s',
+  async (restart) => {
+    await createTrialOrdersWithoutMainOrder();
+    if (restart) {
+      await service.stop();
+      service = makeService();
+    }
+    const decidedAt = clock;
+    clock = decidedAt + 1999;
+    await advance();
+    expect(loadBook).not.toHaveBeenCalled();
+    const waiting = await trialRepository.readState(trialPolicyId);
+    for (const strategy of Object.values(waiting.strategies)) {
+      expect(strategy.account.pendingIntents).toHaveLength(1);
+      expect(strategy.account.positions).toHaveLength(0);
+    }
+
+    clock = decidedAt + 2000;
+    await advance();
+    expect(loadBook).toHaveBeenCalledTimes(1);
+    expect(loadBook).toHaveBeenCalledWith(contract.ticker);
+    const filled = await trialRepository.readState(trialPolicyId);
+    for (const strategy of Object.values(filled.strategies)) {
+      expect(strategy.account.pendingIntents).toHaveLength(0);
+      expect(strategy.account.positions).toHaveLength(1);
+      expect(filled.contracts[0].scores[strategy.id].orderFills).toBe(1);
+    }
+    const main = await service.getReport();
+    expect(main.latestAdvice.action).toBe('hold');
+    expect(main.portfolio.pendingIntents).toHaveLength(0);
+    await advance();
+    clock += 1;
+    await advance();
+    expect(loadBook).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each(['missing', 'rejected', 'late'])(
+  'a %s shared trial execution observation cancels every due order without a favorable retry',
+  async (failure) => {
+    await createTrialOrdersWithoutMainOrder();
+    loadBook.mockImplementation(async () => {
+      if (failure === 'rejected') throw new Error('Book unavailable');
+      if (failure === 'missing') return null;
+      clock += 14000;
+      return bookAt(clock);
+    });
+    clock += 2000;
+    await advance(null);
+    expect(loadBook).toHaveBeenCalledTimes(1);
+    const canceled = await trialRepository.readState(trialPolicyId);
+    for (const strategy of Object.values(canceled.strategies)) {
+      expect(strategy.account.pendingIntents).toHaveLength(0);
+      expect(strategy.account.positions).toHaveLength(0);
+      expect(strategy.account.cash).toBe(50);
+      expect(canceled.contracts[0].scores[strategy.id].orderFills).toBe(0);
+    }
+
+    loadBook.mockImplementation(async () => bookAt(clock));
+    await service.stop();
+    service = makeService();
+    clock += 1;
+    await advance(null);
+    expect(loadBook).toHaveBeenCalledTimes(1);
+    expect((await trialRepository.readState(trialPolicyId)).strategies).toEqual(
+      canceled.strategies,
+    );
+  },
+);
+
+test('expired trial-only orders release reservations without requesting an execution book', async () => {
+  await createTrialOrdersWithoutMainOrder();
+  clock += 15001;
+  await advance(null);
+  expect(loadBook).not.toHaveBeenCalled();
+  const expired = await trialRepository.readState(trialPolicyId);
+  for (const strategy of Object.values(expired.strategies)) {
+    expect(strategy.account.pendingIntents).toHaveLength(0);
+    expect(strategy.account.positions).toHaveLength(0);
+    expect(strategy.account.cash).toBe(50);
+    expect(expired.contracts[0].scores[strategy.id].orderFills).toBe(0);
+  }
+});
+
+test('one delayed book fills the main account and every eligible policy and history account', async () => {
+  const { historyRepository, historyId, decidedAt } = await createOrdersWithBothTrialFamilies();
+  clock = decidedAt + 1999;
+  await advance();
+  expect(loadBook).not.toHaveBeenCalled();
+  clock = decidedAt + 2000;
+  await advance();
+  expect(loadBook).toHaveBeenCalledTimes(1);
+  const main = await service.getReport();
+  expect(main.portfolio.pendingIntents).toHaveLength(0);
+  expect(main.portfolio.positions).toHaveLength(1);
+  const policyTrial = await trialRepository.readState(trialPolicyId);
+  for (const strategy of Object.values(policyTrial.strategies)) {
+    expect(strategy.account.pendingIntents).toHaveLength(0);
+    expect(strategy.account.positions).toHaveLength(1);
+  }
+  const history = await historyRepository.readState(historyId);
+  expect(history.strategies.incumbent.account.pendingIntents).toHaveLength(0);
+  expect(history.strategies.incumbent.account.positions).toHaveLength(1);
+  expect(history.strategies.incumbent.account.cash).toBe(main.portfolio.cash);
+  clock += 1;
+  await advance();
+  expect(loadBook).toHaveBeenCalledTimes(1);
+});
+
+test.each(['missing', 'rejected'])(
+  'a %s common book cancels main, policy and history orders without a second history request',
+  async (failure) => {
+    const { historyRepository, historyId, decidedAt } = await createOrdersWithBothTrialFamilies();
+    loadBook.mockImplementation(async () => {
+      if (failure === 'rejected') throw new Error('Book unavailable');
+      return null;
+    });
+    clock = decidedAt + 2000;
+    await advance();
+    expect(loadBook).toHaveBeenCalledTimes(1);
+    const main = await service.getReport();
+    const policyTrial = await trialRepository.readState(trialPolicyId);
+    const history = await historyRepository.readState(historyId);
+    const accounts = [
+      main.portfolio,
+      ...Object.values(policyTrial.strategies).map((strategy) => strategy.account),
+      ...Object.values(history.strategies).map((strategy) => strategy.account),
+    ];
+    for (const account of accounts) {
+      expect(account.pendingIntents).toHaveLength(0);
+      expect(account.positions).toHaveLength(0);
+      expect(account.cash).toBe(50);
+    }
+    loadBook.mockImplementation(async () => bookAt(clock));
+    clock += 1;
+    await advance();
+    expect(loadBook).toHaveBeenCalledTimes(1);
+  },
+);
+
+test('a history order becoming due during a common request waits for its own delayed observation', async () => {
+  const { historyRepository, historyId, decidedAt } = await createOrdersWithBothTrialFamilies(20);
+  loadBook.mockImplementationOnce(async () => {
+    clock += 500;
+    return bookAt(clock);
+  });
+  clock = decidedAt + 2000;
+  await advance();
+  expect(loadBook).toHaveBeenCalledTimes(1);
+  expect((await service.getReport()).portfolio.positions).toHaveLength(1);
+  const policyTrial = await trialRepository.readState(trialPolicyId);
+  for (const strategy of Object.values(policyTrial.strategies))
+    expect(strategy.account.positions).toHaveLength(1);
+  const waiting = await historyRepository.readState(historyId);
+  expect(waiting.strategies.incumbent.account.pendingIntents).toHaveLength(1);
+  expect(waiting.strategies.incumbent.account.positions).toHaveLength(0);
+
+  clock += 1;
+  await advance();
+  expect(loadBook).toHaveBeenCalledTimes(2);
+  const filled = await historyRepository.readState(historyId);
+  expect(filled.strategies.incumbent.account.pendingIntents).toHaveLength(0);
+  expect(filled.strategies.incumbent.account.positions).toHaveLength(1);
+});
+
 test('expired delayed execution releases main and shadow reservations without retrying a favorable book', async () => {
   await configure();
   await advance();
@@ -124,7 +391,7 @@ test('expired delayed execution releases main and shadow reservations without re
   expect(report.portfolio.pendingIntents).toHaveLength(0);
   expect(report.portfolio.cash).toBe(50);
   expect(report.portfolio.positions).toHaveLength(0);
-  const trial = await trialRepository.readState(configuration.policy.id);
+  const trial = await trialRepository.readState(trialPolicyId);
   expect(trial.strategies.standard.account.pendingIntents).toHaveLength(0);
   expect(trial.strategies.standard.account.cash).toBe(50);
   expect(
@@ -162,7 +429,7 @@ test('a restarted collector accepts official outcomes before its first new advan
   expect(loadMarket).not.toHaveBeenCalled();
 });
 
-test('a strategy activation changes only future decisions and keeps cash, risk and account identity', async () => {
+test('a research strategy activation leaves original decisions, cash and account identity unchanged', async () => {
   await configure();
   await advance();
   clock += 2000;
@@ -175,19 +442,15 @@ test('a strategy activation changes only future decisions and keeps cash, risk a
   const payload = JSON.stringify(transition);
   await client.execute({
     sql: 'INSERT INTO advisor_profit_transitions VALUES (?, ?, ?, ?, ?)',
-    args: [
-      configuration.policy.id,
-      1,
-      clock,
-      payload,
-      createHash('sha256').update(payload).digest('hex'),
-    ],
+    args: [trialPolicyId, 1, clock, payload, createHash('sha256').update(payload).digest('hex')],
   });
   await advance();
   const after = await repository.readState(configuration.policy.id);
   const selectedAdvice = await repository.readAdvice(after.advice[0].id);
-  expect(selectedAdvice.policy.strategyId).toBe('early-exit');
-  expect(selectedAdvice.policy.minimumExitAdvantage).toBe(0.005);
+  expect(selectedAdvice.policy.strategyId).toBe('standard');
+  expect(selectedAdvice.policy.minimumExitAdvantage).toBe(
+    configuration.policy.minimumExitAdvantage,
+  );
   expect(selectedAdvice.policy.maxDailyLoss).toBe(configuration.policy.maxDailyLoss);
   expect(selectedAdvice.policy.id).toBe(configuration.policy.id);
   expect(after.account.cash).toBe(cash);

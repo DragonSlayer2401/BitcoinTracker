@@ -58,6 +58,18 @@ export default function AdvisorPerformance({ report, isStale = false }) {
                   label="Estimated fees paid"
                   value={formatAdvisorMoney(performance.totalFees)}
                 />
+                {report.source && (
+                  <>
+                    <PerformanceValue
+                      label="AI usage cost"
+                      value={formatAdvisorMoney(performance.inferenceCost)}
+                    />
+                    <PerformanceValue
+                      label="Net P&L after AI costs"
+                      value={formatAdvisorMoney(performance.netProfit)}
+                    />
+                  </>
+                )}
                 <PerformanceValue
                   label="Largest realized drawdown"
                   value={formatAdvisorMoney(performance.maxRealizedDrawdown)}
@@ -114,7 +126,7 @@ export default function AdvisorPerformance({ report, isStale = false }) {
               </p>
             </>
           )}
-          <AdvisorStrategyTrials trials={report?.trials} />
+          {(!report?.source || report?.trials) && <AdvisorStrategyTrials trials={report?.trials} />}
           <AdvisorHistoryTrials trials={report?.historyTrials} />
         </Modal.Body>
         <Modal.Footer>

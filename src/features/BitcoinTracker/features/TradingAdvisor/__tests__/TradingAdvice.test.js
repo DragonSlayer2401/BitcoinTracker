@@ -121,7 +121,7 @@ test('equal probabilities with no edge give Wait, never a forced directional pur
   value.forecast.aboveProbability = 0.5;
   expect(getTradingAdvice(value)).toMatchObject({
     action: 'wait',
-    reason: 'insufficient_entry_edge_or_depth',
+    reason: 'insufficient_entry_edge',
   });
 });
 

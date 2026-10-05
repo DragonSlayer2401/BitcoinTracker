@@ -37,6 +37,19 @@ import { isChallengerArtifact } from '@/features/BitcoinTracker/utils/learning/c
 import { evaluateResearchExperiments } from '@/features/BitcoinTracker/utils/researchEvaluation.utils';
 import { createChallengerService } from './challenger.service';
 import { createCollectorHealthService } from './collectorHealth.service';
+import {
+  selectPatternCandidates,
+  advancePatternLearning,
+} from './patterns/patternLearning.service';
+import { evaluatePatternChallengers } from '@/features/BitcoinTracker/utils/patternEvaluation.utils';
+import {
+  isPatternModelArtifact,
+  hasPatternActivation,
+} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
+import {
+  evaluatePatternPromotion,
+  evaluatePatternActiveModel,
+} from '@/features/BitcoinTracker/utils/learning/patternPromotion.utils';
 
 const MINIMUM_NEW_WINDOWS_FOR_RETRAINING = 60;
 const LEARNING_LEASE_DURATION_MS = 120_000;
@@ -46,11 +59,20 @@ function isCurrentArtifact(model) {
   return isOutcomeModelArtifact(model) && model.outcomeDefinition === outcomeDefinition;
 }
 
-function selectResearchModels(artifacts, storedActive, pipeline = null) {
+function selectResearchModels(artifacts, storedActive, pipeline = null, now = Date.now()) {
   const matchesCurrentPipeline = (model) =>
-    !pipeline || matchesOutcomeModelPipeline(model, pipeline);
+    isPatternModelArtifact(model) ||
+    !pipeline ||
+    matchesOutcomeModelPipeline(
+      isPatternModelArtifact(model)
+        ? { ...model, featureVersion: model.baselineFeatureVersion }
+        : model,
+      pipeline,
+    );
   const active =
-    (isCurrentArtifact(storedActive) || isEarlyModelArtifact(storedActive)) &&
+    (isCurrentArtifact(storedActive) ||
+      isEarlyModelArtifact(storedActive) ||
+      hasPatternActivation(storedActive, now)) &&
     !storedActive.retirement &&
     matchesCurrentPipeline(storedActive)
       ? storedActive
@@ -83,6 +105,7 @@ function selectResearchModels(artifacts, storedActive, pipeline = null) {
     latest,
     candidate: canEvaluateLatestInShadow ? latest : null,
     fullActive,
+    patternActive: isPatternModelArtifact(active) ? active : null,
     retiredFull:
       models
         .filter(matchesCurrentPipeline)
@@ -199,12 +222,17 @@ export function createLearningService(repository) {
       repository.getActiveModelArtifact(),
     ]);
     let selected = selectResearchModels(artifacts, storedActive);
-    if (selected.earlyActive || selected.fullActive) {
+    if (selected.earlyActive || selected.fullActive || selected.patternActive) {
       const now = Date.now();
       const events = await repository.getLearningEvidenceRows();
-      const monitoring = selected.fullActive
-        ? evaluateFullActiveModel(selected.fullActive, events, { now })
-        : evaluateEarlyActiveModel(selected.earlyActive, events, { now });
+      const monitoring = selected.patternActive
+        ? evaluatePatternActiveModel(selected.patternActive, events, {
+            now,
+            patternSuites: (await repository.readPatternSuiteRegistrations?.()) ?? [],
+          })
+        : selected.fullActive
+          ? evaluateFullActiveModel(selected.fullActive, events, { now })
+          : evaluateEarlyActiveModel(selected.earlyActive, events, { now });
       if (monitoring.status === 'disabled') {
         // Stop serving degraded influence immediately. The leased analysis cycle records
         // retirement durably; read endpoints never mutate models or activate replacements.
@@ -223,6 +251,11 @@ export function createLearningService(repository) {
       active: selected.active,
       candidate: selected.candidate,
       earlyCandidate: selected.earlyCandidate,
+      patterns: {
+        candidates: selectPatternCandidates(artifacts),
+        active: selected.patternActive,
+        suites: (await repository.readPatternSuiteRegistrations?.()) ?? [],
+      },
       challengers: await challengerService.getChallengerModels({ artifacts, storedActive }),
     };
   }
@@ -243,11 +276,22 @@ export function createLearningService(repository) {
   }
 
   async function readState(now) {
-    const [events, artifacts, storedActive, forecasts] = await Promise.all([
+    const [
+      events,
+      artifacts,
+      storedActive,
+      forecasts,
+      paperObservations,
+      patternSuites,
+      activationHistory,
+    ] = await Promise.all([
       repository.getLearningEvidenceRows(),
       repository.readModelArtifacts(),
       repository.getActiveModelArtifact(),
       readSavedForecasts(),
+      repository.getPatternPaperObservations?.() ?? [],
+      repository.readPatternSuiteRegistrations?.() ?? [],
+      repository.readModelActivationHistory?.() ?? [],
     ]);
     const verifiedRows = getVerifiedLearningRows(events, now, { outcomeDefinition }).rows;
     const { rows: learningRows, pipeline } = selectLearningPipelineRows(verifiedRows);
@@ -262,7 +306,25 @@ export function createLearningService(repository) {
       latestEarly,
       retiredEarly,
       earlyCandidate,
-    } = selectResearchModels(artifacts, storedActive, pipeline);
+      patternActive,
+    } = selectResearchModels(artifacts, storedActive, pipeline, now);
+    const patternCandidates = selectPatternCandidates(artifacts);
+    const patternMonitoring = patternActive
+      ? evaluatePatternActiveModel(patternActive, events, { now, patternSuites })
+      : null;
+    const patternPromotion =
+      patternActive?.activation?.shadowEvaluation ??
+      evaluatePatternPromotion(
+        patternCandidates.find((model) => model.kind === 'combined'),
+        events,
+        {
+          now,
+          patternSuites,
+          candidates: patternCandidates,
+          incumbent: storedActive,
+          activationHistory,
+        },
+      );
     const analysis = analyzeForecastEvidence(events, now, { outcomeDefinition });
     analysis.savedJournal = analyzeSavedForecasts(forecasts, now);
     const split = splitLearningWindows(learningRows);
@@ -317,22 +379,44 @@ export function createLearningService(repository) {
     });
     return {
       events,
+      artifacts,
       latest,
       latestEarly,
       earlyActiveForMonitoring: earlyActive,
       fullActiveForMonitoring: fullActive,
+      patternActiveForMonitoring: patternActive,
       learningRows,
       result: {
         generatedAt: now,
         analysis,
         comparison: evaluateResearchExperiments(events, { now }),
+        patterns: {
+          candidates: patternCandidates,
+          suites: patternSuites,
+          active: patternMonitoring?.status === 'disabled' ? null : patternActive,
+          promotion: patternPromotion,
+          monitoring: patternMonitoring,
+          comparison: evaluatePatternChallengers(events, { now, paperObservations, patternSuites }),
+          status:
+            patternMonitoring?.status === 'disabled'
+              ? 'disabled'
+              : patternActive
+                ? 'active'
+                : patternCandidates.length
+                  ? 'shadow'
+                  : 'collecting',
+        },
         collectorHealth: await collectorHealthService
           .getCollectorHealth({ now, events })
           .catch(() => null),
         challengers,
         active:
           challengers.active ??
-          ((earlyActive && isEarlyDisabled) || (fullActive && isFullDisabled) ? null : active),
+          ((earlyActive && isEarlyDisabled) ||
+          (fullActive && isFullDisabled) ||
+          patternMonitoring?.status === 'disabled'
+            ? null
+            : active),
         candidate,
         earlyCandidate,
         shadow,
@@ -474,6 +558,18 @@ export function createLearningService(repository) {
       };
     try {
       let state = await readState(now);
+      if (
+        state.patternActiveForMonitoring &&
+        state.result.patterns.monitoring?.status === 'disabled'
+      ) {
+        const active = state.patternActiveForMonitoring;
+        const reason = state.result.patterns.monitoring.reason;
+        await repository.retireModelArtifact(active.id, { retiredAt: now, reason });
+        return {
+          ...(await getLearningStatus({ now })),
+          lastRun: { status: 'disabled', modelId: active.id, reason },
+        };
+      }
       if (state.fullActiveForMonitoring && state.result.full.monitoring?.status === 'disabled') {
         const active = state.fullActiveForMonitoring;
         const reason = state.result.full.monitoring.reason;
@@ -496,6 +592,7 @@ export function createLearningService(repository) {
       // Older lanes compare against the original baseline, not an active challenger.
       // They cannot replace it without a paired comparison to current production.
       const hasActiveChallenger =
+        Boolean(state.patternActiveForMonitoring) ||
         isChallengerArtifact(state.result.challengers.active) ||
         Boolean(state.result.challengers.confirmation);
       const full = hasActiveChallenger
@@ -513,11 +610,28 @@ export function createLearningService(repository) {
             reason: 'A validated challenger is active or confirmation is running.',
           }
         : await advanceEarlyModel(state, now, { deferFit: full.trained });
-      const challengerResult = await challengerService.runChallengerCycle({ now, leaseHeld: true });
+      const challengerResult = state.patternActiveForMonitoring
+        ? {
+            lastRun: {
+              status: 'deferred',
+              reason: 'An activated pattern model is monitored separately.',
+            },
+          }
+        : await challengerService.runChallengerCycle({ now, leaseHeld: true });
+      const patternResult = await advancePatternLearning(
+        repository,
+        state.events,
+        state.artifacts,
+        now,
+      );
       const result = await getLearningStatus({ now });
       return {
         ...result,
         lastRun: full.lastRun,
+        patterns: {
+          ...result.patterns,
+          lastRun: { status: patternResult.status, reason: patternResult.reason ?? null },
+        },
         challengers: { ...result.challengers, lastRun: challengerResult.lastRun },
         early: {
           ...result.early,
@@ -536,10 +650,35 @@ export function createLearningService(repository) {
     });
     return runningCycle;
   }
+  /** Explicit operator action only; scheduled analysis reports eligibility without activating. */
+  async function activatePatternCandidate({ modelId, now = Date.now() } = {}) {
+    const [artifacts, events, patternSuites, incumbent, activationHistory] = await Promise.all([
+      repository.readModelArtifacts(),
+      repository.getLearningEvidenceRows(),
+      repository.readPatternSuiteRegistrations(),
+      repository.getActiveModelArtifact(),
+      repository.readModelActivationHistory(),
+    ]);
+    const model = artifacts.find((artifact) => artifact.id === modelId);
+    const evaluation = evaluatePatternPromotion(model, events, {
+      now,
+      patternSuites,
+      candidates: selectPatternCandidates(artifacts),
+      incumbent,
+      activationHistory,
+    });
+    if (!evaluation.eligibleForPromotion) return { activated: false, evaluation };
+    const activated = await repository.activatePatternModelArtifact(modelId, {
+      activatedAt: now,
+      shadowEvaluation: evaluation,
+    });
+    return { activated: true, model: activated, evaluation };
+  }
   return {
     getResearchModels,
     getLearningStatus,
     runLearningCycle,
+    activatePatternCandidate,
     enrollChallengerCandidates: challengerService.enrollChallengerCandidates,
   };
 }
@@ -548,4 +687,5 @@ const service = createLearningService(researchRepository);
 export const getLearningStatus = service.getLearningStatus;
 export const runLearningCycle = service.runLearningCycle;
 export const getResearchModels = service.getResearchModels;
+export const activatePatternCandidate = service.activatePatternCandidate;
 export const enrollChallengerCandidates = service.enrollChallengerCandidates;

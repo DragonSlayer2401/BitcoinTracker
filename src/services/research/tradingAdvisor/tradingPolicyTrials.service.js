@@ -1,5 +1,9 @@
 import 'server-only';
-import { getTradingPolicyTrialReport } from './tradingPolicyTrials.utils';
+import { randomUUID } from 'node:crypto';
+import {
+  getTradingPolicyPendingExecutions,
+  getTradingPolicyTrialReport,
+} from './tradingPolicyTrials.utils';
 
 /** Consume the collector's existing observations; this service has no exchange API client. */
 export function createTradingPolicyTrialService({ repository, now = Date.now }) {
@@ -10,9 +14,34 @@ export function createTradingPolicyTrialService({ repository, now = Date.now }) 
       policyId = policy.id;
       return getTradingPolicyTrialReport(state, now());
     },
-    observe({ contract = null, forecast, book = null, observedAt = now() }) {
+    async getPendingExecutions() {
+      return getTradingPolicyPendingExecutions(
+        policyId ? await repository.readState(policyId) : null,
+      );
+    },
+    async getPendingSettlementContracts() {
+      const state = policyId ? await repository.readState(policyId) : null;
+      return (state?.contracts ?? []).filter((row) => !row.outcome).map((row) => row.contract);
+    },
+    async claimExecutionObservation(contract, observedAt = now()) {
+      if (!policyId) return null;
+      const sourceId = `execution:${randomUUID()}`;
+      const state = await repository.record(policyId, {
+        kind: 'execution-request',
+        contract,
+        observedAt,
+        sourceId,
+      });
+      return (
+        getTradingPolicyPendingExecutions(state).find(
+          ({ attempt }) => attempt?.sourceId === sourceId,
+        )?.attempt ?? null
+      );
+    },
+    observe({ contract = null, forecast, book = null, observedAt = now(), sourceId }) {
       if (!policyId) return Promise.resolve(null);
       const input = { kind: 'observation', contract, book, observedAt };
+      if (sourceId !== undefined) input.sourceId = sourceId;
       if (forecast !== undefined) {
         // Keep replayable prediction identity/probability, without copying the large raw
         // research snapshot again into each strategy's prospective trading journal.

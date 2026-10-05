@@ -19,6 +19,7 @@ import {
   validateAdvisorCandidateDecision,
   simulateAdvisorCandidateExecution,
 } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorCandidate.utils';
+import { createAdvisorPlan } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPlan.utils';
 import {
   getKalshiContract,
   getKalshiOutcome,
@@ -49,6 +50,7 @@ export function createAdvisorHistoryTrial({ id, policy, provider, registeredAt }
     version: ADVISOR_HISTORY_TRIAL_VERSION,
     rules: copy(ADVISOR_HISTORY_TRIAL_RULES),
     lastObservedAt: registeredAt,
+    lastMarketObservedAt: null,
     contracts: [],
     books: [],
     modelIdentity: null,
@@ -61,6 +63,10 @@ export function createAdvisorHistoryTrial({ id, policy, provider, registeredAt }
           account: createAdvisorAccount(policy),
           history: [],
           plan: null,
+          currentPlan: null,
+          latestAdvice: null,
+          recentActivity: [],
+          guidanceDecision: null,
           risk: null,
           latestDecision: null,
           pendingRequest: null,
@@ -96,12 +102,15 @@ function usableBook(strategy, book) {
 
 function mark(state, strategy, at, releasedIntentId = null) {
   const portfolio = getAdvisorPortfolio(strategy.account, at, releasedIntentId);
-  const valuation = getAdvisorValuation({
-    portfolio,
-    books: state.books.map((book) => usableBook(strategy, book)).filter(Boolean),
-    now: at,
-    policy: state.policy,
-  });
+  const valuation = {
+    ...getAdvisorValuation({
+      portfolio,
+      books: state.books.map((book) => usableBook(strategy, book)).filter(Boolean),
+      now: at,
+      policy: state.policy,
+    }),
+    accountVersion: strategy.account.version,
+  };
   const history = getAdvisorRiskHistory(
     strategy.risk?.history,
     valuation,
@@ -125,6 +134,16 @@ function mark(state, strategy, at, releasedIntentId = null) {
 function recordDecision(strategy, value) {
   strategy.latestDecision = value;
   strategy.decisions = [...strategy.decisions, value].slice(-24);
+}
+
+function recordActivity(strategy, value) {
+  strategy.recentActivity = [
+    {
+      id: `${strategy.id}:${value.kind}:${value.adviceId ?? value.positionId ?? ''}:${value.recordedAt}`,
+      ...value,
+    },
+    ...(strategy.recentActivity ?? []),
+  ].slice(0, 50);
 }
 
 function applyAdvice(state, strategy, output, input, portfolio, status, extra = {}) {
@@ -169,6 +188,27 @@ function applyAdvice(state, strategy, output, input, portfolio, status, extra = 
     reviewAt: extra.nextReviewAt ?? Math.min(at + state.policy.cadenceMs, input.contract.expiresAt),
     status,
   });
+  // Market snapshots already live in observation evidence. The dashboard needs
+  // only the recommendation, not another copy of books and nested portfolios.
+  const { forecast: _forecast, book: _book, portfolio: _portfolio, ...displayAdvice } = advice;
+  strategy.latestAdvice = displayAdvice;
+  recordActivity(strategy, { ...displayAdvice, kind: 'advice', recordedAt: at });
+  const previousPlan = strategy.currentPlan ?? null;
+  const currentPlan = createAdvisorPlan(advice, previousPlan);
+  // The reservation above is part of this assessment. Subsequent fills, waits or
+  // provider responses must never extend the plan or relabel its account version.
+  if (currentPlan && currentPlan !== previousPlan) {
+    strategy.currentPlan = {
+      ...currentPlan,
+      policyId: state.policy.id,
+      accountVersion: strategy.account.version,
+      ...(status === 'accepted' && extra.invalidationConditions
+        ? { invalidationConditions: copy(extra.invalidationConditions) }
+        : {}),
+      ...(extra.action === 'REDUCE' ? { action: 'reduce' } : {}),
+    };
+    strategy.guidanceDecision = copy(strategy.latestDecision);
+  }
   return advice;
 }
 
@@ -187,6 +227,7 @@ function execute(state, strategy, intent, book, at) {
   if (!event) return;
   const applied = applyAdvisorEvent(strategy.account, { ...event, adviceId: intent.id });
   strategy.account = applied.account;
+  recordActivity(strategy, { ...event, adviceId: intent.id, realizedPnl: applied.realizedPnl });
   const row = state.contracts.find((row) => row.contract.ticker === intent.contract.ticker);
   if (!row) throw new Error('A shadow order requires its original prospective contract.');
   const score = row.scores[strategy.id];
@@ -229,15 +270,17 @@ function settle(state, input) {
       if (intent.contract.ticker === contract.ticker) execute(state, strategy, intent, null, at);
     for (const position of [...strategy.account.positions]) {
       if (position.contract.ticker !== contract.ticker) continue;
-      const applied = applyAdvisorEvent(strategy.account, {
+      const settlement = {
         kind: 'settlement',
         positionId: position.id,
         recordedAt: at,
         quantity: position.quantity,
         payout: position.side === outcome.result ? position.quantity : 0,
         outcome,
-      });
+      };
+      const applied = applyAdvisorEvent(strategy.account, settlement);
       strategy.account = applied.account;
+      recordActivity(strategy, { ...settlement, realizedPnl: applied.realizedPnl });
       row.scores[strategy.id].netProfit = money(
         row.scores[strategy.id].netProfit + applied.realizedPnl,
       );
@@ -327,6 +370,7 @@ export function advanceAdvisorHistoryTrial(previous, input, { executionClaims = 
     return state;
   }
   if (input.kind !== 'observation') throw new Error('Unknown shadow observation.');
+  state.lastMarketObservedAt = at;
   const contract = getKalshiContract(input.contract);
   const book = input.book ?? null;
   if (book && timestamp(book.receivedAt) && book.receivedAt <= at)
@@ -367,7 +411,9 @@ export function advanceAdvisorHistoryTrial(previous, input, { executionClaims = 
       const claim = executionClaims[intent.id];
       // Once requested, an order gets that one shared execution observation.
       // A lost request cannot get a more favorable retry from unrelated books.
-      if (!expired && claim && claim.sourceId !== input.sourceId) continue;
+      // Orders that became eligible during the request wait for their own claim.
+      if (!expired && (claim || input.executionObservation) && claim?.sourceId !== input.sourceId)
+        continue;
       if (expired || claim || book?.ticker === intent.contract.ticker)
         execute(state, strategy, intent, expired ? null : book, at);
     }
@@ -452,7 +498,7 @@ export function advanceAdvisorHistoryTrial(previous, input, { executionClaims = 
                 accepted: false,
                 reason: modelChanged
                   ? 'model_identity_changed'
-                  : (result?.status ?? 'response_expired'),
+                  : (result?.reason ?? result?.status ?? 'response_expired'),
               };
         if (validated.accepted) {
           state.modelIdentity ??= result.model;
@@ -483,6 +529,25 @@ export function advanceAdvisorHistoryTrial(previous, input, { executionClaims = 
         strategy.pendingRequest = null;
       } else if (
         !pending &&
+        evidence.available &&
+        !evidence.position &&
+        evidence.options.length === 1 &&
+        evidence.options[0].action === 'NO_TRADE'
+      ) {
+        // The model cannot change this result. Record the current local plan
+        // without paying for a response or consuming the next request interval.
+        applyAdvice(
+          state,
+          strategy,
+          evidence.options[0].advice,
+          { ...input, contract },
+          portfolio,
+          'local',
+        );
+      } else if (
+        !pending &&
+        evidence.available &&
+        evidence.options.length > 0 &&
         (strategy.lastRequestAt === null ||
           at - strategy.lastRequestAt >= state.provider.minimumRequestIntervalMs)
       ) {
@@ -499,6 +564,12 @@ export function advanceAdvisorHistoryTrial(previous, input, { executionClaims = 
           reason: 'observing_confirmation',
           assessedAt: at,
           snapshotId: input.id,
+        });
+      } else if (!pending && !evidence.available) {
+        // Missing market evidence is resolved locally, without paying for a
+        // response that cannot select an executable option.
+        applyAdvice(state, strategy, baseline(), { ...input, contract }, portfolio, 'fallback', {
+          fallbackReason: evidence.reason,
         });
       }
     }
@@ -523,6 +594,97 @@ export function advanceAdvisorHistoryTrial(previous, input, { executionClaims = 
   return state;
 }
 
+/** The displayed recommendation and account must come from the same simulated strategy. */
+function getStrategyGuidance(state, strategy) {
+  const asOf = state.lastObservedAt;
+  const account = strategy.account;
+  const portfolio = { ...getAdvisorPortfolio(account, asOf), accountVersion: account.version };
+  const latest = strategy.latestAdvice ?? null;
+  const activity = strategy.recentActivity ?? [];
+  const execution =
+    latest &&
+    activity.find((item) => item.adviceId === latest.id && ['fill', 'no-fill'].includes(item.kind));
+  const valuation = strategy.risk?.valuation ?? null;
+  const performance = account.performance;
+  const decision = strategy.guidanceDecision ?? null;
+  const pending = strategy.pendingRequest;
+  return {
+    accountId: `${state.id}:${strategy.id}`,
+    asOf,
+    startedAt: state.registeredAt,
+    simulated: true,
+    experimental: true,
+    policy: copy(state.policy),
+    portfolio,
+    currentPlan: strategy.currentPlan ?? null,
+    latestAdvice: latest
+      ? {
+          ...latest,
+          executionStatus: account.pendingIntents.some((intent) => intent.id === latest.id)
+            ? 'pending'
+            : execution?.kind === 'fill'
+              ? 'filled'
+              : (execution?.kind ?? null),
+        }
+      : null,
+    recentActivity: activity,
+    collector: {
+      status: state.lastMarketObservedAt ? 'running' : 'not-started',
+      heartbeatAt: state.lastMarketObservedAt ?? null,
+    },
+    risk: {
+      valuation,
+      history: strategy.risk?.history ?? null,
+      isCurrent: Boolean(
+        valuation &&
+        valuation.accountVersion === account.version &&
+        Number.isFinite(valuation.validUntil) &&
+        asOf < valuation.validUntil &&
+        valuation.observedAt <= asOf &&
+        asOf - valuation.observedAt < 30000,
+      ),
+    },
+    source: {
+      kind: decision
+        ? decision.status === 'accepted'
+          ? 'ai'
+          : decision.status === 'local'
+            ? 'numerical'
+            : 'numerical-fallback'
+        : null,
+      status: decision?.status ?? null,
+      pending: Boolean(pending && !pending.result),
+      providerStatus: !state.provider.enabled
+        ? 'disabled'
+        : (pending?.result?.status ??
+          (pending ? 'pending' : (strategy.latestDecision?.status ?? 'configured'))),
+      providerReason:
+        pending?.result?.reason ??
+        strategy.latestDecision?.fallbackReason ??
+        state.provider.disabledReason ??
+        null,
+      decision,
+      latestDecision: strategy.latestDecision,
+      model: state.modelIdentity ?? state.provider.model,
+    },
+    performance: {
+      ...performance,
+      realizationWinCount: performance.winCount,
+      realizationLossCount: performance.lossCount,
+      realizedPnl: account.realizedPnl,
+      totalFees: account.feesPaid,
+      inferenceCost: strategy.inferenceCost,
+      netProfit: money(account.realizedPnl - strategy.inferenceCost),
+      returnOnInitialCapital: account.realizedPnl / state.policy.initialBankroll,
+      profitFactor:
+        performance.grossLosses > 0 ? performance.grossProfits / performance.grossLosses : null,
+      pairedAdvantage: performance.pairedStrategyPnl - performance.pairedHoldPnl,
+      pendingComparisonCount: account.pendingComparisons.length,
+      adviceAgeMs: latest ? Math.max(0, asOf - latest.evaluatedAt) : null,
+    },
+  };
+}
+
 export function getAdvisorHistoryTrialReport(state) {
   if (!state)
     return {
@@ -535,6 +697,9 @@ export function getAdvisorHistoryTrialReport(state) {
   const complete = settled.length === state.rules.confirmationContracts;
   return {
     id: state.id,
+    policyId: state.policy.id,
+    initialBankroll: state.policy.initialBankroll,
+    maxEntryContracts: state.policy.maxEntryContracts ?? null,
     status: complete ? 'awaiting-review' : 'collecting',
     experimental: true,
     enabled: state.provider.enabled,
@@ -576,8 +741,9 @@ export function getAdvisorHistoryTrialReport(state) {
       const lowerBound = standardError === null ? null : mean - 2.4 * standardError;
       return {
         id: strategy.id,
+        accountId: `${state.id}:${strategy.id}`,
         label: {
-          incumbent: 'Current adviser',
+          incumbent: 'Numerical trial',
           'history-rules': 'History rules',
           'language-model': 'AI candidate',
         }[strategy.id],
@@ -585,6 +751,7 @@ export function getAdvisorHistoryTrialReport(state) {
         cash: strategy.account.cash,
         openPositionCount: strategy.account.positions.length,
         pendingOrderCount: strategy.account.pendingIntents.length,
+        pendingComparisonCount: strategy.account.pendingComparisons.length,
         netProfit: money(strategy.account.realizedPnl - strategy.inferenceCost),
         realizedPnl: strategy.account.realizedPnl,
         inferenceCost: strategy.inferenceCost,
@@ -601,6 +768,9 @@ export function getAdvisorHistoryTrialReport(state) {
         vetoCount: strategy.vetoCount,
         fillCount: strategy.account.performance.fillCount,
         latestDecision: strategy.latestDecision,
+        ...(strategy.id === 'language-model'
+          ? { guidance: getStrategyGuidance(state, strategy) }
+          : {}),
         tradedContracts,
         pairedProfitLowerBound: lowerBound,
         readyForReview:

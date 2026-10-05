@@ -171,7 +171,8 @@ export function getTradingExecutionQuote({
     !['yes', 'no'].includes(side) ||
     !Number.isInteger(quantity) ||
     quantity < 1 ||
-    quantity > policy.maxContracts
+    quantity >
+      (action === 'buy' ? (policy.maxEntryContracts ?? policy.maxContracts) : policy.maxContracts)
   )
     return unavailable('invalid_execution_request');
   const problem = getBookProblem({ contract, book, now });
@@ -267,7 +268,8 @@ function getOrderLimit({
   return lower / 100;
 }
 
-function getExitPlan({
+/** Calculate a fee-aware sale target for the exact quantity available to manage. */
+export function getTradingExitPlan({
   side,
   quantity,
   probability,
@@ -276,14 +278,19 @@ function getExitPlan({
   policy,
   contract,
   costBasis = null,
+  minimumLimitPrice = null,
 }) {
-  const price = getOrderLimit({
+  if (!Number.isSafeInteger(quantity) || quantity < 1) return null;
+  const holdingPrice = getOrderLimit({
     action: 'sell',
     quantity,
     valuePerContract: probability + policy.probabilityReserve + policy.minimumExitAdvantage,
     fee: book.fee,
     now,
   });
+  const noHigherLimit = finite(minimumLimitPrice) && minimumLimitPrice >= 1;
+  const price =
+    holdingPrice === null || noHigherLimit ? null : Math.max(holdingPrice, minimumLimitPrice ?? 0);
   const amounts =
     price === null ? null : getQuoteAmounts([{ price, quantity }], 'sell', book.fee, now);
   const expiresAt =
@@ -295,7 +302,7 @@ function getExitPlan({
           contract.expiresAt,
         )
       : now + policy.cadenceMs;
-  if (price === null && policy.version === 2)
+  if (price === null && (policy.version === 2 || noHigherLimit))
     return {
       available: false,
       action: 'sell',
@@ -303,11 +310,12 @@ function getExitPlan({
       quantity,
       limitPrice: null,
       type: 'conditional_limit',
-      reason: 'no_fee_adjusted_sell_limit',
+      reason: noHigherLimit ? 'no_higher_resting_sell_limit' : 'no_fee_adjusted_sell_limit',
       expiresAt,
       costBasis,
-      explanation:
-        'No sell price below $1 currently beats the estimated value of holding after fees and the caution margin.',
+      explanation: noHigherLimit
+        ? 'The current best bid leaves no higher whole-cent sell price below $1. Keep holding until the next assessment changes the plan.'
+        : 'No sell price below $1 currently beats the estimated value of holding after fees and the caution margin.',
     };
   return price === null
     ? null
@@ -411,7 +419,7 @@ export function getTradingAdvice({
       policy.maxContracts,
     );
     const positionFields = { side: position.side, positionId: position.id, probability };
-    const exitPlan = getExitPlan({
+    const exitPlan = getTradingExitPlan({
       side: position.side,
       quantity: available,
       probability,
@@ -479,7 +487,7 @@ export function getTradingAdvice({
         ...selected,
         exitPlan:
           policy.version === 2
-            ? getExitPlan({
+            ? getTradingExitPlan({
                 side: position.side,
                 quantity: selected.quantity,
                 probability,
@@ -525,10 +533,17 @@ export function getTradingAdvice({
       reason: portfolio.cash <= policy.cashReserve ? 'cash_reserve_limit' : 'open_risk_limit',
     });
   let selected = null;
+  let hasEntryDepth = false;
+  let hasAffordableEntry = false;
+  let hasCapacityBlockedEntry = false;
   for (const side of ['yes', 'no']) {
     const probability = side === 'yes' ? forecast.aboveProbability : 1 - forecast.aboveProbability;
     const cautiousProbability = Math.max(0, probability - policy.probabilityReserve);
-    for (let quantity = 1; quantity <= policy.maxContracts; quantity += 1) {
+    for (
+      let quantity = 1;
+      quantity <= (policy.maxEntryContracts ?? policy.maxContracts);
+      quantity += 1
+    ) {
       const quote = getTradingExecutionQuote({
         action: 'buy',
         side,
@@ -538,7 +553,17 @@ export function getTradingAdvice({
         now,
         policy,
       });
-      if (!quote.available || quote.totalCost > budget + 1e-8) continue;
+      if (!quote.available) continue;
+      hasEntryDepth = true;
+      const isAffordable = quote.totalCost <= budget + 1e-8;
+      hasAffordableEntry ||= isAffordable;
+      const expectedNetValue = money(probability * quantity - quote.totalCost);
+      const conservativeExpectedNetValue = money(cautiousProbability * quantity - quote.totalCost);
+      if (conservativeExpectedNetValue < policy.minimumEntryEdge * quantity - 1e-8) continue;
+      if (!isAffordable) {
+        hasCapacityBlockedEntry = true;
+        continue;
+      }
       const qualifiesAmount =
         policy.version === 2
           ? (amounts) =>
@@ -551,10 +576,10 @@ export function getTradingAdvice({
               }) +
                 1e-8
           : null;
-      if (qualifiesAmount && !qualifiesAmount(quote)) continue;
-      const expectedNetValue = money(probability * quantity - quote.totalCost);
-      const conservativeExpectedNetValue = money(cautiousProbability * quantity - quote.totalCost);
-      if (conservativeExpectedNetValue < policy.minimumEntryEdge * quantity - 1e-8) continue;
+      if (qualifiesAmount && !qualifiesAmount(quote)) {
+        hasCapacityBlockedEntry = true;
+        continue;
+      }
       const limitPrice = getOrderLimit({
         action: 'buy',
         quantity,
@@ -564,8 +589,23 @@ export function getTradingAdvice({
         now,
         qualifiesAmount,
       });
-      if (limitPrice === null || quote.fills.some((fill) => fill.price > limitPrice + 1e-8))
+      if (limitPrice === null || quote.fills.some((fill) => fill.price > limitPrice + 1e-8)) {
+        // Whole-cent limits can exceed capacity even when the displayed fractional price fits.
+        const edgeLimitPrice = getOrderLimit({
+          action: 'buy',
+          quantity,
+          valuePerContract: cautiousProbability - policy.minimumEntryEdge,
+          costBudget: Infinity,
+          fee: book.fee,
+          now,
+        });
+        if (
+          edgeLimitPrice !== null &&
+          quote.fills.every((fill) => fill.price <= edgeLimitPrice + 1e-8)
+        )
+          hasCapacityBlockedEntry = true;
         continue;
+      }
       const maximum = getQuoteAmounts([{ price: limitPrice, quantity }], 'buy', book.fee, now);
       if (!selected || conservativeExpectedNetValue > selected.conservativeExpectedNetValue)
         selected = {
@@ -580,7 +620,7 @@ export function getTradingAdvice({
           quotedCost: quote.totalCost,
           quotedFee: quote.fee,
           reason: 'fee_adjusted_entry_edge',
-          exitPlan: getExitPlan({
+          exitPlan: getTradingExitPlan({
             side,
             quantity,
             probability,
@@ -606,7 +646,11 @@ export function getTradingAdvice({
         };
     }
   }
-  return result(selected ?? { reason: 'insufficient_entry_edge_or_depth' });
+  if (selected) return result(selected);
+  if (!hasEntryDepth) return result({ reason: 'missing_entry_depth' });
+  if (!hasAffordableEntry || hasCapacityBlockedEntry)
+    return result({ reason: 'insufficient_loss_capacity' });
+  return result({ reason: 'insufficient_entry_edge' });
 }
 
 /** One later snapshot executes a saved recommendation; reserved capital/quantity is released only in this input portfolio. */
@@ -708,7 +752,10 @@ export function simulateTradingExecution({
     if (
       !Number.isSafeInteger(advice.quantity) ||
       advice.quantity < 1 ||
-      advice.quantity > policy.maxContracts ||
+      advice.quantity >
+        (advice.action === 'buy'
+          ? (policy.maxEntryContracts ?? policy.maxContracts)
+          : policy.maxContracts) ||
       !finite(advice.limitPrice) ||
       !finite(advice.probability) ||
       advice.probability < 0 ||
@@ -731,7 +778,7 @@ export function simulateTradingExecution({
         policy,
       });
       if (!quote.available) {
-        reason = quote.reason;
+        if (quantity === 1) reason = quote.reason;
         break;
       }
       if (
@@ -745,24 +792,25 @@ export function simulateTradingExecution({
         break;
       }
       if (advice.action === 'buy') {
-        const opportunityBudget = getAdvisorOpportunityBudget({
-          probability: advice.probability,
-          priceWithFees: quote.totalCost / quantity,
-          equity: portfolio.valuation.executableEquity,
-          policy,
-        });
-        if (
-          quote.totalCost >
-          Math.min(advice.maxCost, portfolio.cash, executionBudget, opportunityBudget) + 1e-8
-        ) {
-          reason = 'capital_limit_changed';
-          continue;
+        if (quote.totalCost > Math.min(portfolio.cash, executionBudget) + 1e-8) {
+          reason = 'insufficient_loss_capacity';
+          break;
         }
         if (
           (advice.probability - policy.probabilityReserve - policy.minimumEntryEdge) * quantity <
           quote.totalCost - 1e-8
         ) {
           reason = 'execution_edge_lost';
+          continue;
+        }
+        const opportunityBudget = getAdvisorOpportunityBudget({
+          probability: advice.probability,
+          priceWithFees: quote.totalCost / quantity,
+          equity: portfolio.valuation.executableEquity,
+          policy,
+        });
+        if (quote.totalCost > Math.min(advice.maxCost, opportunityBudget) + 1e-8) {
+          reason = 'capital_limit_changed';
           continue;
         }
       } else {

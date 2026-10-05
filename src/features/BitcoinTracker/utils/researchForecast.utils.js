@@ -1,6 +1,13 @@
 import { getPressureForecast } from './pressureForecast.utils';
 import { getKalshiMarketConditions } from './kalshi/marketConditions.utils';
 import { getLearningFeatures } from './learning/features.utils';
+import { calculateChartPatterns } from './patterns/chartPatterns.utils';
+import { getPatternLearningFeatures } from './learning/patternFeatures.utils';
+import {
+  predictPatternCandidates,
+  applyPatternModel,
+  isPatternModelArtifact,
+} from './learning/patternModel.utils';
 import {
   applyOutcomeModel,
   predictOutcomeCandidate,
@@ -103,6 +110,36 @@ export function getResearchForecast(input, models = {}, windowStartAt = null, op
     expiresAt,
     outcomeDefinition,
   });
+  // Pattern evidence is captured alongside the incumbent schema. It never changes its inputs
+  // or probabilities; historical replays explicitly retain their original absent fields.
+  const chartPatterns =
+    options.capturePatterns === false
+      ? null
+      : calculateChartPatterns({
+          version: options.patternVersion,
+          benchmark: input.benchmark,
+          targetPrice: effectiveInput.target,
+          now: input.now,
+          pressure: {
+            source: 'coinbase',
+            available:
+              ['live', 'warming'].includes(input.stream?.status) &&
+              input.stream?.flow?.windows?.[60]?.available === true,
+            imbalance: input.stream?.flow?.windows?.[60]?.imbalance,
+            observedAt: input.stream?.quality?.confirmedThrough,
+            receivedAt: input.stream?.quality?.heartbeatAt,
+          },
+        });
+  const patternLearningFeatures = chartPatterns
+    ? getPatternLearningFeatures({ learningFeatures, chartPatterns })
+    : null;
+  const patternShadowPredictions = chartPatterns
+    ? predictPatternCandidates({
+        candidates: models?.patterns?.candidates ?? [],
+        snapshot: patternLearningFeatures,
+        windowStartAt: windowStartAt ?? input.kalshiMarket?.startsAt,
+      })
+    : [];
   let estimate = applyOutcomeModel(
     base,
     {
@@ -236,12 +273,25 @@ export function getResearchForecast(input, models = {}, windowStartAt = null, op
       estimate = applyValidatedChallenger(base, artifact, aboveProbability, input.now, estimate);
     }
   }
+  const patternActive =
+    models?.patterns?.active ?? (isPatternModelArtifact(models?.active) ? models.active : null);
+  if (patternActive)
+    estimate = applyPatternModel(
+      base,
+      {
+        snapshot: patternLearningFeatures,
+        now: input.now,
+        windowStartAt: windowStartAt ?? input.kalshiMarket?.startsAt,
+      },
+      patternActive,
+    );
   return {
     ...estimate,
     target: effectiveInput.target,
     expiresAt,
     outcomeDefinition,
     learningFeatures,
+    ...(chartPatterns ? { chartPatterns, patternLearningFeatures, patternShadowPredictions } : {}),
     researchExperiment: {
       version: researchVersion,
       capturedAt: input.now,

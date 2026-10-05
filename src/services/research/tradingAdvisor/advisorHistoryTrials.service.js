@@ -68,6 +68,40 @@ export function createAdvisorHistoryTrialService({
   }
   const service = {
     start,
+    async getPendingExecutions() {
+      if (stopped) return [];
+      try {
+        const enrolled = await start();
+        return await repository.readPendingExecutions(enrolled.id);
+      } catch {
+        lastError = 'shadow_execution_unavailable';
+        hasRecordingGap = true;
+        return [];
+      }
+    },
+    async getPendingSettlementContracts() {
+      if (stopped) return [];
+      try {
+        const enrolled = await start();
+        const state = await repository.readState(enrolled.id);
+        return state.contracts.filter((row) => !row.outcome).map((row) => row.contract);
+      } catch {
+        lastError = 'shadow_settlement_unavailable';
+        hasRecordingGap = true;
+        return [];
+      }
+    },
+    async claimExecutionObservation(contract, observedAt = now()) {
+      if (stopped) return null;
+      try {
+        const enrolled = await start();
+        return await repository.claimExecutionObservation(enrolled.id, observedAt, contract.ticker);
+      } catch {
+        lastError = 'shadow_execution_unavailable';
+        hasRecordingGap = true;
+        return null;
+      }
+    },
     async observe(input) {
       try {
         const enrolled = await start();
@@ -105,49 +139,6 @@ export function createAdvisorHistoryTrialService({
           recordingError: 'shadow_report_unavailable',
           strategies: [],
         };
-      }
-    },
-    async captureExecutionObservation(readBook) {
-      if (stopped) return;
-      try {
-        const enrolled = await start();
-        const at = now();
-        const claim = await repository.claimExecutionObservation(enrolled.id, at);
-        if (claim) {
-          // All due candidate accounts share one request through the collector's
-          // existing Kalshi limiter, after the incumbent execution lease ends.
-          let book = null;
-          try {
-            book = await readBook(claim.contract.ticker, claim.deadline);
-          } catch {
-            // One failed observation cancels the order; it never triggers a retry.
-          }
-          await service.observe({
-            kind: 'observation',
-            contract: claim.contract,
-            book,
-            sourceId: claim.sourceId,
-            observedAt: now(),
-          });
-          return;
-        }
-        const state = await repository.readState(enrolled.id);
-        const expired = Object.values(state.strategies).some((strategy) =>
-          strategy.account.pendingIntents.some(
-            (intent) =>
-              at > intent.evaluatedAt + intent.policy.maximumFillDelayMs ||
-              at >= intent.contract.expiresAt,
-          ),
-        );
-        if (expired)
-          await service.observe({
-            kind: 'observation',
-            sourceId: `expired-orders:${at}`,
-            observedAt: at,
-          });
-      } catch {
-        lastError = 'shadow_execution_unavailable';
-        hasRecordingGap = true;
       }
     },
     async stop() {

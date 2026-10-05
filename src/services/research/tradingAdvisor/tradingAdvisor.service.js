@@ -19,6 +19,8 @@ import {
   TRADING_ADVISOR_POLICY,
   getTradingAdvice,
 } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
+import { createAdvisorResearchPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPolicy.utils';
+import { getAdvisorForecastReconciliation } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecast.utils';
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 
@@ -29,6 +31,7 @@ export function createTradingAdvisorService({
   loadMarket = fetchKalshiMarket,
   now = Date.now,
   policy = TRADING_ADVISOR_POLICY,
+  researchPolicy = policy,
   trials = null,
   historyTrials = null,
   owner = randomUUID(),
@@ -43,7 +46,7 @@ export function createTradingAdvisorService({
   let historyInputs = [];
   async function ensureTrials() {
     if (!trials) return;
-    trialInitialization ??= trials.ensureTrial(policy, now()).catch((error) => {
+    trialInitialization ??= trials.ensureTrial(researchPolicy, now()).catch((error) => {
       trialInitialization = null;
       throw error;
     });
@@ -80,65 +83,143 @@ export function createTradingAdvisorService({
     }
   }
 
-  async function executePending(state, lease) {
-    let changed = false;
-    for (const advice of state.account.pendingIntents) {
-      const observedAt = now();
-      if (observedAt < advice.evaluatedAt + policy.minimumFillDelayMs) continue;
-      const attempt = state.attempts.find((row) => row.adviceId === advice.id);
-      const withinWindow =
-        observedAt <= advice.evaluatedAt + policy.maximumFillDelayMs &&
-        observedAt < advice.contract.expiresAt;
-      // A different writer cannot close an active request as no-fill while it is in flight.
-      if (attempt && attempt.leaseExpiresAt > observedAt && withinWindow) continue;
-      const canRead =
-        !attempt &&
-        withinWindow &&
-        (await repository.claimExecutionAttempt({
-          adviceId: advice.id,
-          requestedAt: now(),
-          lease,
-        }));
-      // Bound the whole execution request, including quota/database waits. A late result
-      // is ignored rather than keeping capital reserved or fetching another favorable book.
-      const book = canRead
-        ? await readBook(
-            advice.contract.ticker,
-            Math.min(advice.evaluatedAt + policy.maximumFillDelayMs + 1, advice.contract.expiresAt),
-          )
-        : null;
-      if (trials && book)
-        await trials.observe({ contract: advice.contract, book, observedAt: now() });
-      await writeFrozen(
-        'saveExecution',
-        {
-          adviceId: advice.id,
-          book,
-          recordedAt: now(),
-          observationAttemptToken: canRead ? lease.token : null,
-        },
-        lease,
+  function captureForecast(getForecast, options) {
+    try {
+      return copy(getForecast(options) ?? null);
+    } catch {
+      return {
+        available: false,
+        capturedAt: options?.now ?? now(),
+        reason: 'Forecast capture failed.',
+      };
+    }
+  }
+
+  async function executePending(state, lease, getForecast) {
+    const pending = state.account.pendingIntents.map((advice) => ({
+      advice,
+      attempt: state.attempts.find((row) => row.adviceId === advice.id),
+      isMainAccount: true,
+    }));
+    if (trials) pending.push(...(await trials.getPendingExecutions()));
+    if (historyTrials)
+      pending.push(
+        ...(await historyTrials.getPendingExecutions()).map((row) => ({
+          ...row,
+          isHistoryTrial: true,
+        })),
       );
+    const groups = new Map();
+    for (const row of pending) {
+      const { advice } = row;
+      if (now() < advice.evaluatedAt + advice.policy.minimumFillDelayMs) continue;
+      const group = groups.get(advice.contract.ticker) ?? [];
+      group.push(row);
+      groups.set(advice.contract.ticker, group);
+    }
+
+    let changed = false;
+    for (const rows of groups.values()) {
+      const contract = rows[0].advice.contract;
+      const observedAt = now();
+      const withinWindow = (advice) =>
+        observedAt <= advice.evaluatedAt + advice.policy.maximumFillDelayMs &&
+        observedAt < advice.contract.expiresAt;
+      const executions = [];
+      for (const { advice, attempt, isMainAccount } of rows) {
+        if (!isMainAccount) continue;
+        // A different writer cannot close an active request while it is in flight.
+        if (attempt && attempt.leaseExpiresAt > observedAt && withinWindow(advice)) continue;
+        const canRead =
+          !attempt &&
+          withinWindow(advice) &&
+          (await repository.claimExecutionAttempt({
+            adviceId: advice.id,
+            requestedAt: now(),
+            lease,
+          }));
+        executions.push({ advice, canRead });
+      }
+      const trialAttempt =
+        trials &&
+        rows.some(
+          (row) =>
+            !row.isMainAccount && !row.isHistoryTrial && !row.attempt && withinWindow(row.advice),
+        )
+          ? await trials.claimExecutionObservation(contract, now())
+          : null;
+      const historyAttempt =
+        historyTrials &&
+        rows.some((row) => row.isHistoryTrial && !row.attempt && withinWindow(row.advice))
+          ? await historyTrials.claimExecutionObservation(contract, now())
+          : null;
+      const deadlines = executions
+        .filter(({ canRead }) => canRead)
+        .map(({ advice }) =>
+          Math.min(
+            advice.evaluatedAt + advice.policy.maximumFillDelayMs + 1,
+            advice.contract.expiresAt,
+          ),
+        );
+      if (trialAttempt) deadlines.push(trialAttempt.deadline);
+      if (historyAttempt) deadlines.push(historyAttempt.deadline);
+      const hasExpiredTrial = rows.some((row) => !row.isMainAccount && !withinWindow(row.advice));
+      if (!executions.length && !trialAttempt && !historyAttempt && !hasExpiredTrial) continue;
+
+      // One request serves all orders eligible at request time, including orders
+      // belonging only to shadow accounts. Original execution deadlines still apply.
+      const deadline = Math.min(...deadlines);
+      const book =
+        deadlines.length && now() < deadline ? await readBook(contract.ticker, deadline) : null;
+      const recordedAt = now();
+      // Recompute once from the inputs available after this exact execution book arrives.
+      // This is shadow evidence: a delayed fill still obeys its immutable saved intention.
+      const capturedForecast =
+        book && executions.some(({ canRead }) => canRead)
+          ? captureForecast(getForecast, { contract, book, now: recordedAt })
+          : null;
+      const { researchInputSnapshot = null, ...executionForecast } = capturedForecast ?? {};
+      const sourceId = trialAttempt?.sourceId ?? `execution:${randomUUID()}`;
+      if (trials) await trials.observe({ contract, book, observedAt: recordedAt, sourceId });
       if (historyTrials)
         historyInputs.push({
           kind: 'observation',
-          contract: advice.contract,
+          contract,
           book,
-          observedAt: now(),
-          sourceId: `execution:${advice.id}`,
+          observedAt: recordedAt,
+          sourceId: historyAttempt?.sourceId ?? sourceId,
+          executionObservation: true,
         });
-      changed = true;
+      for (const { advice, canRead } of executions) {
+        await writeFrozen(
+          'saveExecution',
+          {
+            adviceId: advice.id,
+            book: canRead ? book : null,
+            recordedAt,
+            forecast: canRead && capturedForecast ? executionForecast : null,
+            researchInputSnapshot: canRead ? researchInputSnapshot : null,
+            observationAttemptToken: canRead ? lease.token : null,
+          },
+          lease,
+        );
+        changed = true;
+      }
     }
     return changed;
   }
 
   async function resolveOutcomes(state, lease) {
     let changed = false;
+    const pending = state.account.pendingComparisons.map((comparison) => comparison.contract);
+    if (trials) pending.push(...(await trials.getPendingSettlementContracts()));
+    if (historyTrials) pending.push(...(await historyTrials.getPendingSettlementContracts()));
     const contracts = new Map();
-    for (const comparison of state.account.pendingComparisons) {
-      if (now() >= comparison.contract.expiresAt)
-        contracts.set(comparison.contract.ticker, comparison.contract);
-    }
+    for (const contract of pending)
+      if (now() >= contract.expiresAt) contracts.set(contract.ticker, contract);
+    // Retain retry limits until every account has received the official result.
+    for (const ticker of outcomeAttempts.keys())
+      if (!contracts.has(ticker)) outcomeAttempts.delete(ticker);
     for (const contract of contracts.values()) {
       if (now() - (outcomeAttempts.get(contract.ticker) ?? -Infinity) < 60_000) continue;
       outcomeAttempts.set(contract.ticker, now());
@@ -187,18 +268,12 @@ export function createTradingAdvisorService({
         );
         changed ||= Boolean(result);
       }
-      outcomeAttempts.delete(contract.ticker);
-      // Keep only outstanding contracts in memory; a completed comparison never needs polling.
-      const unresolved = await repository.readState(policy.id);
-      if (
-        unresolved.account.pendingComparisons.some((row) => row.contract.ticker === contract.ticker)
-      )
-        outcomeAttempts.set(contract.ticker, now());
     }
     return changed;
   }
 
-  function scheduleNextWake(state, contract) {
+  async function scheduleNextWake(state, contract) {
+    const trialExecutions = trials ? await trials.getPendingExecutions() : [];
     const observedAt = now();
     const deadlines = [observedAt + 10000];
     if (contract && observedAt < contract.expiresAt) {
@@ -212,6 +287,16 @@ export function createTradingAdvisorService({
         attempt
           ? Math.min(attempt.leaseExpiresAt, intent.evaluatedAt + policy.maximumFillDelayMs + 1)
           : intent.evaluatedAt + policy.minimumFillDelayMs,
+      );
+    }
+    for (const { advice, attempt } of trialExecutions) {
+      deadlines.push(
+        attempt
+          ? Math.min(
+              advice.evaluatedAt + advice.policy.maximumFillDelayMs + 1,
+              advice.contract.expiresAt,
+            )
+          : advice.evaluatedAt + advice.policy.minimumFillDelayMs,
       );
     }
     for (const comparison of state.account.pendingComparisons) {
@@ -256,7 +341,8 @@ export function createTradingAdvisorService({
         lastHeartbeatAt = now();
       }
       let state = await repository.readState(policy.id);
-      if (await executePending(state, lease)) state = await repository.readState(policy.id);
+      if (await executePending(state, lease, getForecast))
+        state = await repository.readState(policy.id);
       if (await resolveOutcomes(state, lease)) state = await repository.readState(policy.id);
       const contract = getKalshiContract(market);
       if (
@@ -267,18 +353,28 @@ export function createTradingAdvisorService({
         (state.account.lastAdviceAt !== null &&
           now() - state.account.lastAdviceAt < policy.cadenceMs)
       ) {
-        scheduleNextWake(state, contract);
+        await scheduleNextWake(state, contract);
         return;
       }
 
       // Full model replay inputs are retained only for entries/exits; every observation keeps
       // the exact probability/model identity and book needed to replay the adviser decision.
-      const captured = copy(getForecast() ?? { available: false, capturedAt: now() });
-      const { researchInputSnapshot = null, ...forecast } = captured;
-      forecast.available = Boolean(forecast.available && researchInputSnapshot?.timing?.replayable);
+      const originalForecast = captureForecast(getForecast);
       const book = await readBook(contract.ticker);
       const evaluatedAt = now();
+      const captured = captureForecast(getForecast, { contract, book, now: evaluatedAt });
+      const { researchInputSnapshot = null, ...forecast } = captured ?? {};
+      forecast.available = Boolean(forecast.available && researchInputSnapshot?.timing?.replayable);
+      const forecastReconciliation = getAdvisorForecastReconciliation({
+        contract,
+        originalForecast,
+        currentForecast: captured,
+        book,
+        now: evaluatedAt,
+      });
       if (trials) await trials.observe({ contract, forecast, book, observedAt: evaluatedAt });
+      // The original account keeps its own saved selection. Research transitions use a
+      // different policy ID, so their simulated success cannot change this account's rules.
       const selectedPolicy = trials ? await trials.getActivePolicy(policy, evaluatedAt) : policy;
       const portfolio = getAdvisorDecisionPortfolio({
         account: state.account,
@@ -301,6 +397,7 @@ export function createTradingAdvisorService({
         forecast,
         book,
         portfolio,
+        forecastReconciliation,
         accountVersion: state.account.version,
         validUntil: Math.min(evaluatedAt + policy.cadenceMs, contract.expiresAt),
       };
@@ -314,7 +411,7 @@ export function createTradingAdvisorService({
           observedAt: evaluatedAt,
           sourceId: advice.id,
         });
-      scheduleNextWake(await repository.readState(policy.id), contract);
+      await scheduleNextWake(await repository.readState(policy.id), contract);
     } catch (error) {
       nextWakeAt = 0;
       lastHeartbeatAt = -Infinity;
@@ -348,12 +445,23 @@ export function createTradingAdvisorService({
         try {
           await advanceOnce(input);
         } finally {
-          // The incumbent's lease has been released. Shadow persistence and bounded AI
-          // inference cannot own, delay, or mutate its simulated execution transaction.
+          // Apply shared history observations after releasing the incumbent's lease;
+          // bounded AI inference remains outside its simulated execution transaction.
           const captured = historyInputs;
           historyInputs = [];
           for (const observation of captured) await historyTrials.observe(observation);
-          if (historyTrials) await historyTrials.captureExecutionObservation(readBook);
+          if (historyTrials) {
+            const observedAt = now();
+            for (const { advice, attempt } of await historyTrials.getPendingExecutions()) {
+              const deadline = attempt
+                ? Math.min(
+                    advice.evaluatedAt + advice.policy.maximumFillDelayMs + 1,
+                    advice.contract.expiresAt,
+                  )
+                : advice.evaluatedAt + advice.policy.minimumFillDelayMs;
+              nextWakeAt = Math.min(nextWakeAt, Math.max(observedAt + 1, deadline));
+            }
+          }
         }
       })().finally(() => {
         advancing = null;
@@ -406,7 +514,7 @@ export function createTradingAdvisorService({
         asOf - valuation.observedAt < 30000,
       );
       return {
-        trials: trials ? await trials.getReport(policy.id) : null,
+        trials: trials ? await trials.getReport(researchPolicy.id) : null,
         historyTrials: historyTrials ? await historyTrials.getReport() : null,
         currentPlan: state.currentPlan ?? null,
         asOf,
@@ -459,20 +567,55 @@ export function createConfiguredTradingAdvisorService({
 }) {
   let current = null;
   let currentPolicyId = null;
+  let currentResearchPolicyId = null;
   let updating = Promise.resolve();
   async function select() {
     const configuration = await repository.readConfiguration();
-    if (currentPolicyId !== configuration.policy.id) {
+    const policy = configuration.policy;
+    let researchPolicy = policy.version === 2 ? createAdvisorResearchPolicy(policy) : policy;
+    let drainingTrials = false;
+    if (researchPolicy.id !== policy.id) {
+      const researchTrial = trialRepository
+        ? await trialRepository.readState(researchPolicy.id)
+        : null;
+      const researchHistory = historyTrialRepository
+        ? await historyTrialRepository.getReport(researchPolicy.id)
+        : null;
+      if (!researchTrial && !researchHistory?.id) {
+        const previousTrial = trialRepository ? await trialRepository.readState(policy.id) : null;
+        const previousHistory = historyTrialRepository
+          ? await historyTrialRepository.getReport(policy.id)
+          : null;
+        // Finish already recorded orders and settlements before freezing the old experiment.
+        // This does not register a new account or change an existing policy during a report read.
+        drainingTrials =
+          Object.values(previousTrial?.strategies ?? {}).some(
+            ({ account }) =>
+              account.positions.length ||
+              account.pendingIntents.length ||
+              account.pendingComparisons.length,
+          ) ||
+          (previousHistory?.strategies ?? []).some(
+            (strategy) =>
+              strategy.openPositionCount ||
+              strategy.pendingOrderCount ||
+              strategy.pendingComparisonCount,
+          );
+        if (drainingTrials) researchPolicy = policy;
+      }
+    }
+    if (currentPolicyId !== policy.id || currentResearchPolicyId !== researchPolicy.id) {
       if (current) await current.stop();
       current = createTradingAdvisorService({
         repository,
         now,
         ...options,
         policy: configuration.policy,
+        researchPolicy,
         historyTrials: historyTrialRepository
           ? createAdvisorHistoryTrialService({
               repository: historyTrialRepository,
-              policy: configuration.policy,
+              policy: researchPolicy,
               now,
             })
           : null,
@@ -482,8 +625,9 @@ export function createConfiguredTradingAdvisorService({
             : null,
       });
       currentPolicyId = configuration.policy.id;
+      currentResearchPolicyId = researchPolicy.id;
     }
-    return { service: current, configuration };
+    return { service: current, configuration, researchPolicy, drainingTrials };
   }
   function serial(operation) {
     const result = updating.then(operation);
@@ -494,19 +638,30 @@ export function createConfiguredTradingAdvisorService({
     advance: (input) =>
       serial(async () => {
         await repository.ensureDailyLossLimitRemoved();
-        const { service, configuration } = await select();
+        const { service, configuration, drainingTrials } = await select();
         // Drain old intentions before rolling over, without replacing them with another
         // old-policy order that would keep the migration waiting indefinitely.
         return service.advance({
           ...input,
-          allowNewAdvice: configuration.policy.dailyLossLimitEnabled === false,
+          allowNewAdvice: configuration.policy.dailyLossLimitEnabled === false && !drainingTrials,
         });
       }),
     observeOutcome: (market) => serial(async () => (await select()).service.observeOutcome(market)),
     stop: (status) => serial(async () => current?.stop(status)),
     async getReport() {
-      const { configuration, service } = await select();
-      return { ...(await service.getReport()), configuration };
+      const { configuration, service, researchPolicy, drainingTrials } = await select();
+      const report = await service.getReport();
+      if (report.trials && trialRepository) {
+        report.trials.previousExperiments = (await trialRepository.getReports()).filter(
+          (trial) => trial.policyId !== researchPolicy.id,
+        );
+      }
+      if (report.historyTrials && historyTrialRepository) {
+        report.historyTrials.previousExperiments = (
+          await historyTrialRepository.getReports()
+        ).filter((trial) => trial.id !== report.historyTrials.id);
+      }
+      return { ...report, configuration, researchPolicy, drainingTrials };
     },
   };
 }

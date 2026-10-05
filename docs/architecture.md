@@ -46,6 +46,13 @@ Paths below the entry point are relative to `src/features/BitcoinTracker/` unles
 
 ## Follow one forecast
 
+Numerical chart patterns are captured by `utils/patterns/` alongside the incumbent learning
+snapshot. `utils/learning/pattern*.utils.js` owns the separate v4 schema and seven regularized
+shadow fits. `services/research/patterns/` owns independent book observations under the existing
+paper collection option. The production forecast is unchanged. See
+[chart-pattern research](chart-patterns.md) for detector definitions, missing-data rules,
+chronological comparisons, and the after-cost paper evaluation procedure.
+
 The user selects a real Kalshi contract. That contract supplies the target, opening time, closing time, and settlement rules. A future selection can be scheduled by identity while its target is still pending.
 
 Manual recording and `hooks/useKalshiSchedule.js` both use `utils/kalshi/forecastRecord.utils.js` to create the same initial record. It starts in `analyzing` with no fixed probabilities. The record retains the official closing time even when the user joins late.

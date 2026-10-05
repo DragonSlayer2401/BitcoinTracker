@@ -233,6 +233,16 @@ function considerTransition(state, at) {
 
 const emptyScore = () => ({ netProfit: 0, entryFills: 0, orderCount: 0, orderFills: 0, fees: 0 });
 
+/** Include every independent account, even when the selected adviser has no order. */
+export function getTradingPolicyPendingExecutions(state) {
+  return Object.values(state?.strategies ?? {}).flatMap((strategy) =>
+    strategy.account.pendingIntents.map((advice) => ({
+      advice,
+      attempt: strategy.executionAttempts?.[advice.id] ?? null,
+    })),
+  );
+}
+
 function recordExecution(state, strategy, intent, book, at) {
   const event = simulateTradingExecution({
     advice: intent,
@@ -244,6 +254,7 @@ function recordExecution(state, strategy, intent, book, at) {
   if (!event) return;
   const applied = applyAdvisorEvent(strategy.account, { ...event, adviceId: intent.id });
   strategy.account = applied.account;
+  if (strategy.executionAttempts) delete strategy.executionAttempts[intent.id];
   const row = state.contracts.find((item) => item.contract.ticker === intent.contract.ticker);
   if (!row) throw new Error('Trial execution is missing its prospectively enrolled contract.');
   const score = row.scores[strategy.id];
@@ -295,6 +306,39 @@ export function advanceTradingPolicyTrial(previous, input) {
     throw new Error('Trial observations must be recorded in chronological order.');
   state.lastObservedAt = at;
   const contract = getKalshiContract(input.contract ?? input.market);
+  if (input.kind === 'execution-request') {
+    // Persist request membership before fetching. A lost request may expire, but cannot
+    // be replaced with a more favorable observation after a collector restart.
+    const eligible = getTradingPolicyPendingExecutions(state).filter(
+      ({ advice, attempt }) =>
+        !attempt &&
+        isSameKalshiContract(advice.contract, contract) &&
+        at >= advice.evaluatedAt + advice.policy.minimumFillDelayMs &&
+        at <= advice.evaluatedAt + advice.policy.maximumFillDelayMs &&
+        at < advice.contract.expiresAt,
+    );
+    const deadline = Math.min(
+      ...eligible.map(({ advice }) =>
+        Math.min(
+          advice.evaluatedAt + advice.policy.maximumFillDelayMs + 1,
+          advice.contract.expiresAt,
+        ),
+      ),
+    );
+    const ids = new Set(eligible.map(({ advice }) => advice.id));
+    for (const strategy of Object.values(state.strategies)) {
+      for (const intent of strategy.account.pendingIntents) {
+        if (!ids.has(intent.id)) continue;
+        strategy.executionAttempts ??= {};
+        strategy.executionAttempts[intent.id] = {
+          sourceId: input.sourceId,
+          requestedAt: at,
+          deadline,
+        };
+      }
+    }
+    return state;
+  }
   if (input.kind === 'settlement') {
     const outcome = getKalshiOutcome(input.market, at);
     const row = state.contracts.find((item) => isSameKalshiContract(item.contract, contract));
@@ -387,7 +431,11 @@ export function advanceTradingPolicyTrial(previous, input) {
       const expired =
         at > intent.evaluatedAt + intent.policy.maximumFillDelayMs ||
         at >= intent.contract.expiresAt;
-      if (expired || book?.ticker === intent.contract.ticker)
+      const attempt = strategy.executionAttempts?.[intent.id];
+      // A shared response belongs only to orders eligible when it was requested.
+      // Other observations cannot retry an order whose request was already claimed.
+      if (!expired && (attempt || input.sourceId) && attempt?.sourceId !== input.sourceId) continue;
+      if (expired || attempt || book?.ticker === intent.contract.ticker)
         recordExecution(state, strategy, intent, expired ? null : book, at);
     }
     const portfolio = markPortfolio(state, strategy, at);
@@ -447,6 +495,8 @@ export function getTradingPolicyTrialReport(state, at) {
     phase: state.phase,
     policyId: state.policyId,
     registeredAt: state.registeredAt,
+    initialBankroll: state.strategies.standard.policy.initialBankroll,
+    maxEntryContracts: state.strategies.standard.policy.maxEntryContracts ?? null,
     asOf: at,
     simulated: true,
     activeStrategyId: state.activeStrategyId,
@@ -458,6 +508,18 @@ export function getTradingPolicyTrialReport(state, at) {
     missingOutcomes: cohort
       .filter((row) => !row.outcome && at >= row.contract.expiresAt)
       .map((row) => row.contract.ticker),
+    strategies: Object.values(state.strategies).map((strategy) => ({
+      id: strategy.id,
+      label: strategy.label,
+      accountId: `${state.policyId}:${strategy.id}`,
+      cash: strategy.account.cash,
+      realizedPnl: strategy.account.realizedPnl,
+      fees: strategy.account.feesPaid,
+      fillCount: strategy.account.performance.fillCount,
+      openPositionCount: strategy.account.positions.length,
+      pendingOrderCount: strategy.account.pendingIntents.length,
+      pendingComparisonCount: strategy.account.pendingComparisons.length,
+    })),
     candidates: TRADING_POLICY_VARIANTS.slice(1).map(({ id, label }) => ({
       label,
       ...getTradingPolicyEligibility(state, id, at),

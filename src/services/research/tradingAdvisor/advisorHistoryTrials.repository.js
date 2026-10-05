@@ -126,6 +126,53 @@ export function createAdvisorHistoryTrialRepository({ client, now = Date.now }) 
     });
     return state;
   }
+  async function reportState(transaction, state) {
+    const report = getAdvisorHistoryTrialReport(state);
+    if (!state) return report;
+    const costs = (
+      await transaction.execute({
+        sql: "SELECT COALESCE(SUM(charged_cost), 0) AS total, COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS unknown_count FROM advisor_ai_reservations WHERE id LIKE ?",
+        args: [`${state.id}:%`],
+      })
+    ).rows[0];
+    const reservedOrActualCost = Number(costs.total);
+    if (!Number.isFinite(reservedOrActualCost) || reservedOrActualCost < 0)
+      fail('The durable inference cost ledger is invalid.');
+    const recordedCost = state.strategies['language-model'].inferenceCost;
+    const costDiscrepancy = Math.abs(reservedOrActualCost - recordedCost) > 1e-8;
+    // A missing archive must not make reported profit look better. Keep the larger
+    // charge until the immutable response and durable budget ledger reconcile.
+    const inferenceCost = Math.max(reservedOrActualCost, recordedCost);
+    return {
+      ...report,
+      costDiscrepancy,
+      inferenceCostAccounting:
+        'Known token charges plus the maximum reserved cost for unfinished requests.',
+      unresolvedCostReservations: Number(costs.unknown_count),
+      strategies: report.strategies.map((strategy) =>
+        strategy.id !== 'language-model'
+          ? strategy
+          : {
+              ...strategy,
+              inferenceCost,
+              recordedInferenceCost: recordedCost,
+              durableInferenceCost: reservedOrActualCost,
+              netProfit: Math.round((strategy.realizedPnl - inferenceCost) * 1e8) / 1e8,
+              guidance: {
+                ...strategy.guidance,
+                performance: {
+                  ...strategy.guidance.performance,
+                  inferenceCost,
+                  netProfit: Math.round((strategy.realizedPnl - inferenceCost) * 1e8) / 1e8,
+                  costDiscrepancy,
+                },
+              },
+              costDiscrepancy,
+              readyForReview: strategy.readyForReview && !costDiscrepancy,
+            },
+      ),
+    };
+  }
   return {
     initialize,
     ensureTrial(policy, provider, registeredAt = now()) {
@@ -179,8 +226,22 @@ export function createAdvisorHistoryTrialRepository({ client, now = Date.now }) 
       });
     },
     readState: (id) => read((transaction) => one(transaction, 'advisor_history_state', id)),
+    readPendingExecutions: (id) =>
+      read(async (transaction) => {
+        const state = await one(transaction, 'advisor_history_state', id);
+        const pending = [];
+        for (const strategy of Object.values(state?.strategies ?? {})) {
+          for (const advice of strategy.account.pendingIntents) {
+            pending.push({
+              advice,
+              attempt: await one(transaction, 'advisor_history_execution_requests', advice.id),
+            });
+          }
+        }
+        return pending;
+      }),
     /** Claim one common delayed book for all due strategies; network work happens after commit. */
-    claimExecutionObservation(trialId, at) {
+    claimExecutionObservation(trialId, at, ticker = null) {
       if (!Number.isSafeInteger(at) || at <= 0 || at > now())
         return Promise.reject(
           new ResearchDataError('A shadow execution request needs a current capture time.', 409),
@@ -193,6 +254,7 @@ export function createAdvisorHistoryTrialRepository({ client, now = Date.now }) 
         if (at > currentTime) fail('A shadow execution request cannot use a future capture time.');
         for (const strategy of Object.values(state.strategies)) {
           for (const intent of strategy.account.pendingIntents) {
+            if (ticker !== null && intent.contract.ticker !== ticker) continue;
             const minimumAt = intent.evaluatedAt + intent.policy.minimumFillDelayMs;
             const maximumAt = intent.evaluatedAt + intent.policy.maximumFillDelayMs;
             if (
@@ -250,44 +312,21 @@ export function createAdvisorHistoryTrialRepository({ client, now = Date.now }) 
           })
         ).rows[0];
         const state = row ? await one(transaction, 'advisor_history_state', row.id) : null;
-        const report = getAdvisorHistoryTrialReport(state);
-        if (!state) return report;
-        const costs = (
-          await transaction.execute({
-            sql: "SELECT COALESCE(SUM(charged_cost), 0) AS total, COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS unknown_count FROM advisor_ai_reservations WHERE id LIKE ?",
-            args: [`${state.id}:%`],
-          })
-        ).rows[0];
-        const reservedOrActualCost = Number(costs.total);
-        if (!Number.isFinite(reservedOrActualCost) || reservedOrActualCost < 0)
-          fail('The durable inference cost ledger is invalid.');
-        const recordedCost = state.strategies['language-model'].inferenceCost;
-        const costDiscrepancy = Math.abs(reservedOrActualCost - recordedCost) > 1e-8;
-        // A missing archive must not make reported profit look better. Keep the larger
-        // charge until the immutable response and durable budget ledger reconcile.
-        const inferenceCost = Math.max(reservedOrActualCost, recordedCost);
-        return {
-          ...report,
-          costDiscrepancy,
-          inferenceCostAccounting:
-            'Known token charges plus the maximum reserved cost for unfinished requests.',
-          unresolvedCostReservations: Number(costs.unknown_count),
-          strategies: report.strategies.map((strategy) =>
-            strategy.id !== 'language-model'
-              ? strategy
-              : {
-                  ...strategy,
-                  inferenceCost,
-                  recordedInferenceCost: recordedCost,
-                  durableInferenceCost: reservedOrActualCost,
-                  netProfit: Math.round((strategy.realizedPnl - inferenceCost) * 1e8) / 1e8,
-                  costDiscrepancy,
-                  readyForReview: strategy.readyForReview && !costDiscrepancy,
-                },
-          ),
-        };
+        return reportState(transaction, state);
       });
     },
+    getReports: () =>
+      read(async (transaction) => {
+        const result = await transaction.execute(
+          `SELECT state.payload, state.content_hash
+           FROM advisor_history_trials AS trial
+           JOIN advisor_history_state AS state ON state.id = trial.id
+           ORDER BY trial.registered_at DESC, trial.rowid DESC`,
+        );
+        const reports = [];
+        for (const row of result.rows) reports.push(await reportState(transaction, decode(row)));
+        return reports;
+      }),
     record(id, input) {
       const captured = JSON.parse(encode({ ...input, id: `${id}:${input.id}` }).payload);
       if (

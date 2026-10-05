@@ -6,6 +6,7 @@ import {
   recordAdvisorLanguageModelResult,
 } from '@/services/research/tradingAdvisor/advisorHistoryTrials.utils';
 import { createTradingAdvisorPolicy } from '../utils/advisorPolicy.utils';
+import { getAdvisorPlanState } from '../utils/advisorPlan.utils';
 import { START, contract, bookAt, forecastAt, outcomeAt } from './TradingAdvisor.fixtures';
 
 const NOW = START + 60000;
@@ -27,6 +28,10 @@ const observation = (at = NOW, withForecast = true, book = bookAt(at)) => ({
   ...(withForecast ? { forecast: forecastAt(at, 0.85) } : {}),
 });
 const request = (state) => state.strategies['language-model'].pendingRequest;
+const guidanceFor = (state) =>
+  getAdvisorHistoryTrialReport(state).strategies.find(
+    (strategy) => strategy.id === 'language-model',
+  ).guidance;
 function resultFor(state, action = 'BUY_YES') {
   const pending = request(state);
   const evidence = pending.evidence;
@@ -235,4 +240,199 @@ test('a recorded response advances chronology and cannot arrive before later acc
   expect(() =>
     recordAdvisorLanguageModelResult(advanced, { requestId, result, observedAt: NOW + 4000 }),
   ).toThrow(/backdated/);
+});
+
+test('AI guidance describes its own paper account and an accepted order becomes completed history after filling', () => {
+  let state = advanceAdvisorHistoryTrial(trial(), observation());
+  state = recordAdvisorLanguageModelResult(state, {
+    requestId: request(state).requestId,
+    result: resultFor(state),
+    observedAt: NOW + 4000,
+  });
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + 5000));
+  let report = guidanceFor(state);
+  expect(report.accountId).toBe('trial-test:language-model');
+  expect(report.source).toMatchObject({
+    kind: 'ai',
+    status: 'accepted',
+    decision: { action: 'BUY_YES', assessedAt: NOW + 5000 },
+  });
+  expect(report.portfolio.cash).toBe(state.strategies['language-model'].account.cash);
+  expect(report.currentPlan.accountVersion).toBe(report.portfolio.accountVersion);
+  expect(report.latestAdvice.id).toBe(report.portfolio.pendingIntents[0].id);
+  expect(report.latestAdvice.forecastCapturedAt).toBe(NOW + 5000);
+  for (const display of [
+    report.latestAdvice,
+    report.currentPlan.advice,
+    ...report.recentActivity.filter((entry) => entry.kind === 'advice'),
+  ]) {
+    expect(display).not.toHaveProperty('book');
+    expect(display).not.toHaveProperty('forecast');
+    expect(display).not.toHaveProperty('portfolio');
+    expect(display.evaluatedAt).toBe(NOW + 5000);
+    expect(display.contract).toEqual(contract);
+  }
+  expect(report.latestAdvice.id).not.toBe(state.strategies.incumbent.account.pendingIntents[0]?.id);
+  const active = getAdvisorPlanState({ report, market: contract, now: NOW + 5000 });
+  expect(active.heading).toBe('BUY UP');
+  expect(active.readiness).toBe('pending');
+  expect(active.current).not.toBeNull();
+
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + 7000, false));
+  report = guidanceFor(state);
+  const filled = getAdvisorPlanState({ report, market: contract, now: NOW + 7000 });
+  expect(report.latestAdvice.executionStatus).toBe('filled');
+  expect(report.portfolio.positions).toHaveLength(1);
+  expect(report.performance.fillCount).toBe(1);
+  expect(report.performance.inferenceCost).toBe(0.003);
+  expect(report.risk.isCurrent).toBe(true);
+  expect(new Set(report.recentActivity.map((entry) => entry.id)).size).toBe(
+    report.recentActivity.length,
+  );
+  expect(filled.heading).toBe('UP PURCHASED');
+  expect(filled.current).toBeNull();
+  expect(filled.readiness).toBe('filled');
+  expect(filled.completedFill.adviceId).toBe(report.latestAdvice.id);
+});
+
+test('pending and proposed AI responses preserve the last accepted assessment without renewing it', () => {
+  let state = advanceAdvisorHistoryTrial(trial(), observation());
+  state = recordAdvisorLanguageModelResult(state, {
+    requestId: request(state).requestId,
+    result: resultFor(state, 'NO_TRADE'),
+    observedAt: NOW + 4000,
+  });
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + 5000));
+  const accepted = guidanceFor(state);
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + 30000));
+  let report = guidanceFor(state);
+  expect(report.source).toMatchObject({
+    kind: 'ai',
+    pending: true,
+    decision: { action: 'NO_TRADE', status: 'accepted' },
+    latestDecision: { status: 'pending' },
+  });
+  expect(report.currentPlan).toEqual(accepted.currentPlan);
+  expect(getAdvisorPlanState({ report, market: contract, now: NOW + 30000 })).toMatchObject({
+    heading: 'NO TRADE',
+    active: { adviceId: accepted.currentPlan.adviceId },
+    historical: null,
+    current: null,
+    readiness: 'stale',
+  });
+
+  state = recordAdvisorLanguageModelResult(state, {
+    requestId: request(state).requestId,
+    result: resultFor(state),
+    observedAt: NOW + 34000,
+  });
+  report = guidanceFor(state);
+  expect(report.source.latestDecision).toMatchObject({ action: 'BUY_YES', status: 'proposed' });
+  expect(report.source.decision).toEqual(accepted.source.decision);
+  expect(report.currentPlan).toEqual(accepted.currentPlan);
+  expect(report.collector.heartbeatAt).toBe(NOW + 30000);
+  expect(report.latestAdvice).toEqual(accepted.latestAdvice);
+});
+
+test('a rejected AI response clearly reports a numerical fallback from the AI account', () => {
+  let state = advanceAdvisorHistoryTrial(trial(), observation());
+  const result = resultFor(state);
+  result.output.evidenceRefs = ['invented-evidence'];
+  state = recordAdvisorLanguageModelResult(state, {
+    requestId: request(state).requestId,
+    result,
+    observedAt: NOW + 4000,
+  });
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + 5000));
+  const report = guidanceFor(state);
+  expect(report.source).toMatchObject({
+    kind: 'numerical-fallback',
+    status: 'fallback',
+    pending: false,
+    decision: { fallbackReason: 'unknown_evidence_reference' },
+  });
+  expect(report.source.decision.rationale).toBeUndefined();
+  expect(report.latestAdvice.candidatePolicyVersion).toBeUndefined();
+  expect(report.currentPlan.adviceId).toBe(report.portfolio.pendingIntents[0].id);
+});
+
+test('missing market evidence does not schedule a paid AI request or invent a current assessment', () => {
+  let state = advanceAdvisorHistoryTrial(trial(), observation(NOW, true, null));
+  expect(request(state)).toBeNull();
+  expect(state.strategies['language-model'].lastRequestAt).toBeNull();
+  const report = guidanceFor(state);
+  expect(report.source).toMatchObject({
+    kind: 'numerical-fallback',
+    decision: { fallbackReason: 'book_unavailable_or_noncausal' },
+  });
+  expect(report.portfolio.pendingIntents).toHaveLength(0);
+  expect(report.portfolio.cash).toBe(100);
+  expect(report.currentPlan.action).toBe('unavailable');
+
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + policy.cadenceMs));
+  expect(request(state).evidence.available).toBe(true);
+});
+
+test('a sole no-trade choice updates the local plan without spending or delaying a later AI choice', () => {
+  const noTradeObservation = (at) => ({
+    ...observation(at),
+    forecast: forecastAt(at, 0.5),
+  });
+  let state = advanceAdvisorHistoryTrial(trial(), noTradeObservation(NOW));
+  state = advanceAdvisorHistoryTrial(state, noTradeObservation(NOW + policy.cadenceMs));
+  const strategy = state.strategies['language-model'];
+  expect(strategy.pendingRequest).toBeNull();
+  expect(strategy.lastRequestAt).toBeNull();
+  expect(strategy.inferenceCost).toBe(0);
+  expect(strategy.failureCount).toBe(0);
+  expect(strategy.vetoCount).toBe(0);
+  expect(strategy.account.pendingIntents).toHaveLength(0);
+  expect(guidanceFor(state)).toMatchObject({
+    source: {
+      kind: 'numerical',
+      status: 'local',
+      pending: false,
+      providerReason: null,
+      decision: { action: 'NO_TRADE' },
+    },
+    currentPlan: { action: 'no-trade' },
+  });
+
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + policy.cadenceMs * 2));
+  expect(request(state).evidence.options.map((option) => option.action)).toEqual([
+    'NO_TRADE',
+    'BUY_YES',
+  ]);
+  expect(state.strategies['language-model'].lastRequestAt).toBe(NOW + policy.cadenceMs * 2);
+});
+
+test('a local no-trade observation does not discard an in-flight AI decision', () => {
+  let state = advanceAdvisorHistoryTrial(trial(), observation());
+  const pending = request(state);
+  state = advanceAdvisorHistoryTrial(state, {
+    ...observation(NOW + 5000),
+    forecast: forecastAt(NOW + 5000, 0.5),
+  });
+  expect(request(state)).toEqual(pending);
+  expect(state.strategies['language-model'].latestDecision.status).toBe('pending');
+});
+
+test('provider failure details explain the numerical fallback without disguising it as an AI decision', () => {
+  let state = advanceAdvisorHistoryTrial(trial(), observation());
+  state = recordAdvisorLanguageModelResult(state, {
+    requestId: request(state).requestId,
+    result: {
+      status: 'provider_error',
+      reason: 'provider_quota_exceeded',
+      respondedAt: NOW + 4000,
+      inferenceCostUsd: 0,
+    },
+    observedAt: NOW + 4000,
+  });
+  state = advanceAdvisorHistoryTrial(state, observation(NOW + 5000));
+  expect(guidanceFor(state).source).toMatchObject({
+    kind: 'numerical-fallback',
+    providerReason: 'provider_quota_exceeded',
+    decision: { fallbackReason: 'provider_quota_exceeded' },
+  });
 });

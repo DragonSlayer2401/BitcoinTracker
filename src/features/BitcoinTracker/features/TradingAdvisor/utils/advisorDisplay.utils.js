@@ -11,12 +11,22 @@ export const formatAdvisorQuantity = (value) =>
 export const getAdvisorSideLabel = (side) => (side === 'yes' ? 'UP' : side === 'no' ? 'DOWN' : '');
 
 const reasons = {
+  provider_authentication_failed: 'The AI provider rejected the configured API key.',
+  provider_access_denied: 'The API key does not have access to the AI provider or model.',
+  provider_quota_exhausted:
+    'The AI API account has no available credits or has reached its spending limit. Restore API credits or quota, then restart collection.',
+  provider_rate_limited: 'The AI provider is temporarily rate limiting requests.',
+  provider_request_rejected: 'The AI provider rejected the assessment request format.',
+  provider_http_error: 'The AI provider could not complete the assessment request.',
   risk_valuation_unavailable_or_stale:
     'New entries need a fresh estimate of the account’s sale value.',
   equity_drawdown_limit:
     'The account drawdown stop has paused new entries. Existing positions can still be sold.',
   daily_equity_loss_limit: 'The daily account-loss limit has paused new entries.',
-  portfolio_loss_capacity_exhausted: 'Existing BTC exposure uses the remaining loss budget.',
+  portfolio_loss_capacity_exhausted:
+    'Insufficient loss capacity: the account has no remaining loss budget for a new entry.',
+  insufficient_loss_capacity:
+    'Insufficient loss capacity: the remaining risk budget cannot cover a qualifying entry, including fees and slippage.',
   loss_cooldown: 'Waiting after a losing trade before considering another entry.',
   reentry_cooldown: 'Waiting after the last sale before considering another entry.',
   partial_delayed_snapshot_simulation:
@@ -35,18 +45,28 @@ const reasons = {
   sale_better_than_hold_value:
     'Selling now is estimated to be worth more than holding to settlement, after costs and uncertainty.',
   insufficient_exit_depth: 'There are not enough displayed buyers for an estimated exit.',
-  hold_value_exceeds_sale: 'Selling does not clear the required fees and uncertainty margin.',
+  hold_value_exceeds_sale:
+    'Keep the position. At the last review, holding was estimated to be worth more than selling after trading costs.',
   daily_loss_limit: 'The daily realized loss threshold has stopped new entries.',
   cash_reserve_limit: 'Keep the remaining cash reserve available.',
   open_risk_limit: 'The account has reached its open risk limit.',
   fee_adjusted_entry_edge:
     'The estimated settlement value exceeds the purchase cost after fees, slippage and a caution margin.',
   insufficient_entry_edge_or_depth:
-    'No suitable entry: the estimated advantage or available liquidity is too small.',
+    'This older assessment did not record which entry restriction applied.',
+  insufficient_entry_edge:
+    'Insufficient edge: executable prices do not leave enough estimated advantage after fees, slippage and the caution margin.',
+  missing_entry_depth:
+    'Missing depth: the displayed order book cannot fill one contract for an entry.',
   fee_adjusted_exit_target:
     'Reassess selling if buyers reach this fee-adjusted price and the probability estimate still supports it.',
   delayed_snapshot_simulation: 'Simulated fill using a later order book.',
-  execution_window_expired: 'The allowed fill window elapsed without a simulated fill.',
+  execution_window_expired:
+    'Expired execution: the allowed fill window elapsed without a simulated fill.',
+  insufficient_execution_depth:
+    'Missing depth: there is not enough displayed liquidity for the simulated order.',
+  execution_edge_lost:
+    'Insufficient edge: the later execution price no longer meets the required advantage.',
   no_causal_execution_book: 'No new order book was available for the fill attempt.',
   pending_execution: 'An earlier paper order is still waiting for its fill attempt.',
   too_close_to_settlement: 'The event is too close to settlement for a new entry.',

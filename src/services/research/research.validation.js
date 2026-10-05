@@ -3,6 +3,13 @@ import {
   KALSHI_OUTCOME_DEFINITION,
 } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
 import { getResearchVariantNames } from '@/features/BitcoinTracker/utils/researchVariantConfig.utils';
+import { isChartPatternSnapshot } from '@/features/BitcoinTracker/utils/patterns/chartPatterns.utils';
+import { getPatternLearningFeatures } from '@/features/BitcoinTracker/utils/learning/patternFeatures.utils';
+import {
+  PATTERN_CANDIDATE_KINDS,
+  isPatternModelArtifact,
+  getPatternModelSchema,
+} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
 
 export class ResearchDataError extends Error {
   constructor(message, status = 400) {
@@ -143,6 +150,57 @@ function validateCommonFields(row) {
   }
 }
 
+function validatePatternEvidence(row) {
+  if (
+    !['chartPatterns', 'patternLearningFeatures', 'patternShadowPredictions'].some((key) =>
+      Object.hasOwn(row, key),
+    )
+  )
+    return;
+  const snapshot = row.chartPatterns;
+  if (
+    !['decision', 'observation'].includes(row.event) ||
+    row.inputStatus !== 'captured' ||
+    !isChartPatternSnapshot(snapshot, { cutoffAt: row.featureCutoffAt, target: row.target }) ||
+    getCanonicalResearchJson(
+      getPatternLearningFeatures({
+        learningFeatures: row.learningFeatures,
+        chartPatterns: snapshot,
+      }),
+    ) !== getCanonicalResearchJson(row.patternLearningFeatures) ||
+    !Array.isArray(row.patternShadowPredictions) ||
+    row.patternShadowPredictions.length > 7
+  )
+    throw new ResearchDataError('Pattern evidence must match the original captured features.');
+  const kinds = new Set();
+  for (const prediction of row.patternShadowPredictions) {
+    const schema = getPatternModelSchema(prediction?.modelVersion);
+    if (
+      !PATTERN_CANDIDATE_KINDS.includes(prediction?.kind) ||
+      kinds.has(prediction.kind) ||
+      !schema ||
+      schema.featureVersion !== row.patternLearningFeatures.schemaVersion ||
+      schema.patternVersion !== snapshot.version ||
+      typeof prediction.suiteId !== 'string' ||
+      !/^[0-9]+-[a-z0-9]+$/.test(prediction.suiteId) ||
+      prediction.modelId !==
+        `${prediction.modelVersion}-${prediction.kind}-${prediction.suiteId}` ||
+      !isResearchTimestamp(prediction.trainedAt) ||
+      prediction.trainedAt >= row.windowStartAt ||
+      prediction.featureCutoffAt !== row.featureCutoffAt ||
+      typeof prediction.modelUsed !== 'boolean' ||
+      typeof prediction.aboveProbability !== 'number' ||
+      !Number.isFinite(prediction.aboveProbability) ||
+      prediction.aboveProbability < 0 ||
+      prediction.aboveProbability > 1
+    )
+      throw new ResearchDataError(
+        'Pattern predictions must be frozen before their contract starts.',
+      );
+    kinds.add(prediction.kind);
+  }
+}
+
 export function validateEvidenceRow(row) {
   validateCommonFields(row);
   if (
@@ -161,6 +219,7 @@ export function validateEvidenceRow(row) {
   ) {
     throw new ResearchDataError('Research inputs cannot come from after the recording time.');
   }
+  validatePatternEvidence(row);
   if (row.researchInputSnapshot != null) {
     validateResearchInputSnapshot(row);
     const { researchInputSnapshot, ...evidence } = row;
@@ -173,6 +232,20 @@ export function validateEvidenceRow(row) {
 export function validateResearchInputSnapshot(row) {
   const snapshot = row.researchInputSnapshot;
   const hasPublishedPrediction = row.decision === 'pending' || row.aboveProbability != null;
+  if (Boolean(snapshot?.expectedPatterns) !== Boolean(row.chartPatterns))
+    throw new ResearchDataError('Replay must retain the originally captured pattern schema.');
+  if (
+    snapshot?.expectedPatterns &&
+    getCanonicalResearchJson(snapshot.expectedPatterns) !==
+      getCanonicalResearchJson({
+        chartPatterns: row.chartPatterns,
+        patternLearningFeatures: row.patternLearningFeatures,
+        patternShadowPredictions: row.patternShadowPredictions,
+      })
+  )
+    throw new ResearchDataError(
+      'Replay patterns must match the original captured pattern evidence.',
+    );
   if (
     row.event !== 'decision' ||
     snapshot?.version !== 'kalshi-input-replay-v1' ||
@@ -287,6 +360,8 @@ export function validateModelArtifact(artifact) {
   if (artifact.outcomeDefinition !== KALSHI_OUTCOME_DEFINITION) {
     throw new ResearchDataError('Only Kalshi model artifacts can be stored.');
   }
+  if (getPatternModelSchema(artifact.version) && !isPatternModelArtifact(artifact))
+    throw new ResearchDataError('The pattern shadow model artifact is invalid.');
   return getCanonicalResearchJson(artifact, 2 * 1024 * 1024);
 }
 

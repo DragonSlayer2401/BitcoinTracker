@@ -204,6 +204,13 @@ export function getEvidenceRow({
       ? (earlyShadowPrediction ?? inputEstimate?.earlyShadowPrediction ?? null)
       : null,
     researchExperiment: canHaveInputs ? (inputEstimate?.researchExperiment ?? null) : null,
+    ...(canHaveInputs && inputEstimate?.chartPatterns
+      ? {
+          chartPatterns: inputEstimate.chartPatterns,
+          patternLearningFeatures: inputEstimate.patternLearningFeatures,
+          patternShadowPredictions: inputEstimate.patternShadowPredictions,
+        }
+      : {}),
     // The server stores full inputs separately; outcome/restored rows never recreate a snapshot.
     ...(event === 'decision' &&
     canHaveInputs &&

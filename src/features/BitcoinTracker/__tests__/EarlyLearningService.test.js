@@ -1,5 +1,11 @@
 /** @jest-environment node */
 import { createLearningService } from '../../../services/research/learning.service';
+// These tests isolate early/full activation. Pattern training has separate integration tests.
+jest.mock('../utils/patternEvaluation.utils', () => ({ evaluatePatternChallengers: () => ({}) }));
+jest.mock('../../../services/research/patterns/patternLearning.service', () => ({
+  selectPatternCandidates: () => [],
+  advancePatternLearning: async () => ({ status: 'insufficient-data', candidates: [] }),
+}));
 import { createChallengerService } from '../../../services/research/challenger.service';
 import { evaluateResearchExperiments } from '../utils/researchEvaluation.utils';
 import { trainOutcomeCandidate, evaluateShadowCandidate } from '../utils/learning/training.utils';
@@ -221,6 +227,7 @@ test('fits the early candidate while the full model is still collecting and free
     candidate: null,
     earlyCandidate: candidate,
     challengers: emptyChallengerStatus,
+    patterns: { candidates: [], active: null, suites: [] },
   });
 });
 
@@ -336,6 +343,7 @@ test('degradation retires active early influence and remains disabled after serv
     candidate: null,
     earlyCandidate: null,
     challengers: emptyChallengerStatus,
+    patterns: { candidates: [], active: null, suites: [] },
   });
   expect(trainEarlyCandidate).not.toHaveBeenCalled();
 });
@@ -356,6 +364,7 @@ test('read-only model and status responses suppress degraded early influence bef
     candidate: null,
     earlyCandidate: null,
     challengers: emptyChallengerStatus,
+    patterns: { candidates: [], active: null, suites: [] },
   });
   const status = await service.getLearningStatus({ now });
   expect(status.active).toBeNull();

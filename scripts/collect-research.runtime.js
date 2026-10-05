@@ -21,11 +21,17 @@ import {
 import { createLearningService } from '../src/services/research/learning.service';
 import { createPaperTradingRepository } from '../src/services/research/paperTrading/paperTrading.repository';
 import { createPaperTradingService } from '../src/services/research/paperTrading/paperTrading.service';
+import { createPatternResearchRepository } from '../src/services/research/patterns/patternResearch.repository';
+import { createPatternResearchService } from '../src/services/research/patterns/patternResearch.service';
 import { createTradingAdvisorRepository } from '../src/services/research/tradingAdvisor/tradingAdvisor.repository';
 import { createConfiguredTradingAdvisorService } from '../src/services/research/tradingAdvisor/tradingAdvisor.service';
 import { createTradingPolicyTrialRepository } from '../src/services/research/tradingAdvisor/tradingPolicyTrials.repository';
 import { createAdvisorHistoryTrialRepository } from '../src/services/research/tradingAdvisor/advisorHistoryTrials.repository';
 import { getResearchForecast } from '../src/features/BitcoinTracker/utils/researchForecast.utils';
+import {
+  createAdvisorForecast,
+  getAdvisorBookQuote,
+} from '../src/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecast.utils';
 import { getKalshiMarketConditions } from '../src/features/BitcoinTracker/utils/kalshi/marketConditions.utils';
 import {
   acquireCollectorLock,
@@ -38,6 +44,7 @@ import {
   fetchKalshiBenchmark,
 } from '../src/services/kalshi/kalshi.service';
 import { isKalshiContract } from '../src/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { getKalshiQuoteSnapshot } from '../src/features/BitcoinTracker/utils/kalshi/marketQuote.utils';
 import {
   COLLECTOR_HEARTBEAT_VERSION,
   COLLECTOR_HEALTH_POLICY,
@@ -79,6 +86,18 @@ function getFreshStreamTicker(snapshot, now) {
     Number.isFinite(ticker.time) &&
     now - ticker.time <= 5000 &&
     ticker.time <= now
+    ? ticker
+    : null;
+}
+
+function getObservedTicker(ticker, now) {
+  return ticker &&
+    Number.isSafeInteger(ticker.time) &&
+    ticker.time > 0 &&
+    ticker.time <= now &&
+    Number.isSafeInteger(ticker.receivedAt) &&
+    ticker.receivedAt > 0 &&
+    ticker.receivedAt <= now
     ? ticker
     : null;
 }
@@ -154,6 +173,7 @@ export async function runResearchCollector({
   updateResearchModels = (options) => learningService.runLearningCycle(options),
   stopBackgroundTasks = async () => {},
   paperTradingService = null,
+  patternResearchService = null,
   tradingAdvisorService = null,
 }) {
   const releaseLock = await acquireCollectorLock(statePath);
@@ -366,8 +386,7 @@ export async function runResearchCollector({
       // An exchange clock can lead local receipt. Exclude an ineligible ticker from
       // both the calculation and its archived stream snapshot until that time arrives.
       const snapshot = { ...receivedSnapshot, ticker: streamTicker };
-      const causalRestTicker =
-        restTicker?.time <= observedAt && restTicker?.receivedAt <= observedAt ? restTicker : null;
+      const causalRestTicker = getObservedTicker(restTicker, observedAt);
       const ticker = streamTicker ?? causalRestTicker;
       const kalshiMarket = markets.find(
         (market) =>
@@ -393,10 +412,11 @@ export async function runResearchCollector({
         hasRunningHeartbeat = true;
       }
       const capturedModels = models;
-      // Both prospective experiments capture the same production forecast contract. Each owns
-      // its own cadence, immutable policy, account and execution evidence.
+      // Prospective experiments share the production forecast contract. Pattern book capture
+      // remains independent of every account's entry decisions.
       for (const [taskName, service] of [
         ['paper-trading', paperTradingService],
+        ['pattern-research', patternResearchService],
         ['trading-advisor', tradingAdvisorService],
       ]) {
         if (!service) continue;
@@ -405,44 +425,48 @@ export async function runResearchCollector({
           () =>
             service.advance({
               market: kalshiMarket,
-              getForecast: () => {
-                const capturedInput = {
+              getForecast: (execution) => {
+                // Advice and delayed fills recapture live inputs after the execution book arrives.
+                // The entry-and-hold paper experiment keeps its original tick capture.
+                const capturedAt = execution ? execution.now : observedAt;
+                const contract = execution ? execution.contract : kalshiMarket;
+                let currentInputs = {
                   ...inputs,
-                  kalshiMarket,
-                  target: kalshiMarket?.target,
-                  expiresAt: kalshiMarket?.expiresAt,
-                  now: observedAt,
-                  horizonMinutes: (kalshiMarket?.expiresAt - observedAt) / 60_000,
+                  kalshiQuote: getKalshiQuoteSnapshot(kalshiMarket, observedAt),
                 };
-                const estimate = getResearchForecast(
-                  capturedInput,
-                  capturedModels,
-                  kalshiMarket?.startsAt,
-                );
-                const researchInputSnapshot = createResearchInputSnapshot(
-                  capturedInput,
-                  capturedModels,
-                  kalshiMarket?.startsAt,
-                  estimate,
-                );
-                return {
-                  available: estimate.available && researchInputSnapshot.timing.replayable,
-                  reason: estimate.reason ?? null,
-                  aboveProbability: estimate.aboveProbability,
-                  capturedAt: observedAt,
-                  modelVersion: estimate.modelVersion,
-                  modelId: estimate.learning?.modelId ?? null,
-                  referencePrice: estimate.kalshi?.referencePrice ?? null,
-                  referenceAt: estimate.kalshi?.referenceAt ?? null,
-                  referenceReceivedAt: estimate.kalshi?.referenceReceivedAt ?? null,
-                  referenceSource: estimate.kalshi?.referenceSource ?? null,
-                  volatility: estimate.volatility ?? null,
-                  minuteVolatility:
-                    estimate.kalshi?.minuteVolatility ??
-                    estimate.pressure?.components?.minuteVolatility ??
-                    null,
-                  researchInputSnapshot,
+                if (execution) {
+                  const currentStream = stream.getSnapshot(capturedAt);
+                  const currentTicker = getFreshStreamTicker(currentStream, capturedAt);
+                  const currentBenchmark = benchmarkStream.getSnapshot(capturedAt);
+                  currentInputs = {
+                    candles: candles?.filter(
+                      (candle) =>
+                        Number.isSafeInteger(candle.time) &&
+                        candle.time <= capturedAt &&
+                        (candle.receivedAt === undefined ||
+                          (Number.isSafeInteger(candle.receivedAt) &&
+                            candle.receivedAt <= capturedAt)),
+                    ),
+                    ticker: currentTicker ?? getObservedTicker(restTicker, capturedAt),
+                    benchmark: currentBenchmark?.available ? currentBenchmark : benchmark,
+                    stream: { ...currentStream, ticker: currentTicker },
+                    derivatives: futuresStream.getSnapshot(capturedAt),
+                    kalshiQuote: getAdvisorBookQuote({
+                      contract,
+                      book: execution.book,
+                      now: capturedAt,
+                    }),
+                  };
+                }
+                const capturedInput = {
+                  ...currentInputs,
+                  kalshiMarket: contract,
+                  target: contract?.target,
+                  expiresAt: contract?.expiresAt,
+                  now: capturedAt,
+                  horizonMinutes: (contract?.expiresAt - capturedAt) / 60_000,
                 };
+                return createAdvisorForecast(capturedInput, capturedModels, contract?.startsAt);
               },
             }),
           (error) => {
@@ -453,7 +477,13 @@ export async function runResearchCollector({
                 ADVISOR_STORAGE_CORRUPT: 'adviser-integrity-check',
                 ADVISOR_LEASE_LOST: 'adviser-lease-lost',
               }[error?.code] ?? getCollectorFailureCode(error);
-            return `${taskName === 'trading-advisor' ? 'Trading adviser' : 'Paper trading'} could not advance (${category}). Saved decisions and capital reservations are retained; forecast research continues.`;
+            const label =
+              taskName === 'pattern-research'
+                ? 'Pattern book collection'
+                : taskName === 'trading-advisor'
+                  ? 'Trading adviser'
+                  : 'Paper trading';
+            return `${label} could not advance (${category}). Saved decisions and capital reservations are retained; forecast research continues.`;
           },
         );
       }
@@ -711,6 +741,11 @@ export async function runResearchCollector({
               active: report.active,
               candidate: report.candidate,
               earlyCandidate: report.earlyCandidate,
+              patterns: {
+                candidates: report.patterns?.candidates ?? [],
+                active: report.patterns?.active ?? null,
+                suites: report.patterns?.suites ?? [],
+              },
               challengers: {
                 active: report.challengers?.active ?? null,
                 candidates: report.challengers?.candidates ?? [],
@@ -742,6 +777,8 @@ export async function runResearchCollector({
       await waitForCollectorTask(publishHeartbeat(shutdownStatus), shutdownTimeoutMs);
       if (paperTradingService)
         await waitForCollectorTask(paperTradingService.stop(shutdownStatus), shutdownTimeoutMs);
+      if (patternResearchService)
+        await waitForCollectorTask(patternResearchService.stop(), shutdownTimeoutMs);
       if (tradingAdvisorService)
         await waitForCollectorTask(tradingAdvisorService.stop(shutdownStatus), shutdownTimeoutMs);
     } catch {
@@ -814,6 +851,9 @@ export async function runCollectorCommand(args) {
       updateResearchModels: () => background.run('learning'),
       stopBackgroundTasks: () => background.close(),
       paperTradingService,
+      patternResearchService: options.paperTrading
+        ? createPatternResearchService({ repository: createPatternResearchRepository({ client }) })
+        : null,
       tradingAdvisorService,
     });
   } catch (error) {

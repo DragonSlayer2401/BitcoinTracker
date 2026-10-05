@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Alert, Button, Modal } from 'react-bootstrap';
+import { Alert, Button, ButtonGroup, Modal } from 'react-bootstrap';
 import { useGetTradingAdvisorReportQuery } from '@/services/research/tradingAdvisor/tradingAdvisor.api';
 import { formatCountdown, formatDateTime, formatPrice, formatTime } from '../../utils/format.utils';
 import AdvisorAction from './components/AdvisorAction';
@@ -14,6 +14,7 @@ import './TradingAdvisor.scss';
 
 export default function TradingAdvisor({ market, now, chart, research, hasMarketError = false }) {
   const [showResearch, setShowResearch] = useState(false);
+  const [selectedAccount, setSelectedAccount] = useState(null);
   const query = useGetTradingAdvisorReportQuery(undefined, {
     pollingInterval: 5000,
     skipPollingIfUnfocused: true,
@@ -21,7 +22,31 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
     refetchOnReconnect: true,
     refetchOnMountOrArgChange: true,
   });
-  const report = query.data;
+  const baselineReport = query.data;
+  const historyTrials = baselineReport?.historyTrials;
+  const aiGuidance = historyTrials?.strategies?.find(
+    (strategy) => strategy.id === 'language-model',
+  )?.guidance;
+  const isAiEnabled = Boolean(
+    historyTrials?.provider &&
+    historyTrials.provider.enabled !== false &&
+    historyTrials.provider.status !== 'disabled',
+  );
+  const isAiSelected = selectedAccount === 'ai' || (selectedAccount === null && isAiEnabled);
+  // Select the whole account: an AI plan must never be paired with baseline holdings or cash.
+  const report = isAiSelected
+    ? {
+        ...aiGuidance,
+        trials: baselineReport?.trials,
+        historyTrials,
+        source: aiGuidance?.source ?? {
+          kind: null,
+          providerStatus: historyTrials?.provider?.status,
+          providerReason: historyTrials?.provider?.reason,
+          pending: false,
+        },
+      }
+    : baselineReport;
   const portfolio = report?.portfolio;
   const policy = report?.policy;
   // A response can arrive between clock ticks; use its client receipt time as well.
@@ -47,6 +72,24 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
               <span className="small text-secondary">Paper adviser · no real orders</span>
             </div>
             <div className="d-flex align-items-center flex-wrap gap-2">
+              {(isAiEnabled || aiGuidance || isAiSelected) && (
+                <ButtonGroup size="sm" aria-label="Paper account view">
+                  <Button
+                    variant={isAiSelected ? 'secondary' : 'outline-secondary'}
+                    aria-pressed={isAiSelected}
+                    onClick={() => setSelectedAccount('ai')}
+                  >
+                    AI-assisted
+                  </Button>
+                  <Button
+                    variant={!isAiSelected ? 'secondary' : 'outline-secondary'}
+                    aria-pressed={!isAiSelected}
+                    onClick={() => setSelectedAccount('baseline')}
+                  >
+                    Numerical baseline
+                  </Button>
+                </ButtonGroup>
+              )}
               <AdvisorPerformance report={report} isStale={isAccountStale} />
               <AdvisorRisk report={report} now={reportTime} isStale={isAccountStale} />
               <AdvisorSetup onSaved={query.refetch} />
@@ -60,6 +103,14 @@ export default function TradingAdvisor({ market, now, chart, research, hasMarket
               </Button>
             </div>
           </div>
+          {isAiSelected && (
+            <p className="small text-secondary mb-2">
+              AI-assisted paper account · decisions, balances and positions belong to this account.
+              Compare its results with the numerical baseline in Performance.
+              {Number.isSafeInteger(policy?.maxEntryContracts) &&
+                ` Research entry limit: ${policy.maxEntryContracts} contract${policy.maxEntryContracts === 1 ? '' : 's'}.`}
+            </p>
+          )}
           {report && (
             <p
               className={`advisor-account-time small mb-2 ${isAccountStale ? 'text-warning' : 'text-secondary'}`}

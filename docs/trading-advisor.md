@@ -64,6 +64,13 @@ Daily realized losses and daily equity declines do not independently stop or res
 An unknown or stale complete liquidation mark stops new buys. Risk checks run again at execution
 and can reduce the fill quantity. Sales remain available when entry risk limits trip.
 
+New independent research versions additionally cap each entry at one contract, including delayed
+execution and AI-selected entries. This cap does not truncate sales of previously held inventory.
+The original account retains its saved policy, cash, losses and risk floor. At the October 4
+inspection, its $85.079 cash left $0.079 above the $85 floor; that balance cannot support an entry
+whose worst-case cost exceeds the remaining capacity. New decisions distinguish insufficient loss
+capacity, insufficient edge, missing depth and expired execution.
+
 Daily equity and realized P&L remain recorded for reporting. The account
 waits two minutes after a sale/settlement and five minutes after a realized loss before
 new entry. These entry controls cannot promise a realized loss ceiling: liquidity, gaps and
@@ -230,10 +237,15 @@ treating unpriced holdings as zero, and neither automatically liquidates without
 
 ## Prospective strategy trials
 
-Each configured V2 run registers standard rules and three candidates before collecting results:
+Each configured V2 run derives a separately versioned research policy with one contract per entry
+and registers standard rules and three candidates before collecting results:
 more selective entries (4-cent minimum edge), earlier exits (half-cent advantage), and smaller
 positions (one-eighth Kelly). All other profile/risk limits and starting allocations are identical.
 Each has an independent shadow account; one candidate's fills never spend another's cash.
+The new policy uses the existing trial infrastructure, with initial paper allocations explicitly
+reported for the new experiment. Existing experiment balances and losses are preserved, and a
+restart reuses the same frozen research version. Pending old trial obligations drain before a
+version switch. No past observations are enrolled into the new cohort.
 
 Trials reuse every available adviser decision/execution book and the collector's official results.
 They have no exchange client and do not request extra data. Missing delayed observations become
@@ -247,13 +259,15 @@ a positive conservative paired-profit lower-bound estimate and acceptable relati
 The statistical screen uses an approximate standard-error calculation with a 2.4 multiplier for
 the three candidates; it does not establish future profitability or eliminate serial dependence.
 
-A qualifying strategy changes only its registered entry, exit or sizing setting in the same
-paper account. Cash, holdings, losses and hard risk limits stay intact. Decisions archive the
-selected policy; repository replay checks the selection that existed at that time. Later fills
+A qualifying research strategy is reported within its own experiment; its results do not change
+the original adviser's selected policy or loss capacity. Legacy trials retain their historical
+transitions. Cash, holdings, losses and hard risk limits stay intact. Later fills
 use the intention's saved policy. Subsequent resolved contracts feed a rolling 40-event monitor;
 after at least 20, profit/drawdown deterioration restores standard rules. Rejected/rolled-back
 trials cannot reuse that sample to try again; a new setup registers fresh future evidence.
-**Performance** shows active rules, progress, net profit, paired advantage, coverage and blockers.
+**Performance** shows selected rules, initial funding, entry cap, separate account balances,
+progress, net profit, paired advantage, coverage and blockers. Earlier policy and provider
+experiments remain individually expandable; their results are never added to the new account.
 
 ## Storage and ownership
 

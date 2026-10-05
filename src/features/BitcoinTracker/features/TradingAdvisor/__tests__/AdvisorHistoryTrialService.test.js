@@ -140,6 +140,32 @@ test('disabled provider never invokes inference while the incumbent and history 
   expect((await service.getReport()).provider.status).toBe('disabled');
 });
 
+test('flat no-trade observations never call the provider and a new opportunity resumes AI selection', async () => {
+  const provider = deferredProvider();
+  const service = trialService(provider);
+  await service.start();
+  clock = START + 60000;
+  await service.observe(observation({ forecast: forecastAt(clock, 0.5) }));
+  clock += policy.cadenceMs;
+  await service.observe(observation({ forecast: forecastAt(clock, 0.5) }));
+  expect(provider.invoke).not.toHaveBeenCalled();
+  expect((await client.execute('SELECT id FROM advisor_ai_reservations')).rows).toHaveLength(0);
+  const language = (await service.getReport()).strategies.find(
+    (strategy) => strategy.id === 'language-model',
+  );
+  expect(language.guidance.currentPlan.action).toBe('no-trade');
+  expect(language.guidance.source.kind).toBe('numerical');
+  expect(language.inferenceCost).toBe(0);
+
+  clock += policy.cadenceMs;
+  await service.observe(observation());
+  expect(provider.invoke).toHaveBeenCalledTimes(1);
+  expect(provider.invoke.mock.calls[0][0].evidence.options.map((option) => option.action)).toEqual([
+    'NO_TRADE',
+    'BUY_YES',
+  ]);
+});
+
 test('an independent AI order receives its delayed fill while the incumbent only holds', async () => {
   const provider = deferredProvider();
   const historyTrials = trialService(provider);
