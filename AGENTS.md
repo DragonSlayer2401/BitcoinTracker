@@ -30,7 +30,7 @@ Jest and Testing Library verify behavior. Prettier owns formatting.
 ## Documentation routing
 
 Keep one file per standard under `docs/`. Group project layout and feature ownership under
-`docs/architecture/`. Keep the services and testing guides at the top level of `docs/`.
+`docs/architecture/`. Keep the coding, services, and testing guides at the top level of `docs/`.
 
 Read the standard that matches the task alongside the affected implementation and tests. For topics
 without a standard yet, inspect the relevant code and configuration.
@@ -38,6 +38,7 @@ without a standard yet, inspect the relevant code and configuration.
 | Work                                                                             | Standard                                                                     |
 | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | Choosing a top-level folder for project code                                     | [Project folder layout](docs/architecture/architecture.md) (in review)       |
+| Writing or reviewing functions, identifiers, or filenames                        | [Coding standards](docs/coding.md) (in review)                               |
 | Defining features and sub-features or choosing where shared feature code belongs | [Feature structure and ownership](docs/architecture/features.md) (in review) |
 | Adding or changing API endpoints, uncached requests, or API helpers              | [APIs and services](docs/services.md) (in review)                            |
 | Writing, organizing, or reviewing automated tests                                | [Automated feature tests](docs/testing.md) (in review)                       |
