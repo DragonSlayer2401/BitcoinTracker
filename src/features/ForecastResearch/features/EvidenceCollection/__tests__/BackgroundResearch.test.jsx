@@ -1,14 +1,9 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import useBackgroundResearch, {
   BACKGROUND_RESEARCH_STORAGE_KEY,
 } from '../hooks/useBackgroundResearch';
 import { appendEvidenceRows } from '../utils/evidenceStorage.utils';
 import { KALSHI_OUTCOME_DEFINITION } from '@/features/MarketData/utils/kalshi/contract.utils';
-import { fetchKalshiMarketClient } from '@/services/kalshi/kalshi.client.service';
-
-jest.mock('@/services/kalshi/kalshi.client.service', () => ({
-  fetchKalshiMarketClient: jest.fn(),
-}));
 
 jest.mock('../utils/evidenceStorage.utils', () => ({
   ...jest.requireActual('../utils/evidenceStorage.utils'),
@@ -38,8 +33,11 @@ beforeEach(() => {
 
 describe('shared browser recording', () => {
   let originalLocks;
+  let originalFetch;
   beforeEach(() => {
     localStorage.clear();
+    originalFetch = global.fetch;
+    global.fetch = jest.fn();
     originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
     Object.defineProperty(navigator, 'locks', {
       configurable: true,
@@ -48,6 +46,8 @@ describe('shared browser recording', () => {
     jest.spyOn(Date, 'now').mockReturnValue(start + 180_000);
   });
   afterEach(() => {
+    global.fetch = originalFetch;
+    jest.useRealTimers();
     if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
     else delete navigator.locks;
     jest.restoreAllMocks();
@@ -152,8 +152,8 @@ describe('shared browser recording', () => {
 
   test('Kalshi background research settles its saved contract independently of the selected market', async () => {
     const market = {
-      ticker: 'KXBTC15M-SAVED',
-      eventTicker: 'KXBTC15M-SAVED',
+      ticker: 'KXBTC15M-27JAN150815-15',
+      eventTicker: 'KXBTC15M-27JAN150815',
       seriesTicker: 'KXBTC15M',
       target: 99_500,
       startsAt: start,
@@ -180,18 +180,24 @@ describe('shared browser recording', () => {
     await waitFor(() => expect(appendEvidenceRows).toHaveBeenCalledTimes(1));
     const captured = appendEvidenceRows.mock.calls[0][0][0];
     expect(captured.target).toBe(99_500);
-    fetchKalshiMarketClient.mockResolvedValue({
-      ...market,
-      status: 'finalized',
-      result: 'yes',
-      settlementPrice: 99_500,
-      receivedAt: deadline + 2000,
-      settledAt: deadline + 1000,
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...market,
+        status: 'finalized',
+        result: 'yes',
+        settlementPrice: 99_500,
+        receivedAt: deadline + 2000,
+        settledAt: deadline + 1000,
+      }),
     });
     Date.now.mockReturnValue(deadline + 2000);
     rerender({ ...kalshiProps, now: deadline + 2000, ticker: quote(deadline + 2000), markets: [] });
     await waitFor(() =>
-      expect(fetchKalshiMarketClient).toHaveBeenCalledWith(market.ticker, expect.anything()),
+      expect(global.fetch).toHaveBeenCalledWith(
+        `/api/kalshi/markets/${market.ticker}`,
+        expect.anything(),
+      ),
     );
     await waitFor(() => expect(result.current.status.phase).toBe('settling'));
     Date.now.mockReturnValue(deadline + 3000);
@@ -207,5 +213,44 @@ describe('shared browser recording', () => {
       aboveProbability: captured.aboveProbability,
       kalshiOutcome: { result: 'yes', marketTicker: market.ticker },
     });
+  });
+
+  test('makes room for the next contract when settlement requests stall and retries after the cooldown', async () => {
+    jest.useFakeTimers({ now: props.now });
+    global.fetch.mockImplementation(
+      (_, { signal }) =>
+        new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const markets = Array.from({ length: 11 }, (_, index) => ({
+      ...market,
+      eventTicker: 'KXBTC15M-27JAN150815',
+      ticker: `KXBTC15M-27JAN150815-${String(index).padStart(2, '0')}`,
+    }));
+    const urls = markets.map(({ ticker }) => `/api/kalshi/markets/${ticker}`);
+    const { result, rerender, unmount } = renderHook((value) => useBackgroundResearch(value), {
+      initialProps: { ...props, markets },
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('analyzing'));
+
+    const checkSettlementsAt = async (now) => {
+      await jest.advanceTimersByTimeAsync(now - Date.now());
+      await act(async () => rerender({ ...props, now, markets: [] }));
+    };
+
+    await checkSettlementsAt(deadline);
+    expect(global.fetch.mock.calls.map(([url]) => url)).toEqual(urls.slice(0, 10));
+    await checkSettlementsAt(deadline + 19_999);
+    expect(global.fetch).toHaveBeenCalledTimes(10);
+    await checkSettlementsAt(deadline + 20_000);
+    expect(global.fetch.mock.calls.slice(10).map(([url]) => url)).toEqual([urls[10]]);
+
+    await checkSettlementsAt(deadline + 35_000);
+    const [retriedUrl, { signal }] = global.fetch.mock.calls[11];
+    expect(retriedUrl).toBe(urls[0]);
+    expect(signal.aborted).toBe(false);
+    unmount();
+    expect(signal.aborted).toBe(true);
   });
 });
