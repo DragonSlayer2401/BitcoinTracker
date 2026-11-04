@@ -38,6 +38,7 @@ without a standard yet, inspect the relevant code and configuration.
 | Work                                                                                       | Standard                                                            |
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
 | Adding or moving files, defining feature boundaries, or deciding where shared code belongs | [Architecture and code ownership](docs/architecture.md) (in review) |
+| Adding or changing API endpoints, uncached requests, or API helpers                        | [APIs and services](docs/services.md) (in review)                   |
 
 For setup commands, consult the root README and `package.json` as needed. Write standards for the
 intended refactor using illustrative examples such as Weather. Use the current implementation to

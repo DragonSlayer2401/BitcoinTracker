@@ -13,6 +13,7 @@ covers its responsibility and the features that use it.
 | `src/state/`      | Application-wide Redux slices and store setup.                                           |
 | `src/hooks/`      | React hooks shared across the project, such as a hook that reports the viewport size.    |
 | `src/features/`   | All product features. Each top-level folder represents a domain, such as `Weather/`.     |
+| `src/services/`   | APIs and API helpers organized by domain. [APIs and services](services.md)               |
 
 ## Feature scope
 
