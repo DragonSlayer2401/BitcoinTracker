@@ -1,21 +1,9 @@
-# Architecture and code ownership
+# Feature structure and ownership
 
-Use this target layout when adding a feature, placing a file, or planning a refactor. A file's path
-should tell a developer which part of the application owns it. Choose the narrowest owner that
-covers its responsibility and the features that use it.
+Read this when adding a feature, defining a sub-feature, or choosing where shared feature code belongs.
+Each top-level folder under `src/features/` represents a domain, such as `Weather/`.
 
-## Project scope
-
-| Folder            | What belongs here                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------- |
-| `src/components/` | UI components shared across the project, such as a general-purpose dialog.               |
-| `src/utils/`      | Utility functions shared across the project, such as a general-purpose number formatter. |
-| `src/state/`      | Application-wide Redux slices and store setup.                                           |
-| `src/hooks/`      | React hooks shared across the project, such as a hook that reports the viewport size.    |
-| `src/features/`   | All product features. Each top-level folder represents a domain, such as `Weather/`.     |
-| `src/services/`   | APIs and API helpers organized by domain. [APIs and services](services.md)               |
-
-## Feature scope
+## Feature layout
 
 The same layout applies at **every depth**. A feature can own `components/` for UI, `hooks/` for
 React behavior, `utils/` for helpers, `state/` for Redux state, and `assets/` for files such as
@@ -53,5 +41,4 @@ The same reasoning applies to hooks and assets at any depth.
 3. Place each Redux slice with the owner of its state. For example, the application store can
    register the alert draft reducer while the slice lives in `AlertCreator/state/`.
 
-Apply this standard to the requested change. Create global and feature-local folders as their first
-files are added, and limit moves of existing files to the agreed scope.
+Apply this standard to the requested change. Limit moves of existing files to the agreed scope.

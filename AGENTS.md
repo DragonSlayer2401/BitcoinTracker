@@ -29,17 +29,18 @@ Jest and Testing Library verify behavior. Prettier owns formatting.
 
 ## Documentation routing
 
-This file is the entry point. Keep detailed standards and domain documentation under `docs/`, with
-one owning document per standard. Link to rules instead of duplicating them here or across documents.
+Keep one file per standard under `docs/`. Group project layout and feature ownership under
+`docs/architecture/`. Keep the services and testing guides at the top level of `docs/`.
 
 Read the standard that matches the task alongside the affected implementation and tests. For topics
 without a standard yet, inspect the relevant code and configuration.
 
-| Work                                                                                       | Standard                                                            |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Adding or moving files, defining feature boundaries, or deciding where shared code belongs | [Architecture and code ownership](docs/architecture.md) (in review) |
-| Adding or changing API endpoints, uncached requests, or API helpers                        | [APIs and services](docs/services.md) (in review)                   |
-| Writing, organizing, or reviewing automated tests                                          | [Automated feature tests](docs/automated-testing.md) (in review)    |
+| Work                                                                             | Standard                                                                     |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Choosing a top-level folder for project code                                     | [Project folder layout](docs/architecture/architecture.md) (in review)       |
+| Defining features and sub-features or choosing where shared feature code belongs | [Feature structure and ownership](docs/architecture/features.md) (in review) |
+| Adding or changing API endpoints, uncached requests, or API helpers              | [APIs and services](docs/services.md) (in review)                            |
+| Writing, organizing, or reviewing automated tests                                | [Automated feature tests](docs/testing.md) (in review)                       |
 
 For setup commands, consult the root README and `package.json` as needed. Write standards for the
 intended refactor using illustrative examples such as Weather. Use the current implementation to
