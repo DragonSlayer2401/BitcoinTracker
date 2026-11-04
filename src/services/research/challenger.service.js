@@ -8,7 +8,7 @@ import {
   DIRECTIONAL_REVERSAL_KIND,
   isChallengerArtifact,
   matchesChallengerPipeline,
-} from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/challengerModel.utils';
 import {
   evaluateChallengerActiveModel,
   evaluateChallengerCandidate,
@@ -16,14 +16,14 @@ import {
   getChallengerTrainingRows,
   getChallengerTrainingReadiness,
   trainChallengerCandidate,
-} from '@/features/BitcoinTracker/utils/learning/challengerTraining.utils';
-import { groupOverlappingWindows } from '@/features/BitcoinTracker/utils/learning/evaluation.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/challengerTraining.utils';
+import { groupOverlappingWindows } from '@/features/ForecastResearch/features/ModelLearning/utils/evaluation.utils';
 
 import { CHALLENGER_ENROLLMENT_POLICY } from './challengerDevelopment.repository';
 import {
   CURRENT_COLLECTOR_CODE_VERSION,
   CURRENT_COLLECTOR_RESEARCH_VERSION,
-} from '@/features/BitcoinTracker/utils/collectorHealth.utils';
+} from '@/features/ForecastResearch/features/EvidenceCollection/utils/collectorHealth.utils';
 
 const LEASE_DURATION_MS = 120_000;
 

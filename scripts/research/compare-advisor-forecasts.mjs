@@ -47,13 +47,13 @@ No network requests, database writes, historical backfill, fitting or activation
   process.env.TSX_TSCONFIG_PATH = path.join(projectRoot, 'jsconfig.json');
   await import('tsx');
   const { getAdvisorForecastEvaluation } =
-    await import('../../src/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecastEvaluation.utils.js');
+    await import('../../src/features/SimulatedTrading/features/TradingAdvisor/utils/advisorForecastEvaluation.utils.js');
   const { createAdvisorForecast, getAdvisorBookQuote } =
-    await import('../../src/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecast.utils.js');
+    await import('../../src/features/SimulatedTrading/features/TradingAdvisor/utils/advisorForecast.utils.js');
   const { replayResearchInputSnapshot, RESEARCH_EXPERIMENT_VERSION } =
-    await import('../../src/features/BitcoinTracker/utils/researchExperiments.utils.js');
+    await import('../../src/features/ForecastResearch/utils/researchExperiments.utils.js');
   const { isSameKalshiContract } =
-    await import('../../src/features/BitcoinTracker/utils/kalshi/contract.utils.js');
+    await import('../../src/features/MarketData/utils/kalshi/contract.utils.js');
   const { MAXIMUM_RESEARCH_INPUT_BYTES } =
     await import('../../src/services/research/research.validation.js');
   const databasePath = path.resolve(projectRoot, values.database ?? 'data/bitcoin-research.db');

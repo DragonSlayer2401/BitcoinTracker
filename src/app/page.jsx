@@ -1,5 +1,5 @@
-import BitcoinTracker from '@/features/BitcoinTracker/index.web';
+import TradingDashboard from './_dashboard/TradingDashboard';
 
-export default function HomePage() {
-  return <BitcoinTracker />;
-}
+const HomePage = () => <TradingDashboard />;
+
+export default HomePage;

@@ -1,23 +1,18 @@
 import {
   isKalshiContract,
   KALSHI_OUTCOME_DEFINITION,
-} from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
-import { getResearchVariantNames } from '@/features/BitcoinTracker/utils/researchVariantConfig.utils';
-import { isChartPatternSnapshot } from '@/features/BitcoinTracker/utils/patterns/chartPatterns.utils';
-import { getPatternLearningFeatures } from '@/features/BitcoinTracker/utils/learning/patternFeatures.utils';
+} from '@/features/MarketData/utils/kalshi/contract.utils';
+import { getResearchVariantNames } from '@/features/ForecastResearch/utils/researchVariantConfig.utils';
+import { isChartPatternSnapshot } from '@/features/ForecastResearch/features/PatternStudies/utils/chartPatterns.utils';
+import { getPatternLearningFeatures } from '@/features/ForecastResearch/features/PatternStudies/utils/patternFeatures.utils';
 import {
   PATTERN_CANDIDATE_KINDS,
   isPatternModelArtifact,
   getPatternModelSchema,
-} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
+} from '@/features/ForecastResearch/features/PatternStudies/utils/patternModel.utils';
+import { ResearchDataError } from './researchDataError';
 
-export class ResearchDataError extends Error {
-  constructor(message, status = 400) {
-    super(message);
-    this.name = 'ResearchDataError';
-    this.status = status;
-  }
-}
+export { ResearchDataError };
 
 export const MAXIMUM_RESEARCH_BATCH = 100;
 export const MAXIMUM_RESEARCH_BODY_BYTES = 4 * 1024 * 1024;

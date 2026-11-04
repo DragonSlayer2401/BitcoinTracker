@@ -17,30 +17,30 @@ import {
   TRADING_ADVISOR_POLICY,
   isTradingAdvisorPolicy,
   simulateTradingExecution,
-} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
-import { createTradingAdvisorPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPolicy.utils';
-import { getAdvisorForecastReconciliation } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecast.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/utils/tradingAdvisor.utils';
+import { createTradingAdvisorPolicy } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorPolicy.utils';
+import { getAdvisorForecastReconciliation } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorForecast.utils';
 import {
   ADVISOR_OPERATIONAL_REASONS,
   createAdvisorPlan,
   isMeaningfulAdvisorPlan,
-} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPlan.utils';
-import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorPlan.utils';
+import { getAdvisorDecisionPortfolio } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorPortfolio.utils';
 import { getTradingPolicySelection } from './tradingPolicyTrials.repository';
 import {
   getKalshiOutcome,
   isSameKalshiContract,
-} from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+} from '@/features/MarketData/utils/kalshi/contract.utils';
 import {
   createAdvisorAccount,
   getAdvisorPortfolio,
   applyAdvisorAdvice,
   applyAdvisorEvent,
-} from './tradingAdvisor.ledger';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorLedger.utils';
 import {
   getAdvisorValuation,
   getAdvisorRiskHistory,
-} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorValuation.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorValuation.utils';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const clean = (value) => JSON.parse(JSON.stringify(value));

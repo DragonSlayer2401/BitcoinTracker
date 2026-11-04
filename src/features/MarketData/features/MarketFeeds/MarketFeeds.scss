@@ -1,0 +1,16 @@
+.bitcoin-tracker {
+  .metric-caption {
+    display: inline;
+    margin-left: 4px;
+    font-size: 10px;
+    line-height: 1.35;
+    color: var(--tracker-muted);
+  }
+
+  .data-receipt {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--tracker-border);
+    font-size: 11px;
+  }
+}

@@ -3,7 +3,7 @@ import * as researchRepository from './research.repository';
 import {
   COLLECTOR_HEALTH_POLICY,
   getCollectorHealth as summarizeCollectorHealth,
-} from '@/features/BitcoinTracker/utils/collectorHealth.utils';
+} from '@/features/ForecastResearch/features/EvidenceCollection/utils/collectorHealth.utils';
 
 /** Existing archive reads only; this endpoint never contacts Kalshi or changes collector state. */
 export function createCollectorHealthService(repository) {

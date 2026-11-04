@@ -9,15 +9,15 @@ import { initializeResearchSchema } from './research.schema';
 import { createChallengerTrialRepository } from './challengerTrial.repository';
 import { createChallengerDevelopmentRepository } from './challengerDevelopment.repository';
 import { createPatternResearchRepository } from './patterns/patternResearch.repository';
-import { isCollectorHeartbeat } from '@/features/BitcoinTracker/utils/collectorHealth.utils';
-import { EARLY_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/earlyModel.utils';
-import { CHALLENGER_MODEL_VERSION } from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
+import { isCollectorHeartbeat } from '@/features/ForecastResearch/features/EvidenceCollection/utils/collectorHealth.utils';
+import { EARLY_MODEL_VERSION } from '@/features/ForecastResearch/features/ModelLearning/utils/earlyModel.utils';
+import { CHALLENGER_MODEL_VERSION } from '@/features/ForecastResearch/features/ModelLearning/utils/challengerModel.utils';
 import {
   PATTERN_MODEL_VERSION,
   LEGACY_PATTERN_MODEL_VERSION,
-} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
-import { getPatternSuiteRegistrations } from '@/features/BitcoinTracker/utils/learning/patternCohorts.utils';
-import { evaluatePatternPromotion } from '@/features/BitcoinTracker/utils/learning/patternPromotion.utils';
+} from '@/features/ForecastResearch/features/PatternStudies/utils/patternModel.utils';
+import { getPatternSuiteRegistrations } from '@/features/ForecastResearch/features/PatternStudies/utils/patternCohorts.utils';
+import { evaluatePatternPromotion } from '@/features/ForecastResearch/features/PatternStudies/utils/patternPromotion.utils';
 import {
   ResearchDataError,
   getCanonicalResearchJson,

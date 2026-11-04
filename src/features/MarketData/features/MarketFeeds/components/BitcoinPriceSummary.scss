@@ -1,0 +1,74 @@
+.bitcoin-tracker {
+  .coin-symbol {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #efc06d, #cf8d39);
+    color: #21190d;
+    font-size: 25px;
+    font-weight: 500;
+    transform: rotate(12deg);
+  }
+
+  .current-price {
+    font-size: clamp(28px, 2.7vw, 40px);
+    line-height: 1.15;
+    letter-spacing: -1.2px;
+    font-weight: 550;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .price-delayed .current-price {
+    color: var(--tracker-muted);
+  }
+
+  .price-change {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 6px;
+
+    &.positive {
+      color: var(--tracker-green);
+      border-color: #2a5840;
+      background: linear-gradient(115deg, rgba(77, 230, 162, 0.14), rgba(77, 230, 162, 0.03));
+    }
+    &.negative {
+      color: var(--tracker-red);
+      border-color: #60333e;
+      background: linear-gradient(115deg, rgba(255, 122, 136, 0.15), rgba(255, 122, 136, 0.03));
+    }
+  }
+
+  .price-summary-compact {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--tracker-border);
+
+    > div:last-of-type {
+      flex: 1;
+    }
+    .section-title {
+      font-size: 12px;
+      color: var(--tracker-muted);
+    }
+    .current-price {
+      font-size: 22px;
+      letter-spacing: -0.5px;
+    }
+    .price-change {
+      font-size: 11px;
+      padding: 3px 6px;
+    }
+  }
+}

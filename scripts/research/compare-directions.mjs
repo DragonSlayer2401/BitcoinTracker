@@ -46,7 +46,7 @@ async function run() {
   process.env.TSX_TSCONFIG_PATH = path.join(projectRoot, 'jsconfig.json');
   await import('tsx');
   const { compareExploratoryDirections, EXPLORATORY_RESEARCH_VERSIONS } =
-    await import('../../src/features/BitcoinTracker/utils/exploratoryDirections.utils.js');
+    await import('../../src/features/ForecastResearch/features/ModelLearning/utils/exploratoryDirections.utils.js');
   const { DatabaseSync } = await import('node:sqlite');
   const database = new DatabaseSync(databasePath, { readOnly: true });
   let report;

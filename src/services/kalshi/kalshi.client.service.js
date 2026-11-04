@@ -9,7 +9,8 @@ export async function fetchKalshiMarketClient(ticker, { signal } = {}) {
     signal: signal ?? AbortSignal.timeout(20_000),
   });
   if (!response.ok) throw new Error('The official Kalshi result is not available yet.');
-  const market = await response.json();
+  const payload = await response.json();
+  const market = payload?.market ?? payload;
   if (market?.ticker !== ticker || market.seriesTicker !== 'KXBTC15M') {
     throw new Error('Kalshi returned a different contract.');
   }

@@ -6,21 +6,24 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
 import { getResearchDatabaseConfiguration } from '../research.repository';
 import { createTradingAdvisorRepository } from './tradingAdvisor.repository';
-import { createAdvisorAccount, getAdvisorPortfolio } from './tradingAdvisor.ledger';
-import { getAdvisorDecisionPortfolio } from './advisorPortfolio.utils';
+import {
+  createAdvisorAccount,
+  getAdvisorPortfolio,
+} from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorLedger.utils';
+import { getAdvisorDecisionPortfolio } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorPortfolio.utils';
 import { createTradingPolicyTrialRepository } from './tradingPolicyTrials.repository';
 import { createTradingPolicyTrialService } from './tradingPolicyTrials.service';
 import { createAdvisorHistoryTrialRepository } from './advisorHistoryTrials.repository';
 import { createAdvisorHistoryTrialService } from './advisorHistoryTrials.service';
 import { fetchKalshiPurchaseValue } from '@/services/kalshi/purchaseValue/purchaseValue.service';
 import { fetchKalshiMarket } from '@/services/kalshi/kalshi.service';
-import { getKalshiContract } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { getKalshiContract } from '@/features/MarketData/utils/kalshi/contract.utils';
 import {
   TRADING_ADVISOR_POLICY,
   getTradingAdvice,
-} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
-import { createAdvisorResearchPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorPolicy.utils';
-import { getAdvisorForecastReconciliation } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorForecast.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/utils/tradingAdvisor.utils';
+import { createAdvisorResearchPolicy } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorPolicy.utils';
+import { getAdvisorForecastReconciliation } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorForecast.utils';
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 

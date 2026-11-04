@@ -1,4 +1,4 @@
-import { KALSHI_OUTCOME_DEFINITION } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { KALSHI_OUTCOME_DEFINITION } from '@/features/MarketData/utils/kalshi/contract.utils';
 import { getResearchWriteTransaction } from './research.connection';
 
 export const KALSHI_RESEARCH_MIGRATION = 'kalshi-only-research-v1';

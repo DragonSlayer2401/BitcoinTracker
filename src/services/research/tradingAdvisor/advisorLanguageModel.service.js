@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   ADVISOR_CANDIDATE_OUTPUT_SCHEMA,
   isAdvisorCandidateOutputShape,
-} from '@/features/BitcoinTracker/features/TradingAdvisor/utils/advisorCandidate.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/features/Experiments/utils/advisorCandidate.utils';
 
 export const ADVISOR_LANGUAGE_MODEL_PROMPT_VERSION = 'paper-advisor-choice-v2';
 export const ADVISOR_LANGUAGE_MODEL_PRICING_VERSION = 'gpt-6.1-sol-standard-2026-10-03';

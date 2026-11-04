@@ -1,7 +1,7 @@
 import 'server-only';
 import { fetchKalshiPurchaseValue } from '@/services/kalshi/purchaseValue/purchaseValue.service';
-import { getKalshiContract } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
-import { PAPER_TRADING_POLICY } from '@/features/BitcoinTracker/features/PaperTrading/utils/paperTrading.utils';
+import { getKalshiContract } from '@/features/MarketData/utils/kalshi/contract.utils';
+import { PAPER_TRADING_POLICY } from '@/features/SimulatedTrading/features/PaperTrading/utils/paperTrading.utils';
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 

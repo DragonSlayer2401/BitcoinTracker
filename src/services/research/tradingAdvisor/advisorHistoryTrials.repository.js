@@ -6,14 +6,14 @@ import {
   runResearchSchemaStatements,
 } from '../research.connection';
 import { getCanonicalResearchJson, ResearchDataError } from '../research.validation';
-import { isTradingAdvisorPolicy } from '@/features/BitcoinTracker/features/TradingAdvisor/utils/tradingAdvisor.utils';
+import { isTradingAdvisorPolicy } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/tradingAdvisor.utils';
 import {
   ADVISOR_HISTORY_TRIAL_VERSION,
   createAdvisorHistoryTrial,
   advanceAdvisorHistoryTrial,
   recordAdvisorLanguageModelResult,
   getAdvisorHistoryTrialReport,
-} from './advisorHistoryTrials.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/features/Experiments/utils/advisorHistoryTrials.utils';
 import {
   ADVISOR_LANGUAGE_MODEL_PRICING,
   ADVISOR_LANGUAGE_MODEL_PRICING_VERSION,

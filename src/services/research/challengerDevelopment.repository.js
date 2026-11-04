@@ -10,12 +10,12 @@ import {
   CURRENT_COLLECTOR_CODE_VERSION,
   CURRENT_COLLECTOR_RESEARCH_VERSION,
   COLLECTOR_HEALTH_POLICY,
-} from '@/features/BitcoinTracker/utils/collectorHealth.utils';
+} from '@/features/ForecastResearch/features/EvidenceCollection/utils/collectorHealth.utils';
 import {
   isChallengerArtifact,
   matchesChallengerPipeline,
-} from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
-import { hasContemporaneousInputs } from '@/features/BitcoinTracker/utils/learning/evaluation.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/challengerModel.utils';
+import { hasContemporaneousInputs } from '@/features/ForecastResearch/features/ModelLearning/utils/evaluation.utils';
 
 export const CHALLENGER_ENROLLMENT_POLICY = 'collector-enrollment-v1';
 const same = (left, right) => getCanonicalResearchJson(left) === getCanonicalResearchJson(right);

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   getTradingPolicyPendingExecutions,
   getTradingPolicyTrialReport,
-} from './tradingPolicyTrials.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/features/Experiments/utils/tradingPolicyTrials.utils';
 
 /** Consume the collector's existing observations; this service has no exchange API client. */
 export function createTradingPolicyTrialService({ repository, now = Date.now }) {

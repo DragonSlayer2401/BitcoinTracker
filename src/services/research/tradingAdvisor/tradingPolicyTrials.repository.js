@@ -10,7 +10,7 @@ import {
   advanceTradingPolicyTrial,
   createTradingPolicyTrial,
   getTradingPolicyTrialReport,
-} from './tradingPolicyTrials.utils';
+} from '@/features/SimulatedTrading/features/TradingAdvisor/features/Experiments/utils/tradingPolicyTrials.utils';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const encode = (value) => {

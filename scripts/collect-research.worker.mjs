@@ -16,7 +16,8 @@ try {
   const repository = createResearchRepository({ client, mode: configuration.mode });
   let result;
   if (workerData.task === 'analysis') {
-    const { getCollectorAnalysis } = await import('./collect-research.analysis.js');
+    const { getCollectorAnalysis } =
+      await import('../src/features/ForecastResearch/features/EvidenceCollection/utils/collectorAnalysis.utils.js');
     result = await getCollectorAnalysis({ repository, now: Date.now() });
   } else if (workerData.task === 'learning') {
     const { createLearningService } = await import('../src/services/research/learning.service.js');

@@ -7,7 +7,7 @@ import { getResearchDatabaseConfiguration } from '../research.repository';
 import { createPaperTradingRepository } from './paperTrading.repository';
 import { fetchKalshiPurchaseValue } from '@/services/kalshi/purchaseValue/purchaseValue.service';
 import { fetchKalshiMarket } from '@/services/kalshi/kalshi.service';
-import { getKalshiContract } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { getKalshiContract } from '@/features/MarketData/utils/kalshi/contract.utils';
 import {
   PAPER_TRADING_POLICY,
   createPaperDecision,
@@ -15,7 +15,7 @@ import {
   settlePaperPosition,
   getPaperPortfolio,
   getPaperTradingReport,
-} from '@/features/BitcoinTracker/features/PaperTrading/utils/paperTrading.utils';
+} from '@/features/SimulatedTrading/features/PaperTrading/utils/paperTrading.utils';
 
 /** One prospective paper policy. Only the collector calls advance; report reads never trade. */
 export function createPaperTradingService({

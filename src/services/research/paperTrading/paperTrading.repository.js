@@ -18,7 +18,7 @@ import {
   isPaperDecision,
   isPaperExecutionEvent,
   isPaperSettlementEvent,
-} from '@/features/BitcoinTracker/features/PaperTrading/utils/paperTrading.utils';
+} from '@/features/SimulatedTrading/features/PaperTrading/utils/paperTrading.utils';
 
 const hash = (json) => createHash('sha256').update(json).digest('hex');
 const MAXIMUM_STATE_RECORDS = 10_000;

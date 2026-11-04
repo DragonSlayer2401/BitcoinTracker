@@ -5,7 +5,7 @@ import {
   runResearchConnectionOperation,
 } from '../research.connection';
 import { getCanonicalResearchJson, ResearchDataError } from '../research.validation';
-import { isKalshiContract } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+import { isKalshiContract } from '@/features/MarketData/utils/kalshi/contract.utils';
 
 const STAGES = ['claim', 'initial', 'delay-claim', 'execution'];
 const hash = (value) => createHash('sha256').update(value).digest('hex');

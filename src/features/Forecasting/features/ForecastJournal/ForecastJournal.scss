@@ -1,0 +1,126 @@
+.bitcoin-tracker,
+.tracker-modal {
+  .journal-summary {
+    padding-bottom: 10px;
+    font-size: 11px;
+    row-gap: 4px !important;
+  }
+
+  .journal-empty {
+    padding: 16px 0 8px;
+
+    h3 {
+      font-size: 13px;
+    }
+  }
+
+  .journal-table {
+    --bs-table-bg: transparent;
+    font-size: 12px;
+
+    thead th {
+      color: var(--tracker-muted);
+      font-size: 10px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      padding-bottom: 8px;
+    }
+
+    tbody td,
+    tbody th {
+      padding-top: 10px;
+      padding-bottom: 10px;
+      white-space: nowrap;
+    }
+
+    .small {
+      font-size: 11px;
+    }
+  }
+
+  .direction-label {
+    text-transform: capitalize;
+
+    &.above {
+      color: var(--tracker-green);
+    }
+    &.below {
+      color: var(--tracker-red);
+    }
+  }
+
+  .result-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 6px;
+    background: #24372b;
+    color: #c0d4c6;
+    border-radius: 4px;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+
+    &.correct {
+      color: var(--tracker-green);
+      background: linear-gradient(110deg, #244731, #192d22);
+    }
+    &.incorrect {
+      color: var(--tracker-red);
+      background: linear-gradient(110deg, #462830, #2f1f24);
+    }
+  }
+}
+
+.bitcoin-tracker {
+  .journal-preview-table {
+    table-layout: fixed;
+    width: 100%;
+    font-size: 11px;
+
+    th:first-child {
+      width: 44%;
+    }
+    tbody td,
+    tbody th {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .small {
+      font-size: 10px;
+      line-height: 1.4;
+    }
+    .result-chip {
+      flex-wrap: wrap;
+      font-size: 10px;
+    }
+  }
+
+  @media (min-width: 1200px) and (max-height: 850px) {
+    .journal-summary {
+      padding-bottom: 4px;
+    }
+    .journal-preview-table {
+      thead th {
+        padding-bottom: 4px;
+      }
+      tbody td,
+      tbody th {
+        padding-top: 5px;
+        padding-bottom: 5px;
+      }
+    }
+  }
+
+  @media (max-width: 767.98px) {
+    .journal-preview-table {
+      font-size: 12px;
+    }
+  }
+}
+
+.tracker-modal {
+  .journal-empty {
+    padding: 16px 0;
+  }
+}

@@ -46,13 +46,13 @@ async function run() {
   process.env.TSX_TSCONFIG_PATH = path.join(projectRoot, 'jsconfig.json');
   await import('tsx');
   const { evaluatePatternChallengers, getPatternPaperObservations } =
-    await import('../../src/features/BitcoinTracker/utils/patternEvaluation.utils.js');
+    await import('../../src/features/ForecastResearch/features/PatternStudies/utils/patternEvaluation.utils.js');
   const { combinePatternPaperObservations } =
     await import('../../src/services/research/patterns/patternResearch.repository.js');
   const { isPatternModelArtifact } =
-    await import('../../src/features/BitcoinTracker/utils/learning/patternModel.utils.js');
+    await import('../../src/features/ForecastResearch/features/PatternStudies/utils/patternModel.utils.js');
   const { getPatternSuiteRegistrations } =
-    await import('../../src/features/BitcoinTracker/utils/learning/patternCohorts.utils.js');
+    await import('../../src/features/ForecastResearch/features/PatternStudies/utils/patternCohorts.utils.js');
   const { DatabaseSync } = await import('node:sqlite');
   const databasePath = path.resolve(projectRoot, values.database ?? 'data/bitcoin-research.db');
   const database = new DatabaseSync(databasePath, { readOnly: true });

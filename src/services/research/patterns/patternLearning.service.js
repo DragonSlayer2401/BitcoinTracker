@@ -3,8 +3,8 @@ import {
   isPatternModelArtifact,
   PATTERN_CANDIDATE_KINDS,
   PATTERN_MODEL_VERSION,
-} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
-import { trainPatternCandidates } from '@/features/BitcoinTracker/utils/learning/patternTraining.utils';
+} from '@/features/ForecastResearch/features/PatternStudies/utils/patternModel.utils';
+import { trainPatternCandidates } from '@/features/ForecastResearch/features/PatternStudies/utils/patternTraining.utils';
 
 /** Serve only complete frozen suites. A partial write resumes with the same training timestamp. */
 export function selectPatternCandidates(artifacts = []) {

@@ -7,49 +7,49 @@ import {
   getVerifiedLearningRows,
   getIndependentRows,
   groupOverlappingWindows,
-} from '@/features/BitcoinTracker/utils/learning/evaluation.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/evaluation.utils';
 import {
   isOutcomeModelArtifact,
   matchesOutcomeModelPipeline,
-} from '@/features/BitcoinTracker/utils/learning/model.utils';
-import { KALSHI_OUTCOME_DEFINITION } from '@/features/BitcoinTracker/utils/kalshi/contract.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/model.utils';
+import { KALSHI_OUTCOME_DEFINITION } from '@/features/MarketData/utils/kalshi/contract.utils';
 import {
   evaluateShadowCandidate,
   LEARNING_REQUIREMENTS,
   splitLearningWindows,
   trainOutcomeCandidate,
   selectLearningPipelineRows,
-} from '@/features/BitcoinTracker/utils/learning/training.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/training.utils';
 import {
   EARLY_LEARNING_REQUIREMENTS,
   isEarlyModelArtifact,
-} from '@/features/BitcoinTracker/utils/learning/earlyModel.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/earlyModel.utils';
 import {
   evaluateEarlyActiveModel,
   evaluateEarlyShadowCandidate,
   trainEarlyCandidate,
-} from '@/features/BitcoinTracker/utils/learning/earlyTraining.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/earlyTraining.utils';
 import {
   evaluateFullActiveModel,
   FULL_MODEL_MONITORING_REQUIREMENTS,
-} from '@/features/BitcoinTracker/utils/learning/fullModelMonitoring.utils';
-import { isChallengerArtifact } from '@/features/BitcoinTracker/utils/learning/challengerModel.utils';
-import { evaluateResearchExperiments } from '@/features/BitcoinTracker/utils/researchEvaluation.utils';
+} from '@/features/ForecastResearch/features/ModelLearning/utils/fullModelMonitoring.utils';
+import { isChallengerArtifact } from '@/features/ForecastResearch/features/ModelLearning/utils/challengerModel.utils';
+import { evaluateResearchExperiments } from '@/features/ForecastResearch/utils/researchEvaluation.utils';
 import { createChallengerService } from './challenger.service';
 import { createCollectorHealthService } from './collectorHealth.service';
 import {
   selectPatternCandidates,
   advancePatternLearning,
 } from './patterns/patternLearning.service';
-import { evaluatePatternChallengers } from '@/features/BitcoinTracker/utils/patternEvaluation.utils';
+import { evaluatePatternChallengers } from '@/features/ForecastResearch/features/PatternStudies/utils/patternEvaluation.utils';
 import {
   isPatternModelArtifact,
   hasPatternActivation,
-} from '@/features/BitcoinTracker/utils/learning/patternModel.utils';
+} from '@/features/ForecastResearch/features/PatternStudies/utils/patternModel.utils';
 import {
   evaluatePatternPromotion,
   evaluatePatternActiveModel,
-} from '@/features/BitcoinTracker/utils/learning/patternPromotion.utils';
+} from '@/features/ForecastResearch/features/PatternStudies/utils/patternPromotion.utils';
 
 const MINIMUM_NEW_WINDOWS_FOR_RETRAINING = 60;
 const LEARNING_LEASE_DURATION_MS = 120_000;
