@@ -290,10 +290,12 @@
   }
 }
 
-@include meta.load-css('../../features/Forecasting/features/ForecastJournal/ForecastJournal');
-@include meta.load-css('../../features/Forecasting/features/LiveEstimates/LiveEstimates');
 @include meta.load-css(
-  '../../features/Forecasting/features/CheckpointForecasts/CheckpointForecasts'
+  '../../features/Forecasting/features/ForecastJournal/assets/forecastJournal'
+);
+@include meta.load-css('../../features/Forecasting/features/LiveEstimates/assets/liveEstimates');
+@include meta.load-css(
+  '../../features/Forecasting/features/CheckpointForecasts/assets/checkpointForecasts'
 );
 
 .tracker-modal {

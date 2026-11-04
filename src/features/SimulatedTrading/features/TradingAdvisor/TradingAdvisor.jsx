@@ -10,7 +10,7 @@ import AdvisorPerformance from './components/AdvisorPerformance';
 import AdvisorRisk from './components/AdvisorRisk';
 import AdvisorSetup from './components/AdvisorSetup';
 import { formatAdvisorMoney, hasFreshAdvisorReport } from './utils/advisorDisplay.utils';
-import './TradingAdvisor.scss';
+import './assets/tradingAdvisor.scss';
 
 const TradingAdvisor = ({ market, now, chart, research, hasMarketError = false }) => {
   const [showResearch, setShowResearch] = useState(false);

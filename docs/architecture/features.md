@@ -6,8 +6,9 @@ Each top-level folder under `src/features/` represents a domain, such as `Weathe
 ## Feature layout
 
 The same layout applies at **every depth**. A feature can own `components/` for UI, `hooks/` for
-React behavior, `utils/` for helpers, `state/` for Redux state, and `assets/` for files such as
-images. Its `features/` folder holds child features. Create each folder when it has content.
+React behavior, `utils/` for helpers, and `state/` for Redux state. Place feature SCSS files directly
+in `assets/` and images in `assets/images/`. A feature's `features/` folder holds its child features.
+Create each folder when it has content.
 
 ### Feature assembly files
 
@@ -36,6 +37,9 @@ src/features/Weather/
           state/alertDraftSlice.js
         AlertList/
           AlertList.jsx
+          assets/
+            alertList.scss
+            images/stormWarning.svg
           components/AlertRow.jsx
     WeatherForecast/
       components/ForecastSummary.jsx

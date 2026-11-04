@@ -1,6 +1,6 @@
 import { formatPercent, formatPrice, formatTime } from '@/utils/format.utils';
 import MarketDiagnostics from './components/MarketDiagnostics';
-import './MarketFeeds.scss';
+import './assets/marketFeeds.scss';
 
 const MarketFeeds = ({
   ticker,

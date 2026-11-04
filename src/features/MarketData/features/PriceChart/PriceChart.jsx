@@ -26,7 +26,7 @@ import ChartDrawingControls from './components/ChartDrawingControls';
 import ChartReadout from './components/ChartReadout';
 import ChartIndicatorPanels from './components/ChartIndicatorPanels';
 import ChartToolbar from './components/ChartToolbar';
-import './PriceChart.scss';
+import './assets/priceChart.scss';
 
 echarts.use([
   AxisPointerComponent,

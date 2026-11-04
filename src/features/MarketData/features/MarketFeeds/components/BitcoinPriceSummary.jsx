@@ -1,6 +1,6 @@
 import Icon from '@/components/Icon';
 import { formatPercent, formatPrice, formatTime } from '@/utils/format.utils';
-import './BitcoinPriceSummary.scss';
+import '../assets/bitcoinPriceSummary.scss';
 
 export default function BitcoinPriceSummary({ benchmarkData, compact = false }) {
   const { current, isFresh, priceChange, reason } = benchmarkData;
