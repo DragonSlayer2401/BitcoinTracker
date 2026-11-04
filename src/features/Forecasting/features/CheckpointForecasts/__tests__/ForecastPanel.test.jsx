@@ -12,21 +12,6 @@ const market = {
   target: 100_000,
   rulesVerified: true,
 };
-const live = {
-  available: true,
-  direction: 'above',
-  aboveProbability: 0.65,
-  belowProbability: 0.35,
-  kalshi: {
-    referenceSource: 'cf-brti',
-    referencePrice: 100_010,
-    minuteVolatility: 0.001,
-    observedSampleCount: 0,
-    missingElapsedSampleCount: 0,
-    futureSampleCount: 60,
-    expectedSettlementAverage: 100_010,
-  },
-};
 function fixed(minutes, overrides = {}) {
   const captureAt = END - minutes * 60_000;
   return {
@@ -48,12 +33,11 @@ function fixed(minutes, overrides = {}) {
 function props(overrides = {}) {
   return {
     targetInput: market.target,
-    forecast: live,
+    isForecastAvailable: true,
     forecastDeadline: END,
     now: NOW,
     isJournalReady: true,
     isJournalOwner: true,
-    isLoading: false,
     checkpointMinutes: [9, 6],
     autoEnabled: false,
     onAutoEnabledChange: jest.fn(),
@@ -89,7 +73,7 @@ test('the final selected checkpoint cannot be removed', async () => {
   expect(screen.getByRole('button', { name: 'Remove 9 min left' })).toBeInTheDocument();
 });
 
-test('saved, upcoming and missed checkpoints appear alongside a separate live estimate', () => {
+test('saved, upcoming and missed checkpoints show their individual calls and status', () => {
   const upcoming = fixed(6, {
     status: 'analyzing',
     createdAt: NOW,
@@ -122,7 +106,6 @@ test('saved, upcoming and missed checkpoints appear alongside a separate live es
   expect(
     within(within(table).getByRole('row', { name: /12 min left/ })).getByText('Missed'),
   ).toBeInTheDocument();
-  expect(screen.getByRole('region', { name: 'Live estimate' })).toHaveTextContent('65.0%');
   expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent('08:00');
   expect(screen.getByRole('button', { name: 'Checkpoints armed' })).toBeDisabled();
   expect(screen.queryByText('No clear signal')).not.toBeInTheDocument();
@@ -139,21 +122,6 @@ test('Auto and checkpoint selection also work from the keyboard', async () => {
   screen.getByRole('combobox', { name: 'Fixed checkpoints' }).focus();
   await user.keyboard('[ArrowDown][Enter]');
   expect(input.onCheckpointMinutesChange).toHaveBeenCalledWith([12, 9, 6]);
-});
-
-test('live changes preserve every already captured fixed probability', () => {
-  const saved = fixed(9);
-  const input = props({ recordedForecast: saved, activeForecast: saved, eventForecasts: [saved] });
-  const { rerender } = render(<ForecastPanel {...input} />);
-  rerender(
-    <ForecastPanel
-      {...input}
-      forecast={{ ...live, direction: 'below', aboveProbability: 0.2, belowProbability: 0.8 }}
-    />,
-  );
-  expect(fixedTable()).toHaveTextContent('Yes · 72.0%');
-  expect(screen.getByRole('region', { name: 'Live estimate' })).toHaveTextContent('80.0%');
-  expect(saved.aboveProbability).toBe(0.72);
 });
 
 test('timing changes during a recorded event are preferences for the next event', async () => {

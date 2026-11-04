@@ -1,17 +1,15 @@
 import ForecastPanel from './components/ForecastPanel';
-import ForecastRisk from '@/features/Forecasting/features/LiveEstimates/components/ForecastRisk';
 
-const CheckpointForecasts = ({ now, marketData, selection, journal, estimates, checkpoints }) => {
-  const {
-    ticker,
-    stream,
-    benchmark,
-    kalshiMarkets,
-    isQuoteFresh,
-    hasQuoteError,
-    isLoading,
-    hasContractError,
-  } = marketData;
+const CheckpointForecasts = ({
+  now,
+  marketData,
+  selection,
+  journal,
+  estimates,
+  checkpoints,
+  children,
+}) => {
+  const { kalshiMarkets, hasContractError } = marketData;
   const {
     controls,
     activeForecast,
@@ -26,23 +24,14 @@ const CheckpointForecasts = ({ now, marketData, selection, journal, estimates, c
     setCheckpointMinutes,
     warning: preferencesWarning,
   } = controls;
-  const {
-    kalshiMarket,
-    forecastDeadline,
-    eventForecasts,
-    forecast,
-    riskForecast,
-    savedRiskEstimate,
-    savedRiskConditions,
-  } = estimates;
+  const { kalshiMarket, forecastDeadline, eventForecasts, forecast } = estimates;
   const { fixedProgress, recordForecast, prepareForecast, scheduleForecast } = checkpoints;
   const target = kalshiMarket?.target;
   const displayedTargetInput = Number.isFinite(target) ? target.toFixed(2) : '';
   return (
     <ForecastPanel
       targetInput={displayedTargetInput}
-      ticker={isQuoteFresh && !hasQuoteError ? ticker : null}
-      forecast={forecast}
+      isForecastAvailable={forecast.available}
       fixedProgress={fixedProgress}
       forecastDeadline={forecastDeadline}
       activeForecast={activeForecast}
@@ -62,27 +51,15 @@ const CheckpointForecasts = ({ now, marketData, selection, journal, estimates, c
       onSchedule={scheduleForecast}
       onCancelSchedule={checkpoints.cancelSchedule}
       isJournalReady={journal.isReady}
-      isLoading={isLoading && !forecast.available}
-      riskControl={
-        riskForecast ? (
-          <ForecastRisk
-            forecast={savedRiskEstimate}
-            fixedForecast={riskForecast}
-            ticker={ticker}
-            now={now}
-            stream={stream}
-            conditions={savedRiskConditions}
-          />
-        ) : null
-      }
       kalshi={{
         market: kalshiMarket,
         markets: kalshiMarkets,
         onSelect: setSelectedMarketTicker,
         error: hasContractError,
-        benchmark,
       }}
-    />
+    >
+      {children}
+    </ForecastPanel>
   );
 };
 export default CheckpointForecasts;

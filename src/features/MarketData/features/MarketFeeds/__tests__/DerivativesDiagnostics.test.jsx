@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import MarketDiagnostics from '../components/MarketDiagnostics';
-import ForecastPrediction from '@/features/Forecasting/features/LiveEstimates/components/ForecastPrediction';
+import ForecastPrediction from '@/features/Forecasting/components/ForecastPrediction';
 
 test('futures diagnostics explain the current probability change and distinguish liquidation sides', async () => {
   const user = userEvent.setup();

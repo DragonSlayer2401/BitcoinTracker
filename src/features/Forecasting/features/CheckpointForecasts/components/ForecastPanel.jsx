@@ -1,7 +1,7 @@
 import { Button, Form, InputGroup, Table } from 'react-bootstrap';
 import Icon from '@/components/Icon';
 import ForecastStatus from './ForecastStatus';
-import ForecastPrediction from '../../LiveEstimates/components/ForecastPrediction';
+import ForecastPrediction from '../../../components/ForecastPrediction';
 import KalshiEventControl from './KalshiEventControl';
 import ForecastModeControl from './ForecastModeControl';
 import { formatCountdown, formatPercent, formatPrice, formatTime } from '@/utils/format.utils';
@@ -165,7 +165,7 @@ function FixedCheckpointPredictions({ entries, now }) {
 
 export default function ForecastPanel({
   targetInput,
-  forecast,
+  isForecastAvailable,
   forecastDeadline,
   activeForecast,
   recordedForecast,
@@ -175,8 +175,7 @@ export default function ForecastPanel({
   onRecord,
   onNewForecast,
   isJournalReady,
-  isLoading,
-  riskControl,
+  children,
   kalshi,
   onSchedule,
   onCancelSchedule,
@@ -193,7 +192,6 @@ export default function ForecastPanel({
   const isWithheld = recordedForecast?.status === 'withheld';
   const isCompleted =
     recordedForecast && !['analyzing', 'pending'].includes(recordedForecast.status);
-  const hasWindowEnded = recordedForecast && now >= recordedForecast.expiresAt;
   const isFuture = kalshi.market?.startsAt > now;
   const isScheduled = scheduledForecast?.status === 'scheduled';
   const canRecord =
@@ -204,7 +202,7 @@ export default function ForecastPanel({
     !recordedForecast &&
     !isScheduled &&
     !kalshi.error &&
-    forecast.available &&
+    isForecastAvailable &&
     !isFuture;
   const canSchedule =
     isJournalOwner &&
@@ -216,14 +214,6 @@ export default function ForecastPanel({
     isFuture &&
     kalshi.market?.rulesVerified &&
     !kalshi.error;
-  const hasBenchmark = forecast.kalshi?.referenceSource === 'cf-brti';
-  const description = forecast.available
-    ? null
-    : hasWindowEnded
-      ? null
-      : isLoading
-        ? 'Waiting for fresh market data.'
-        : forecast.reason || 'Waiting for fresh market data.';
 
   return (
     <section className="forecast-panel" aria-label="Forecast controls">
@@ -265,26 +255,7 @@ export default function ForecastPanel({
               caption={'Captured ' + formatTime(recordedForecast.createdAt)}
             />
           ) : null}
-          <ForecastPrediction
-            forecast={forecast}
-            label="Live estimate"
-            caption={hasWindowEnded ? null : 'Kalshi close'}
-            description={description}
-            unavailableLabel={
-              hasWindowEnded ? 'Window ended' : isLoading ? 'Connecting…' : 'Estimate paused'
-            }
-            compact={Boolean(recordedForecast || eventForecasts.length)}
-          />
-          <div className="d-flex justify-content-between align-items-center flex-wrap gap-1 mt-2 small text-secondary">
-            {riskControl ?? 'Model estimates · not yet validated'}
-          </div>
-          {forecast.available && (
-            <p className="small text-secondary mt-1 mb-0" role="status">
-              {hasBenchmark
-                ? 'BRTI benchmark connected'
-                : 'Coinbase proxy · BRTI access needed for the settlement feed'}
-            </p>
-          )}
+          {children}
         </section>
         <section className="forecast-setup dashboard-panel" aria-labelledby="forecast-heading">
           <div className="d-flex justify-content-between align-items-center mb-2">
@@ -339,54 +310,6 @@ export default function ForecastPanel({
             disabled={!isJournalReady}
             preferencesWarning={preferencesWarning}
           />
-          {forecast.available && forecast.kalshi && (
-            <details className="small mb-2">
-              <summary>Settlement estimate details</summary>
-              <dl className="window-summary small mt-2 mb-0">
-                <div>
-                  <dt>Reference</dt>
-                  <dd>
-                    {formatPrice(forecast.kalshi.referencePrice)} ·{' '}
-                    {hasBenchmark ? 'BRTI' : 'proxy'}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Price history</dt>
-                  <dd>
-                    {forecast.kalshi.volatilitySource === 'cf-brti'
-                      ? `BRTI · ${forecast.kalshi.benchmarkConditions?.features?.completedCandleCount ?? 0} complete minutes`
-                      : 'Coinbase candles'}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Minute volatility</dt>
-                  <dd>{formatPercent(forecast.kalshi.minuteVolatility, 3)}</dd>
-                </div>
-                <div>
-                  <dt>Final-minute readings</dt>
-                  <dd>{forecast.kalshi.observedSampleCount} / 60</dd>
-                </div>
-                <div>
-                  <dt>Missing elapsed readings</dt>
-                  <dd>{forecast.kalshi.missingElapsedSampleCount}</dd>
-                </div>
-                <div>
-                  <dt>Estimated average</dt>
-                  <dd>{formatPrice(forecast.kalshi.expectedSettlementAverage)}</dd>
-                </div>
-                {forecast.kalshi.futureSampleCount < 60 &&
-                  Number.isFinite(forecast.kalshi.requiredFutureAverage) && (
-                    <div>
-                      <dt>Remaining average for Yes</dt>
-                      <dd>{formatPrice(forecast.kalshi.requiredFutureAverage)}</dd>
-                    </div>
-                  )}
-              </dl>
-              <p className="text-secondary mt-1 mb-0">
-                Model approximation. Kalshi’s official result determines settlement.
-              </p>
-            </details>
-          )}
           <div className="forecast-action mt-auto">
             <Button
               type={isCompleted ? 'button' : 'submit'}

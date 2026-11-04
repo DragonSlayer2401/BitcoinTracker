@@ -324,6 +324,11 @@ describe('TradingDashboard interactions', () => {
     rerenderTracker();
     expect(headline.getByText('$50,123.45')).toBeInTheDocument();
     expect(headline.queryByText('$51,000.00')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Research & market details' }));
+    const research = within(screen.getByRole('dialog', { name: 'Research & market details' }));
+    expect(research.getByText('BRTI benchmark connected')).toBeVisible();
+    await user.click(research.getByText('Settlement estimate details'));
+    expect(research.getByText('$50,123.45 · BRTI')).toBeVisible();
   });
 
   test('defaults to the actual Kalshi target and close time instead of a new fifteen-minute window', async () => {
@@ -755,13 +760,24 @@ describe('TradingDashboard interactions', () => {
     );
   });
 
-  test('waits for official Kalshi settlement and scores an equal final average as Yes', async () => {
+  test('settles an equal final average as Yes while research details are closed', async () => {
     const contract = createKalshiContract();
     useGetKalshiMarketsQuery.mockReturnValue(createQuery({ markets: [contract], receivedAt: NOW }));
     const { store, rerenderTracker } = await renderTracker();
     await user.click(screen.getByRole('button', { name: 'Start forecast' }));
     arriveAtCheckpoint(rerenderTracker, contract.expiresAt - 9 * MINUTE);
     const fixed = store.getState().tracker.forecasts[0];
+    await user.click(
+      screen.getByRole('button', { name: /9m call .*view estimated deadline risk/ }),
+    );
+    const risk = within(screen.getByRole('dialog', { name: 'Deadline and reversal risk' }));
+    expect(risk.getByText(/Saved target/)).toHaveTextContent('$49,750.00');
+    await user.click(risk.getByRole('button', { name: 'Close forecast risk' }));
+    await user.click(screen.getByRole('button', { name: 'Close research details' }));
+    act(() => jest.advanceTimersByTime(1000));
+    expect(
+      screen.queryByRole('dialog', { name: 'Research & market details' }),
+    ).not.toBeInTheDocument();
     act(() => jest.advanceTimersByTime(contract.expiresAt - Date.now() + 1000));
     market = createMarket(Date.now(), 49_000);
     quoteQuery = createQuery(market.ticker);
@@ -796,7 +812,9 @@ describe('TradingDashboard interactions', () => {
       aboveProbability: fixed.aboveProbability,
       belowProbability: fixed.belowProbability,
     });
+    await user.click(screen.getByRole('button', { name: 'Research & market details' }));
     expectFixedPrediction(fixed);
+    expect(screen.getByRole('region', { name: 'Forecast history' })).toHaveTextContent('Correct');
     expect(screen.getByRole('timer', { name: 'Time remaining' })).toHaveTextContent(/^00:00$/);
   });
 });
