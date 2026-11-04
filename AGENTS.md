@@ -39,6 +39,7 @@ without a standard yet, inspect the relevant code and configuration.
 | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
 | Adding or moving files, defining feature boundaries, or deciding where shared code belongs | [Architecture and code ownership](docs/architecture.md) (in review) |
 | Adding or changing API endpoints, uncached requests, or API helpers                        | [APIs and services](docs/services.md) (in review)                   |
+| Writing, organizing, or reviewing automated tests                                          | [Automated feature tests](docs/automated-testing.md) (in review)    |
 
 For setup commands, consult the root README and `package.json` as needed. Write standards for the
 intended refactor using illustrative examples such as Weather. Use the current implementation to
@@ -60,7 +61,7 @@ verify claims about existing behavior and to trace consumers during a migration.
 ## Completion requirements
 
 - Check the final diff against the request and preserve unrelated work.
-- Until the testing standard is documented, run the owning tests after behavior changes, then
+- Run the owning tests after behavior changes, then
   `pnpm test`, `pnpm format:check`, and `pnpm build`. Verify UI changes at desktop and mobile sizes.
   Report targeted tests, full regression, formatting, build, and applicable browser/data checks
   separately; identify anything not run and why. Passing tests does not establish forecast accuracy
