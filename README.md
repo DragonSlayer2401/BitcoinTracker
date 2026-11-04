@@ -35,13 +35,13 @@ Open [localhost:3000](http://localhost:3000). On Windows, if Turbopack cannot sp
 
 Coinbase candles, executed trades and order-book data remain market inputs. Their source is explicitly labeled. The old Coinbase forecast mode, custom targets, custom scheduling controls, and legacy research recorder have been retired.
 
-The current Kalshi target appears as an amber line with a price label on the Coinbase chart. It is a reference strike; Kalshi still settles using the BRTI index. Completed exchange candles and the latest trade marker are distinct, with no invented intraminute candles. BRTI drawings remain stored separately from Coinbase drawings. See [chart behavior](docs/architecture.md#read-the-coinbase-chart).
+The current Kalshi target appears as an amber line with a price label on the Coinbase chart. It is a reference strike; Kalshi still settles using the BRTI index. Completed exchange candles and the latest trade marker are distinct, with no invented intraminute candles. BRTI drawings remain stored separately from Coinbase drawings.
 
 ## Data access
 
 Public Kalshi contracts, quotes, results and Coinbase inputs need no API key. The browser streams Coinbase trades and liquidity; server routes fetch market history and Kalshi data.
 
-Official BRTI samples require server-only `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY`, plus Kalshi's benchmark entitlement. See [.env.example](.env.example) and [Kalshi setup and methodology](docs/kalshi.md). Without entitled access, probabilities use a clearly labeled Coinbase proxy and additional index uncertainty. The proxy cannot determine settlement.
+Official BRTI samples require server-only `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY`, plus Kalshi's benchmark entitlement. See [.env.example](.env.example). Without entitled access, probabilities use a clearly labeled Coinbase proxy and additional index uncertainty. The proxy cannot determine settlement.
 
 Enter the production Key ID and the full downloaded private key in the ignored `.env.local` file. Run `pnpm kalshi:check` to verify fresh BRTI access, then restart the development server and any running collector. The check prints only the feed status and safe guidance; it does not write research records.
 
@@ -54,8 +54,6 @@ The settlement model is experimental. Passing implementation tests is not eviden
 Candidates train on earlier real Kalshi outcomes, calibrate and test on separate later events, and must pass prospective comparisons before activation. All checkpoints from one event are grouped so repeated observations cannot inflate the independent sample count. Benchmarks include the current-side rule and contemporaneous Kalshi quotes where available. Training never rewrites captured calls.
 
 Baseline v2 and learned v2 record their price and history sources. BRTI results qualify BRTI models; older model generations and proxy history do not substitute for new prospective evidence. Existing v1 forecasts retain their original probabilities and outcomes.
-
-See [outcome learning](docs/forecast-learning.md), [continuous collection](docs/research-collector.md), and [verification guidance](docs/TESTING.md).
 
 ## Storage and deployment
 
@@ -77,4 +75,5 @@ No deployment or trading execution is included.
 
 ## Working on the code
 
-Start with the [developer reading guide](docs/architecture.md) for the code's reading order, forecast lifecycle, data owners, and storage rules. Follow [the verification guide](docs/TESTING.md) when making changes.
+Start with [AGENTS.md](AGENTS.md) for repository rules and documentation routing. Documentation under
+`docs/` is being rebuilt in reviewed phases.
