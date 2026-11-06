@@ -1,12 +1,13 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import AdvisorHistoryTrials from '../../features/Experiments/components/AdvisorHistoryTrials';
 import AdvisorStrategyTrials from '../../features/Experiments/components/AdvisorStrategyTrials';
-import { START } from '../TradingAdvisor.fixtures';
+
+const startedAt = Date.UTC(2026, 9, 3, 12);
 
 test('history experiments disclose separate funding and retain prior losses under their own version', () => {
   const previous = {
     id: 'history-original',
-    registeredAt: START,
+    registeredAt: startedAt,
     initialBankroll: 100,
     provider: { status: 'configured', model: 'test-model' },
     strategies: [{ id: 'incumbent', label: 'Numerical trial', cash: 96.58, netProfit: -3.42 }],
@@ -16,7 +17,7 @@ test('history experiments disclose separate funding and retain prior losses unde
       trials={{
         ...previous,
         id: 'history-one-contract',
-        registeredAt: START + 1000,
+        registeredAt: startedAt + 1000,
         maxEntryContracts: 1,
         strategies: [{ id: 'incumbent', label: 'Numerical trial', cash: 100, netProfit: 0 }],
         previousExperiments: [previous],
@@ -38,7 +39,7 @@ test('history experiments disclose separate funding and retain prior losses unde
 test('strategy experiment accounts and earlier losses remain individually identifiable', () => {
   const previous = {
     policyId: 'policy-original',
-    registeredAt: START,
+    registeredAt: startedAt,
     initialBankroll: 100,
     strategies: [
       { id: 'standard', cash: 91, realizedPnl: -9, openPositionCount: 0, pendingOrderCount: 0 },
@@ -49,7 +50,7 @@ test('strategy experiment accounts and earlier losses remain individually identi
       trials={{
         ...previous,
         policyId: 'policy-one-contract',
-        registeredAt: START + 1000,
+        registeredAt: startedAt + 1000,
         maxEntryContracts: 1,
         strategies: [
           { id: 'standard', cash: 100, realizedPnl: 0, openPositionCount: 0, pendingOrderCount: 0 },

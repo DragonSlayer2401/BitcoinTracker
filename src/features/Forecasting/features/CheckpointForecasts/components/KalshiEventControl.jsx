@@ -39,7 +39,6 @@ export default function KalshiEventControl({ markets, market, onChange, now, err
         placeholder={error ? 'Kalshi unavailable' : 'Loading Bitcoin events…'}
         menuPlacement="auto"
         menuPosition="fixed"
-        menuPortalTarget={typeof document === 'undefined' ? undefined : document.body}
         menuShouldScrollIntoView={false}
         maxMenuHeight={180}
       />

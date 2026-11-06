@@ -68,7 +68,6 @@ export default function ForecastModeControl({
         placeholder="Choose capture times…"
         menuPlacement="auto"
         menuPosition="fixed"
-        menuPortalTarget={typeof document === 'undefined' ? undefined : document.body}
         menuShouldScrollIntoView={false}
         maxMenuHeight={180}
       />
