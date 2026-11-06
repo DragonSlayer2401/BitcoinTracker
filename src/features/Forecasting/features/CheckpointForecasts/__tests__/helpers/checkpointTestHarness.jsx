@@ -78,13 +78,12 @@ export const setupCheckpointTests = () => {
     localStorage.clear();
     if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
     else delete navigator.locks;
-    if (originalIndexedDb)
-      Object.defineProperty(globalThis, 'indexedDB', originalIndexedDb);
+    if (originalIndexedDb) Object.defineProperty(globalThis, 'indexedDB', originalIndexedDb);
     else delete globalThis.indexedDB;
   });
 };
 
-const createMarketFeed = (now, price = 50_000) => {
+export const createMarketFeed = (now, price = 50_000) => {
   const samples = Array.from({ length: 1201 }, (_, index) => ({
     time: Math.floor(now / 1000) * 1000 - (1200 - index) * 1000,
     price: price * Math.exp(Math.sin(index / 30) * 0.0001),
@@ -107,7 +106,9 @@ const CheckpointWorkflow = ({ now, markets, feed, onJournalReady }) => {
   const journal = useForecastJournal();
   const selection = useForecastSelection();
   const selectedMarket =
-    markets.find((market) => market.ticker === selection.preferredTicker && market.expiresAt > now) ??
+    markets.find(
+      (market) => market.ticker === selection.preferredTicker && market.expiresAt > now,
+    ) ??
     markets.find((market) => market.startsAt <= now && market.expiresAt > now) ??
     markets.find((market) => market.expiresAt > now) ??
     null;
@@ -183,8 +184,15 @@ export const renderCheckpointForecasts = async ({
     get store() {
       return store;
     },
-    update: async (time, { price = 50_000, markets: updatedMarkets = props.markets, ...feed } = {}) => {
-      props = { now: time, markets: updatedMarkets, feed: { ...createMarketFeed(time, price), ...feed } };
+    update: async (
+      time,
+      { price = 50_000, markets: updatedMarkets = props.markets, ...feed } = {},
+    ) => {
+      props = {
+        now: time,
+        markets: updatedMarkets,
+        feed: { ...createMarketFeed(time, price), ...feed },
+      };
       clock.mockReturnValue(time);
       await act(async () => view.rerender(renderWorkflow()));
     },

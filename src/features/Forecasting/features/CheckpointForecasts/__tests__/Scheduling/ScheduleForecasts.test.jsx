@@ -1,5 +1,7 @@
 import { screen, within } from '@testing-library/react';
+import { getResearchForecast } from '@/features/ForecastResearch/utils/researchForecast.utils';
 import {
+  createMarketFeed,
   currentMarket,
   eventEnd,
   nextMarket,
@@ -11,6 +13,26 @@ import {
 setupCheckpointTests();
 
 describe('Scheduling checkpoint forecasts', () => {
+  test('keeps a scheduled future event when automatic recording is enabled', async () => {
+    const view = await renderCheckpointForecasts();
+    await selectEvent(view.user, nextMarket);
+    await view.user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
+    await view.user.click(screen.getByRole('checkbox', { name: 'Auto record' }));
+
+    expect(screen.getByRole('checkbox', { name: 'Auto record' })).toBeChecked();
+    expect(screen.getByRole('heading', { name: 'Scheduled forecast' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Cancel scheduled start' })).toBeEnabled();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+
+    await view.update(eventEnd, {
+      markets: [{ ...nextMarket, target: 50_050, status: 'active' }],
+    });
+    expect(screen.getByRole('heading', { name: 'Countdown running' })).toBeVisible();
+    expect(screen.getByRole('spinbutton', { name: 'Kalshi target price' })).toHaveValue(50_050);
+    expect(screen.getByRole('row', { name: /^9 min left/ })).toHaveTextContent('In 06:00');
+    expect(screen.getAllByRole('row')).toHaveLength(3);
+  });
+
   test('selects a future event, restores its scheduled start after reload, and cancels it', async () => {
     const view = await renderCheckpointForecasts();
     await selectEvent(view.user, nextMarket);
@@ -117,6 +139,32 @@ describe('Scheduling checkpoint forecasts', () => {
     expect(screen.getByRole('button', { name: 'Checkpoints armed' })).toBeDisabled();
   });
 
+  test('waits for a price observed after the scheduled event opens', async () => {
+    const view = await renderCheckpointForecasts();
+    await selectEvent(view.user, nextMarket);
+    await view.user.click(screen.getByRole('button', { name: 'Schedule forecast' }));
+
+    const openedMarket = { ...nextMarket, target: 50_050, status: 'active' };
+    const openingFeed = createMarketFeed(eventEnd - 1000);
+    // These inputs can produce an estimate, but their reference predates this event.
+    // An unavailable model would mask a regression in the scheduled opening guard.
+    expect(
+      getResearchForecast({ ...openingFeed, now: eventEnd, kalshiMarket: openedMarket }).available,
+    ).toBe(true);
+    await view.update(eventEnd, {
+      ...openingFeed,
+      markets: [openedMarket],
+    });
+    expect(screen.getByRole('spinbutton', { name: 'Kalshi target price' })).toHaveValue(50_050);
+    expect(screen.getByRole('heading', { name: 'Waiting for start data' })).toBeVisible();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+
+    await view.update(eventEnd + 1000);
+    expect(screen.getByRole('heading', { name: 'Countdown running' })).toBeVisible();
+    expect(screen.getByRole('row', { name: /^9 min left/ })).toHaveTextContent('In 05:59');
+    expect(screen.getAllByRole('row')).toHaveLength(3);
+  });
+
   test('marks an elapsed checkpoint missed after reconnecting but still captures the next one', async () => {
     const view = await renderCheckpointForecasts();
     await selectEvent(view.user, nextMarket);
@@ -163,8 +211,8 @@ describe('Scheduling checkpoint forecasts', () => {
 
     const laterMarket = {
       ...nextMarket,
-      ticker: 'KXBTC15M-LATER-45',
-      eventTicker: 'KXBTC15M-LATER',
+      ticker: 'KXBTC15M-26NOV061245-45',
+      eventTicker: 'KXBTC15M-26NOV061245',
       startsAt: nextMarket.expiresAt,
       expiresAt: nextMarket.expiresAt + 900_000,
     };
