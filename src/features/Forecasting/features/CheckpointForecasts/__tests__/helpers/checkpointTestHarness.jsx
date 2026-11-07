@@ -181,9 +181,6 @@ export const renderCheckpointForecasts = async ({
   await mount();
   return {
     user,
-    get store() {
-      return store;
-    },
     update: async (
       time,
       { price = 50_000, markets: updatedMarkets = props.markets, ...feed } = {},

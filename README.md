@@ -48,6 +48,10 @@ For read-only Kalshi market, order-book and official BRTI recording, use
 `pnpm kalshi:capture --help`. See [Kalshi ingestion](docs/kalshi-ingestion.md) for
 record/inspect commands, entitlement, reference provenance and archive limits.
 
+For contract event datasets and receipt-time replay, use `pnpm research:dataset --help`.
+See [event datasets](docs/event-datasets.md) for fixed-horizon snapshots, separate outcome
+labels, historical supplements and data-quality reports. These commands do not train models.
+
 Public Kalshi contracts, quotes, results and Coinbase inputs need no API key. The browser streams Coinbase trades and liquidity; server routes fetch market history and Kalshi data.
 
 Official BRTI samples require server-only `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY`, plus Kalshi's benchmark entitlement. See [.env.example](.env.example). Without entitled access, probabilities use a clearly labeled Coinbase proxy and additional index uncertainty. The proxy cannot determine settlement.

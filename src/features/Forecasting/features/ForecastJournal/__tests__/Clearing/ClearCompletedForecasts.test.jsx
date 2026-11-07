@@ -112,8 +112,12 @@ describe('Clearing completed forecast history', () => {
     ).not.toBeInTheDocument();
 
     await view.reload();
+    expect(screen.queryByRole('button', { name: 'Clear completed' })).not.toBeInTheDocument();
     await view.user.click(screen.getByRole('button', { name: 'View history' }));
     history = await screen.findByRole('dialog', { name: 'Forecast history' });
+    expect(
+      within(history).queryByRole('button', { name: 'Clear completed' }),
+    ).not.toBeInTheDocument();
     expect(within(history).getAllByRole('row')).toHaveLength(4);
     expect(within(history).getByRole('row', { name: /6 min left/ })).toHaveTextContent('Observing');
     expect(within(history).getByRole('row', { name: /\$50,000.00.*9 min left/ })).toHaveTextContent(
@@ -199,37 +203,5 @@ describe('Clearing completed forecast history', () => {
     const history = await screen.findByRole('dialog', { name: 'Forecast history' });
     expect(within(history).getAllByRole('row')).toHaveLength(2);
     expect(within(history).getByRole('table')).toHaveTextContent('$50,100.00');
-  });
-
-  test('offers no clear action when every saved forecast is still active or awaiting settlement', async () => {
-    const view = await renderForecastJournal({
-      now: journalNow + 7 * 60_000,
-      forecasts: [
-        createSavedForecast({
-          id: 'observing',
-          status: 'analyzing',
-          startsAt: journalNow,
-          checkpointMinutes: 6,
-        }),
-        createSavedForecast({
-          id: 'pending',
-          status: 'pending',
-          startsAt: journalNow,
-          checkpointMinutes: 9,
-        }),
-        createSavedForecast({
-          id: 'awaiting',
-          status: 'awaiting-settlement',
-          startsAt: journalNow - 1800_000,
-        }),
-      ],
-    });
-    expect(screen.queryByRole('button', { name: 'Clear completed' })).not.toBeInTheDocument();
-    await view.user.click(screen.getByRole('button', { name: 'View history' }));
-    const history = await screen.findByRole('dialog', { name: 'Forecast history' });
-    expect(within(history).getAllByRole('row')).toHaveLength(4);
-    expect(
-      within(history).queryByRole('button', { name: 'Clear completed' }),
-    ).not.toBeInTheDocument();
   });
 });

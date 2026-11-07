@@ -157,7 +157,6 @@ export const renderForecastJournal = async ({
       view.unmount();
       await mount();
     },
-    unmount: () => view.unmount(),
     acquireOwnership: async () => {
       await act(async () => {
         grantLock();

@@ -1,12 +1,175 @@
 # Bot implementation status
 
+## Redundancy cleanup — 2026-11-07
+
+Audited the 44 test suites, their helpers, the 15 files under `scripts/`, package
+commands and four local diagnostic scripts in `test-artifacts/`.
+
+- Removed the unused `preview` package alias: it duplicated `start` exactly.
+  Use `pnpm start` to run the production build.
+- Removed the obsolete local driver `test-artifacts/phase4-book-check.mjs`.
+  It depended on a fixed discovery recording whose contracts have expired and wrote
+  an already-existing report with exclusive creation. The recorded comparison at
+  `test-artifacts/phase4-live/book-comparison.json` and all source recordings remain.
+- Removed the redundant active-only journal-clearing scenario from
+  `src/features/Forecasting/features/ForecastJournal/__tests__/Clearing/ClearCompletedForecasts.test.jsx`.
+  Its button-absence assertions now run in the existing mixed-state clear/reload
+  workflow, which already restores the same three retained states. Removed the unused
+  `store` getter from `CheckpointForecasts/__tests__/helpers/checkpointTestHarness.jsx`
+  and returned `unmount` callback from `ForecastJournal/__tests__/helpers/journalTestHarness.jsx`.
+  No whole test suite was redundant. Similar-looking tests exercise separate entry
+  points: capture versus replay, serialized records
+  versus advice and paper execution, and manual versus automatic collection.
+  The four spot suites separately cover normalization, filesystem integrity,
+  recorder integration and CLI behavior. These checks remain intact.
+- Retained bootstrap/runtime pairs, collector workers and research comparison tools
+  because they serve different interfaces or process lifetimes. The remaining local
+  diagnostics also exercise behavior without a complete replacement.
+- Application code, saved research, existing Phase 5 work and the roadmap are
+  unchanged. No later phase was started. Cleanup verification is recorded below.
+
+Observed cleanup checks:
+
+- `pnpm test src/features/Forecasting/features/CheckpointForecasts src/features/Forecasting/features/ForecastJournal`:
+  **10 suites / 72 tests passed**, 30.805 seconds.
+- `pnpm test`: **44 suites / 354 tests passed**, 155.41 seconds, outside the Windows
+  sandbox. The count decreased by exactly the one redundant scenario.
+- `pnpm start --help`: passed; the surviving production-start command resolves normally.
+- `pnpm build`: passed outside the Windows sandbox.
+- `pnpm format:check` and `git diff --check`: passed. The obsolete driver is absent;
+  its recorded JSON report remains. No UI change required a browser check, and no
+  live feed, paid experiment or order-submission check was run for this cleanup.
+
 ## Current phase
+
+Phase 5 implements contract event datasets and deterministic receipt-time replay.
+Code and focused acceptance are complete. Real recording builds reproduce exactly;
+their coverage report deliberately identifies zero feature-ready horizons in the short
+available recordings. No model training, forecast changes, execution profitability
+claim or order submission was added. Phase 6 has not been supplied or started.
+
+See [event datasets](event-datasets.md) for the interface, source URLs, retrieval
+dates, API versions, schemas, eligibility settings and limitations.
+
+### Phase 5 scope, reuse and interfaces
+
+- `src/features/ForecastResearch/features/EventDatasets/utils/eventReplay.utils.js`
+  exports `createEventReplay({ records, freshnessMs, lookbackMs })`. It exposes a
+  controllable `clock.now/set/advance` and `asOf(ticker, decisionAt)` with rewind.
+  Local receipt/availability, stable source identity, capture sequence, ordinal and ID
+  determine ordering. Opening levels and BRTI revisions become known only when received.
+  Prediction inputs and Kalshi trading context are separate; final labels are excluded.
+- `eventDataset.utils.js` in that directory exports `buildEventDataset`. It reuses
+  `KALSHI_RESEARCH_CHECKPOINTS` from the existing recorder for 12/9/6/3/1 minutes;
+  it does not call the existing forecast/model replay. Contract schedules use the
+  first observed metadata, with later close changes reported rather than backdated.
+  Unresolved and excluded events remain represented with reasons. Reference windows,
+  missing samples, source provenance and inadequate historical depth are reported.
+- `src/services/research/eventDatasets/eventDatasetSources.service.js` exports
+  `loadEventDatasetSources`, reusing Phase 3/4 normalization and archive verification.
+  It accepts completed Kalshi directories, Coinbase files and historical supplements.
+  Incomplete/corrupt/conflicting/clock-regressed sources are explicitly excluded;
+  original recordings, retrospective history and synthetic fixtures remain distinct.
+- `eventDataset.repository.js` exports `serializeEventDataset`, `writeEventDataset`
+  and `inspectEventDataset`, reusing canonical research JSON. A new output directory
+  contains `events.jsonl`, `snapshots.jsonl`, **separate `labels.jsonl`**, `quality.json`
+  and a checksum manifest written last. Build/replay add no wall-clock or random values.
+  Existing outputs are never overwritten. No database or additional dependency was added.
+- `src/services/kalshi/history/kalshiEventHistory.service.js` exports
+  `fetchKalshiEventHistory`. It uses existing GET-only resources for current market
+  metadata with historical fallback and explicitly requested completed UTC BRTI hours.
+  Supplements preserve actual fetch times, missing/denied requests and unknown original
+  availability. Neither candles nor outcomes are converted into historical order books.
+- `scripts/build-events.mjs`, `scripts/build-events.runtime.js` and the
+  `research:dataset` package command provide `build`, `inspect`, `replay` and optional
+  `history`. Only history loads credentials or makes network requests. Existing UI,
+  model, collector, account history and execution paths are unchanged.
+- One new workflow suite is
+  `src/features/ForecastResearch/features/EventDatasets/__tests__/Replay/BuildEventDataset.test.js`.
+  Its synthetic markets/feeds test behavior, not real forecast performance.
+
+### Phase 5 acceptance and decisions
+
+- **Passed:** identical artifact identities and snapshots on rerun, stable ordering
+  and clock rewind; changed future reference values/revisions, books and outcomes
+  leave earlier snapshots byte-identical; reference availability is not backdated.
+- **Passed:** exact opening-level revision availability (equivalent decimal formatting
+  does not create a revision); late/invalid timestamps rejected; labels remain outside
+  inputs even after settlement; Kalshi quote changes do not change `modelInputs`.
+- **Passed:** all five horizons, unresolved/excluded events, source exclusions, missing
+  reference samples and inadequate depth in the quality report; original spot data
+  stays a proxy; historical fallback and denied-entitlement fixtures; integrity checks.
+- The default 15-minute reference lookback and 5-second freshness limit are explicit
+  local dataset settings, not optimized model parameters. Feature readiness requires
+  supported outcome rules, a known opening level, a fresh official reference and complete
+  canonical lookback samples. Spot and book availability are reported separately; Kalshi
+  prices do not decide probability-input eligibility. Partial snapshots remain stored.
+- Retrospective data fetched after a decision cannot repair that decision's missing
+  inputs. Publication time remains unknown where the source does not provide it.
+  Phase 2 trading-rule blockers remain unchanged; a dataset does not authorize trading.
+
+### Phase 5 observed checks
+
+The starting tree was clean at commit `a8d13f4` (`Implemented 4 phases of new Bot
+implementation`). All new work is Phase 5; no previous-phase source was rewritten.
+Checks used isolated files and an isolated limiter, never the working research database.
+
+| Command / check                                                                                                              | Observed result                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test --runTestsByPath src/features/ForecastResearch/features/EventDatasets/__tests__/Replay/BuildEventDataset.test.js` | **14 passed**, 3.511 seconds. An initial test expected the wrong history coverage field name; corrected to the implemented `missingSeconds`, then passed. |
+| `pnpm test` outside Windows sandbox                                                                                          | **44 suites / 355 tests passed**, 151.279 seconds. The existing collector suite passed in this run.                                                       |
+| `pnpm format:check`; `git diff --check`                                                                                      | Both passed; Git emitted only existing Windows LF/CRLF notices.                                                                                           |
+| `pnpm build`                                                                                                                 | Passed outside the Windows sandbox: Next.js 16.3.4/Turbopack compiled in 1,285 ms and generated all three static pages plus existing dynamic routes.      |
+| Browser/typecheck                                                                                                            | No rendered UI change; browser check unnecessary. No standalone typecheck command exists in this JavaScript stack.                                        |
+
+The following real integration commands ran on 2026-11-07 UTC / 2026-11-06
+America/Chicago. The selected 04:00 UTC hour is an actual verified request, not a
+hard-coded production data range:
+
+```powershell
+$env:KALSHI_RATE_LIMIT_DATABASE_URL = ([System.Uri](Join-Path (Get-Location) 'test-artifacts/phase5/rate-limits.db')).AbsoluteUri
+pnpm research:dataset history --ticker KXBTC15M-26NOV070000-00 --reference-hour 2026-11-07T04:00:00Z --output test-artifacts/phase5/history.json --json
+pnpm research:dataset build --kalshi-directory test-artifacts/phase4-live-batched/capture --kalshi-directory test-artifacts/phase4-live/capture --spot-file test-artifacts/phase3-live-20261106/5ceac979-85fd-4e24-a40f-2bdb5687b663.jsonl --history-file test-artifacts/phase5/history.json --output test-artifacts/phase5/dataset-final --json
+pnpm research:dataset replay --dataset test-artifacts/phase5/dataset-final --kalshi-directory test-artifacts/phase4-live-batched/capture --kalshi-directory test-artifacts/phase4-live/capture --spot-file test-artifacts/phase3-live-20261106/5ceac979-85fd-4e24-a40f-2bdb5687b663.jsonl --history-file test-artifacts/phase5/history.json --json
+pnpm research:dataset inspect --dataset test-artifacts/phase5/dataset-final --json
+```
+
+- History access succeeded: one market response plus **3,600 / 3,600** canonical
+  BRTI seconds for the requested completed hour, zero missing/invalid seconds. The market
+  remained on the current endpoint; the historical-market 404 fallback was verified by
+  fixtures, not this live response. Historical BRTI entitlement was confirmed for this
+  account/hour. Actual local reference receipt was `1794029450466`; original availability
+  stays unknown and those values do not enter earlier snapshots.
+- Build admitted **8,051 Kalshi + 460 Coinbase original rows** and **3 retrospective
+  supplement captures**. It explicitly excluded the earlier incomplete Phase 4 archive.
+- Output retained **97 contracts**, **65 horizon snapshots**, **1 separate official
+  label**, and **96 unresolved contracts**. Eighty-four raw discovered contracts lay
+  outside the original recorder's normalized discovery horizon and remain excluded with
+  reasons, without invented schedules. All 97 contracts were excluded from the configured
+  feature-ready cohort; **zero** snapshots met its completeness/freshness requirements.
+  All 65 scheduled horizons report missing reference coverage and inadequate depth.
+  These are measured limitations of the short recordings, not fabricated historical data.
+- Rebuild matched the complete dataset identity exactly:
+  `sha256:298f4258554a9050da962083553d87593f6759bedf8938dbe5656a3ee7c23c25`.
+  Inspection verified every artifact checksum/count. Original and incomplete archives
+  were preserved; only new test artifacts were created.
+
+### Phase 5 blockers and next step
+
+The event dataset/replay implementation is complete. The available short recordings do
+not establish a feature-complete historical cohort; collecting prospective coverage at
+the required horizons is still needed before model evaluation. No documented full-depth
+historical order-book endpoint or original historical publication timestamps were found;
+these remain explicit limitations. No accuracy or profitability improvement is claimed.
+Await the user's Phase 6 scope and stop here.
+
+## Phase 4 checkpoint (historical)
 
 Phase 4 implements read-only KXBTC15M discovery, order-book capture and official
 settlement-reference ingestion. Code and offline acceptance are complete; live feeds,
 replay, a same-clock book comparison and an official final result were observed.
 Long-run capacity and economic performance remain unvalidated. Production submission
-is absent. Phase 5 has not been supplied and is not started.
+is absent. At that checkpoint Phase 5 had not been supplied or started.
 
 See [Kalshi ingestion](kalshi-ingestion.md) for commands, official source URLs,
 retrieval dates, API versions, schemas and operational limitations.
@@ -91,7 +254,7 @@ $env:KALSHI_RATE_LIMIT_DATABASE_URL = ([System.Uri](Join-Path (Get-Location) 'te
 pnpm kalshi:capture record --directory test-artifacts/phase4-live/capture --duration-seconds 20 --json
 pnpm kalshi:capture inspect --directory test-artifacts/phase4-live/capture --json
 pnpm kalshi:capture record --directory test-artifacts/phase4-live/capture --duration-seconds 30 --poll-seconds 10 --json
-node --conditions=react-server test-artifacts/phase4-book-check.mjs
+node --conditions=react-server test-artifacts/phase4-book-check.mjs # Historical command; driver retired during redundancy cleanup.
 pnpm kalshi:capture record --directory test-artifacts/phase4-live-verified/capture --duration-seconds 30 --poll-seconds 10 --json
 pnpm kalshi:capture record --directory test-artifacts/phase4-live-batched/capture --duration-seconds 30 --poll-seconds 10 --json
 pnpm kalshi:capture inspect --directory test-artifacts/phase4-live-batched/capture --json
@@ -383,28 +546,28 @@ Status meanings:
 
 ## Roadmap register
 
-The roadmap has 15 phases. Phases 1–4 have been supplied. Rows 5–15
+The roadmap has 15 phases. Phases 1–5 have been supplied. Rows 6–15
 are blocked on their definitions, **not claims that their implementations are
 missing**. The capability inventory below can be matched to those phases when
 their scopes and acceptance criteria arrive; it is not an invented phase sequence.
 
-| Phase | Status            | Scope, evidence, and next step                                                                                                                                                                                        |
-| ----- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | Verified existing | Repository audit and implementation baseline documented here; check results and limitations below. Documentation complete; economic performance unverified.                                                           |
-| 2     | Partial           | Code complete and offline acceptance passed (38 suites/287 tests, formatting, build); live rule verification blocked on quantity, halfway rounding and expiration evidence. Performance unvalidated.                  |
-| 3     | Verified existing | Code complete and phase acceptance passed: one Coinbase BTC-USD feed, 36 focused tests, 323 full tests, build/format and a 20-second live capture with exact replay. Long-run capacity and profitability unvalidated. |
-| 4     | Verified existing | Read-only market/book/BRTI ingestion implemented; fixtures and live discovery, entitlement, snapshot agreement, final result and completed replay observed. Long-run capacity and profitability unvalidated.          |
-| 5     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 6     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 7     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 8     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 9     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 10    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 11    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 12    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 13    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 14    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
-| 15    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                      |
+| Phase | Status            | Scope, evidence, and next step                                                                                                                                                                                                                               |
+| ----- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | Verified existing | Repository audit and implementation baseline documented here; check results and limitations below. Documentation complete; economic performance unverified.                                                                                                  |
+| 2     | Partial           | Code complete and offline acceptance passed (38 suites/287 tests, formatting, build); live rule verification blocked on quantity, halfway rounding and expiration evidence. Performance unvalidated.                                                         |
+| 3     | Verified existing | Code complete and phase acceptance passed: one Coinbase BTC-USD feed, 36 focused tests, 323 full tests, build/format and a 20-second live capture with exact replay. Long-run capacity and profitability unvalidated.                                        |
+| 4     | Verified existing | Read-only market/book/BRTI ingestion implemented; fixtures and live discovery, entitlement, snapshot agreement, final result and completed replay observed. Long-run capacity and profitability unvalidated.                                                 |
+| 5     | Verified existing | Event datasets, receipt-time replay, separate labels and quality reports implemented; leakage fixtures, entitled historical BRTI and real-data rebuild identity verified. Existing recordings have no feature-ready horizons; model performance unvalidated. |
+| 6     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 7     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 8     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 9     | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 10    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 11    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 12    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 13    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 14    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
+| 15    | Blocked           | Definition and acceptance criteria not supplied.                                                                                                                                                                                                             |
 
 ## Phase 1 module map and data flow
 
