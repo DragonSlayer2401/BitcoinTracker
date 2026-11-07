@@ -8,7 +8,7 @@ const SIGNAL_COLOR = '#f0c577';
 const RSI_COLOR = '#c5a4ff';
 const AXIS_COLOR = '#afc3b6';
 
-function getChartLayout(chartHeight, indicatorPanes, priceAxisWidth = 80) {
+const getChartLayout = (chartHeight, indicatorPanes, priceAxisWidth = 80) => {
   const indicatorCount = indicatorPanes.length;
   const height = Number.isFinite(chartHeight) && chartHeight > 0 ? chartHeight : 400;
   const top = Math.min(8, height * 0.04);
@@ -22,9 +22,9 @@ function getChartLayout(chartHeight, indicatorPanes, priceAxisWidth = 80) {
   indicatorPanes.forEach((id) => {
     const panelHeight = (available * (1 - priceFraction)) / indicatorCount;
     const plotInset = Math.min(6, panelHeight / 4);
-    const headerHeight = Math.min(18, Math.max(0, panelHeight - plotInset - 1));
-    // DOM headers and ECharts plots share these exact bounds. Header space stays inside the
-    // existing canvas height, so clearer indicator sections do not make the dashboard taller.
+    const bottomInset = Math.min(4, panelHeight / 8);
+    const headerHeight = Math.min(18, Math.max(0, panelHeight - plotInset - bottomInset - 1));
+    // DOM headers and ECharts plots share these bounds, with space for both endpoint labels.
     indicatorPanels.push({
       id,
       label: id === 'macd' ? 'MACD (12, 26, 9)' : 'RSI (14)',
@@ -33,11 +33,11 @@ function getChartLayout(chartHeight, indicatorPanes, priceAxisWidth = 80) {
       headerHeight,
     });
     grid.push({
-      // Keep the top tick's centered text below the opaque DOM header.
+      // Keep the top tick below the opaque DOM header.
       top: nextTop + headerHeight + plotInset,
       left: 8,
       right: priceAxisWidth,
-      height: panelHeight - headerHeight - plotInset,
+      height: panelHeight - headerHeight - plotInset - bottomInset,
       show: true,
       backgroundColor: id === 'macd' ? '#0d171b' : '#171320',
       borderColor: id === 'macd' ? '#2a3944' : '#3a3049',
@@ -46,7 +46,7 @@ function getChartLayout(chartHeight, indicatorPanes, priceAxisWidth = 80) {
     nextTop += panelHeight + gap;
   });
   return { grid, indicatorPanels };
-}
+};
 
 function getIndicatorData(points, key, interval) {
   const data = [];
@@ -295,11 +295,7 @@ export function getPriceChartOption({
   const chartAnnotations = Array.isArray(annotations) ? annotations : [];
   const verticalMarks = getVerticalMarks(chartAnnotations, comparisonTime, hasDeadline, deadline);
   const indicatorPanes = [...(showMacd ? ['macd'] : []), ...(showRsi ? ['rsi'] : [])];
-  const { grid, indicatorPanels } = getChartLayout(
-    chartHeight,
-    indicatorPanes,
-    isCoinbase ? 120 : 80,
-  );
+  const { grid, indicatorPanels } = getChartLayout(chartHeight, indicatorPanes);
   const priceRange = maximum - minimum + padding * 2;
   const haveNearbyPriceLabels =
     isCoinbase &&
@@ -320,7 +316,7 @@ export function getPriceChartOption({
                     label: {
                       show: true,
                       position: 'end',
-                      formatter: `Target ${formatPrice(target)}`,
+                      formatter: formatPrice(target),
                       color: '#181c14',
                       backgroundColor: SIGNAL_COLOR,
                       borderColor: SIGNAL_COLOR,
@@ -460,7 +456,8 @@ export function getPriceChartOption({
         };
   const axisIndexes = grid.map((_, index) => index);
   const xAxis = grid.map((_, index) => ({
-    id: `time-${index === 0 ? 'price' : indicatorPanes[index - 1]}`,
+    // Axis identities follow their slots because series and zoom reference numeric indexes.
+    id: `time-${index}`,
     gridIndex: index,
     type: 'time',
     min: startTime,
@@ -519,7 +516,7 @@ export function getPriceChartOption({
     },
     ...indicatorPanes.map((pane, index) => ({
       ...valueAxis,
-      id: `value-${pane}`,
+      id: `value-${index + 1}`,
       gridIndex: index + 1,
       name: '',
       min: pane === 'rsi' ? 0 : macdMinimum - macdPadding,
@@ -527,6 +524,11 @@ export function getPriceChartOption({
       splitNumber: 2,
       axisLabel: {
         ...valueAxis.axisLabel,
+        // Keep endpoint text inside the plot instead of across the pane dividers.
+        verticalAlignMinLabel: 'bottom',
+        verticalAlignMaxLabel: 'top',
+        showMinLabel: true,
+        showMaxLabel: true,
         formatter: (value) => Number(value).toFixed(pane === 'rsi' ? 0 : 2),
       },
       axisPointer: { ...valueAxis.axisPointer, label: { show: true, precision: 2 } },

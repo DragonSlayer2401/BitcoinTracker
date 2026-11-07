@@ -239,12 +239,16 @@ const PriceChart = ({ benchmarkData, chartData, forecast, target, now = 0, deadl
     const element = canvasRef.current;
     if (!element || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
       const height = Math.round(entry.contentRect.height);
       if (height > 0) setChartHeight(height);
+      if (width > 0 && height > 0 && chart && !chart.isDisposed()) {
+        chart.resize({ width, height });
+      }
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [hasData, isExpanded]);
+  }, [chart, hasData, isExpanded]);
 
   const chartEvents = useMemo(
     () => ({
