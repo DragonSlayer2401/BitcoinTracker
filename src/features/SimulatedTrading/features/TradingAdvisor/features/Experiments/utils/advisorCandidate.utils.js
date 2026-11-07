@@ -3,6 +3,12 @@ import {
   isSameKalshiContract,
 } from '@/features/MarketData/utils/kalshi/contract.utils';
 import {
+  getTradingComplementPrice,
+  getTradingGridPrice,
+  isTradingPriceValid,
+  isTradingQuantityValid,
+} from '@/features/SimulatedTrading/utils/tradingSpecification.utils';
+import {
   getTradingAdvice,
   getTradingBookProblem,
   getTradingExecutionQuote,
@@ -178,7 +184,7 @@ function getMarketPoint(
 }
 
 /** One bounded, causal view of this exact target and expiry. Market text is evidence, never instructions. */
-export function getAdvisorCandidateEvidence({
+export const getAdvisorCandidateEvidence = ({
   snapshotId,
   contract,
   forecast,
@@ -188,7 +194,7 @@ export function getAdvisorCandidateEvidence({
   policy,
   history = [],
   lastPlan = null,
-}) {
+}) => {
   const base = {
     version: 'advisor-candidate-evidence-v1',
     available: false,
@@ -295,12 +301,14 @@ export function getAdvisorCandidateEvidence({
       (level) => level.quantity > 0,
     );
     const bestBid = opposingAsks.length
-      ? 1 - Math.min(...opposingAsks.map((level) => level.price))
+      ? getTradingComplementPrice(Math.min(...opposingAsks.map((level) => level.price)))
       : null;
     // A HOLD target must rest above today's raw bid rather than immediately sell
     // when the AI disagrees with the numerical policy's exit recommendation.
     const minimumLimitPrice =
-      bestBid === null ? null : (Math.floor((bestBid + 1e-10) * 100) + 1) / 100;
+      bestBid === null
+        ? null
+        : (getTradingGridPrice(bestBid, contract, position.side, 'up', { strict: true }) ?? 1);
     const hold = canonical({
       action: 'hold',
       side: position.side,
@@ -340,6 +348,7 @@ export function getAdvisorCandidateEvidence({
               ]
             : [{ action: 'EXIT', quantity }];
       for (const size of sizes) {
+        if (!isTradingQuantityValid(size.quantity, contract)) continue;
         const sale = getTradingExecutionQuote({
           action: 'sell',
           side: position.side,
@@ -350,8 +359,12 @@ export function getAdvisorCandidateEvidence({
           policy,
         });
         if (!sale.available) continue;
-        const limitPrice =
-          Math.floor((Math.min(...sale.fills.map((fill) => fill.price)) + 1e-10) * 100) / 100;
+        const limitPrice = getTradingGridPrice(
+          Math.min(...sale.fills.map((fill) => fill.price)),
+          contract,
+          position.side,
+          'down',
+        );
         const amounts =
           limitPrice > 0
             ? getTradingQuoteAmounts(
@@ -467,7 +480,7 @@ export function getAdvisorCandidateEvidence({
       ...(previousPlan ? [previousPlan.id] : []),
     ],
   });
-}
+};
 
 /** A fixed rules challenger tests persistence and separate exit thresholds without imposing a minimum hold. */
 export function getHistoryRulesDecision(evidence) {
@@ -654,13 +667,13 @@ export function validateAdvisorCandidateDecision({
 }
 
 /** Candidate exits share causality, prices, fees, inventory and IOC accounting, with a frozen separate exit rule. */
-export function simulateAdvisorCandidateExecution({
+export const simulateAdvisorCandidateExecution = ({
   advice,
   book,
   portfolio,
   now,
   policy = advice?.policy,
-}) {
+}) => {
   if (advice?.action !== 'sell')
     return simulateTradingExecution({ advice, book, portfolio, now, policy });
   if (
@@ -720,6 +733,11 @@ export function simulateAdvisorCandidateExecution({
     getTradingBookProblem({ contract: advice.contract, book, now }) ||
     getTradingPortfolioProblem(portfolio);
   if (problem) return noFill(problem);
+  if (
+    !isTradingPriceValid(advice.limitPrice, advice.contract, advice.side) ||
+    !isTradingQuantityValid(advice.quantity, advice.contract)
+  )
+    return noFill('invalid_market_price_or_quantity');
   const position = portfolio.positions.find((item) => item.id === advice.positionId);
   if (
     !position ||
@@ -754,6 +772,7 @@ export function simulateAdvisorCandidateExecution({
   let reason = 'insufficient_execution_depth';
   const firstQuantity = policy.version === 2 ? 1 : advice.quantity;
   for (let quantity = firstQuantity; quantity <= advice.quantity; quantity += 1) {
+    if (!isTradingQuantityValid(quantity, advice.contract)) continue;
     const quote = getTradingExecutionQuote({
       action: 'sell',
       side: advice.side,
@@ -800,4 +819,4 @@ export function simulateAdvisorCandidateExecution({
         ? 'candidate_delayed_snapshot_simulation'
         : 'candidate_partial_fill_remainder_canceled',
   });
-}
+};

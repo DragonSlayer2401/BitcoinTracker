@@ -1,3 +1,9 @@
+import {
+  getTradingSpecificationProblem,
+  isTradingPriceValid,
+  isTradingQuantityValid,
+} from '../../../utils/tradingSpecification.utils';
+
 const money = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -11,6 +17,14 @@ export const formatAdvisorQuantity = (value) =>
 export const getAdvisorSideLabel = (side) => (side === 'yes' ? 'UP' : side === 'no' ? 'DOWN' : '');
 
 const reasons = {
+  market_specification_unverified:
+    'Trading is paused because the market rules or quantity requirements could not be fully verified.',
+  market_specification_conflict:
+    'Trading is paused because the market specification conflicts with this contract.',
+  invalid_market_price_or_quantity:
+    'Trading is paused because a price or quantity does not match this market’s verified increments.',
+  invalid_market_quote:
+    'Trading is paused because the quote does not satisfy this market’s verified data contract.',
   provider_authentication_failed: 'The AI provider rejected the configured API key.',
   provider_access_denied: 'The API key does not have access to the AI provider or model.',
   provider_quota_exhausted:
@@ -90,7 +104,7 @@ export function hasFreshAdvisorReport(report, now) {
 }
 
 /** A stored suggestion is actionable only for this open contract and a recent collector cycle. */
-export function hasFreshAdvisorAdvice({ advice, collector, market, now }) {
+export const hasFreshAdvisorAdvice = ({ advice, collector, market, now }) => {
   return Boolean(
     Number.isFinite(now) &&
     advice &&
@@ -106,10 +120,15 @@ export function hasFreshAdvisorAdvice({ advice, collector, market, now }) {
     collector.heartbeatAt <= now &&
     now - collector.heartbeatAt < 30_000 &&
     market &&
+    !getTradingSpecificationProblem(market) &&
+    !getTradingSpecificationProblem(advice.contract) &&
+    (!['buy', 'sell'].includes(advice.action) ||
+      (isTradingPriceValid(advice.limitPrice, market, advice.side) &&
+        isTradingQuantityValid(advice.quantity, market))) &&
     market.startsAt <= now &&
     market.expiresAt > now &&
     advice.contract?.ticker === market.ticker &&
     advice.contract?.target === market.target &&
     advice.contract?.expiresAt === market.expiresAt,
   );
-}
+};

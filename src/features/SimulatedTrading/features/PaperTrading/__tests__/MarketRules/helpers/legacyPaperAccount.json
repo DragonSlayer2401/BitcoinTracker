@@ -1,0 +1,191 @@
+{
+  "provenance": {
+    "kind": "synthetic-fixture",
+    "generatedFrom": "ba6186e12f8e40163188b809c7fbc2e7e099f85e",
+    "source": "src/features/SimulatedTrading/features/PaperTrading/utils/paperTrading.utils.js",
+    "description": "Frozen output of the pre-Phase-2 implementation on synthetic observations; not historical returns."
+  },
+  "decision": {
+    "id": "kalshi-paper-v1:KXBTC15M-26NOV062300-00",
+    "policyId": "kalshi-paper-v1",
+    "contract": {
+      "ticker": "KXBTC15M-26NOV062300-00",
+      "eventTicker": "KXBTC15M-26NOV062300",
+      "seriesTicker": "KXBTC15M",
+      "target": 100000,
+      "startsAt": 1794023100000,
+      "expiresAt": 1794024000000,
+      "comparison": "greater_or_equal",
+      "roundDigits": 2,
+      "outcomeDefinition": "kalshi-btc15m-brti-average-v1",
+      "rulesVerified": true
+    },
+    "decidedAt": 1794023640000,
+    "policy": {
+      "id": "kalshi-paper-v1",
+      "initialBankroll": 100,
+      "checkpointMinutes": 6,
+      "captureGraceMs": 5000,
+      "contracts": 1,
+      "accountType": "direct",
+      "probabilityReserve": 0.05,
+      "minimumNetEdge": 0.03,
+      "slippagePerContract": 0.01,
+      "minimumFillDelayMs": 2000,
+      "maximumFillDelayMs": 15000,
+      "maxOpenRisk": 5,
+      "maxDailyLoss": 5
+    },
+    "forecast": {
+      "available": true,
+      "aboveProbability": 0.9,
+      "capturedAt": 1794023640000,
+      "modelVersion": "synthetic-legacy-baseline-v1",
+      "modelId": null
+    },
+    "book": {
+      "ticker": "KXBTC15M-26NOV062300-00",
+      "receivedAt": 1794023640000,
+      "requestedAt": 1794023639950,
+      "yesAsks": [
+        {
+          "price": 0.4,
+          "quantity": 10
+        }
+      ],
+      "noAsks": [
+        {
+          "price": 0.61,
+          "quantity": 10
+        }
+      ],
+      "fee": {
+        "available": true,
+        "type": "quadratic",
+        "multiplier": 1,
+        "checkedAt": 1794023640000,
+        "validUntil": 1794023670000
+      },
+      "depthLimit": 100
+    },
+    "portfolio": {
+      "cash": 100,
+      "openRisk": 0,
+      "dailyRealizedPnl": 0
+    },
+    "status": "intent",
+    "reason": "conservative_edge",
+    "side": "yes",
+    "quantity": 1,
+    "limitPrice": 0.8091,
+    "maxCost": 0.82,
+    "reservedCapital": 0.82,
+    "expectedNetValue": 0.473,
+    "conservativeExpectedNetValue": 0.423
+  },
+  "execution": {
+    "id": "kalshi-paper-v1:KXBTC15M-26NOV062300-00:execution",
+    "decisionId": "kalshi-paper-v1:KXBTC15M-26NOV062300-00",
+    "kind": "fill",
+    "recordedAt": 1794023642050,
+    "reason": "delayed_snapshot_simulation",
+    "side": "yes",
+    "quantity": 1,
+    "price": 0.42,
+    "cost": 0.42,
+    "fee": 0.0171,
+    "totalCost": 0.4371,
+    "bookReceivedAt": 1794023642050,
+    "book": {
+      "ticker": "KXBTC15M-26NOV062300-00",
+      "receivedAt": 1794023642050,
+      "requestedAt": 1794023642000,
+      "yesAsks": [
+        {
+          "price": 0.41,
+          "quantity": 10
+        }
+      ],
+      "noAsks": [
+        {
+          "price": 0.6,
+          "quantity": 10
+        }
+      ],
+      "fee": {
+        "available": true,
+        "type": "quadratic",
+        "multiplier": 1,
+        "checkedAt": 1794023640000,
+        "validUntil": 1794023670000
+      },
+      "depthLimit": 100
+    },
+    "expectedNetValue": 0.4629,
+    "conservativeExpectedNetValue": 0.4129,
+    "fills": [
+      {
+        "price": 0.42,
+        "quantity": 1
+      }
+    ]
+  },
+  "settlement": {
+    "id": "kalshi-paper-v1:KXBTC15M-26NOV062300-00:settlement",
+    "decisionId": "kalshi-paper-v1:KXBTC15M-26NOV062300-00",
+    "kind": "settlement",
+    "recordedAt": 1794024005000,
+    "outcome": "yes",
+    "settledAt": 1794024001000,
+    "payout": 1,
+    "cost": 0.42,
+    "fee": 0.0171,
+    "totalCost": 0.4371,
+    "netPnl": 0.5629,
+    "marketTicker": "KXBTC15M-26NOV062300-00",
+    "kalshiOutcome": {
+      "status": "observed",
+      "outcomeDefinition": "kalshi-btc15m-brti-average-v1",
+      "marketTicker": "KXBTC15M-26NOV062300-00",
+      "target": 100000,
+      "expiresAt": 1794024000000,
+      "observedPrice": 100001,
+      "observedAt": 1794024000000,
+      "outcome": "above",
+      "result": "yes",
+      "confirmedThrough": 1794024005000,
+      "settledAt": 1794024001000,
+      "comparison": "greater_or_equal",
+      "roundDigits": 2
+    },
+    "market": {
+      "ticker": "KXBTC15M-26NOV062300-00",
+      "eventTicker": "KXBTC15M-26NOV062300",
+      "seriesTicker": "KXBTC15M",
+      "target": 100000,
+      "startsAt": 1794023100000,
+      "expiresAt": 1794024000000,
+      "comparison": "greater_or_equal",
+      "roundDigits": 2,
+      "outcomeDefinition": "kalshi-btc15m-brti-average-v1",
+      "rulesVerified": true,
+      "status": "settled",
+      "result": "yes",
+      "settlementPrice": 100001,
+      "settledAt": 1794024001000,
+      "receivedAt": 1794024005000
+    }
+  },
+  "portfolio": {
+    "initialBankroll": 100,
+    "cash": 100.5629,
+    "reservedCapital": 0,
+    "openRisk": 0,
+    "dailyRealizedPnl": 0.5629,
+    "realizedPnl": 0.5629,
+    "settledCount": 1,
+    "openPositionCount": 0,
+    "pendingIntentCount": 0
+  },
+  "readAt": 1794024005000
+}

@@ -31,6 +31,7 @@ export function createKalshiBenchmarkStream({
   timers = globalThis,
   getEnvironment = () => process.env,
   onUpdate = () => {},
+  onCapture = null,
 } = {}) {
   const history = createBenchmarkStreamHistory();
   let socket = null;
@@ -39,6 +40,7 @@ export function createKalshiBenchmarkStream({
   let reconnectTimer = null;
   let reconnectAttempt = 0;
   let reconnectCount = 0;
+  let connectionId = 0;
   let connectionStartedAt = null;
   let lastConnectAttemptAt = null;
   let connectedAt = null;
@@ -122,6 +124,7 @@ export function createKalshiBenchmarkStream({
       subscriptionId,
       sequence,
       reconnectCount,
+      connectionId,
       ignoredNonCanonical,
       sourceGapCount,
       sequenceGapCount,
@@ -270,6 +273,7 @@ export function createKalshiBenchmarkStream({
     }
     try {
       lastConnectAttemptAt = connectionStartedAt;
+      connectionId += 1;
       const connection = new WebSocketImpl(URL, {
         headers: createKalshiBenchmarkStreamHeaders(environment, connectionStartedAt),
         handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
@@ -299,8 +303,22 @@ export function createKalshiBenchmarkStream({
       });
       connection.on('message', (data, isBinary) => {
         if (socket !== connection || stopped) return;
+        const receivedAt = now();
+        const raw =
+          typeof data === 'string' ? data : Buffer.isBuffer(data) ? data.toString('utf8') : null;
+        if (onCapture && raw !== null && !isBinary && data.length <= MAXIMUM_FRAME_BYTES) {
+          try {
+            onCapture({ kind: 'benchmark-frame', rawPayload: raw, receivedAt, connectionId });
+          } catch (error) {
+            stop();
+            transportStatus = 'unavailable';
+            transportReason = 'The BRTI recording consumer failed.';
+            onUpdate(getSnapshot());
+            throw error;
+          }
+          if (stopped) return;
+        }
         try {
-          const receivedAt = now();
           if (lastMessageAt !== null && receivedAt < lastMessageAt)
             throw new Error('The local BRTI receipt clock regressed.');
           const second = Math.floor(receivedAt / 1000);
@@ -315,7 +333,6 @@ export function createKalshiBenchmarkStream({
             frameCount > MAXIMUM_FRAMES_PER_SECOND
           )
             throw new Error('BRTI stream exceeded its supported message limits.');
-          const raw = typeof data === 'string' ? data : data.toString('utf8');
           const message = JSON.parse(raw);
           if (!message || typeof message !== 'object' || Array.isArray(message))
             throw new Error('Invalid BRTI message.');

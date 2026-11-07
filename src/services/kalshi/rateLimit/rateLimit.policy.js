@@ -8,6 +8,7 @@ const MARKET_QUERY_NAMES = new Set([
   'limit',
   'exchange_index',
   'max_close_ts',
+  'cursor',
 ]);
 const BENCHMARK_HISTORY_QUERY_NAMES = new Set(['id', 'timespan', 'timestamp', 'maxResolution']);
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
@@ -66,9 +67,11 @@ export function getKalshiReadResource(path) {
         /[^A-Za-z0-9_-]/.test(name) ||
         extraValue !== undefined ||
         parameters.has(name) ||
-        (isBenchmarkHistory && name === 'timestamp'
-          ? !isEncodedHistoryHour(value)
-          : /[^A-Za-z0-9_-]/.test(value))
+        (pathname === '/markets' && name === 'cursor'
+          ? value.length > 384 || !/^(?:[A-Za-z0-9_.~-]|%[A-Fa-f0-9]{2})+$/.test(value)
+          : isBenchmarkHistory && name === 'timestamp'
+            ? !isEncodedHistoryHour(value)
+            : /[^A-Za-z0-9_-]/.test(value))
       ) {
         rejectResource();
       }

@@ -1,3 +1,9 @@
+import {
+  createKalshiMarketSpecification,
+  hasSupportedKalshiOutcomeRules,
+  parseKalshiUtcTimestamp,
+} from '@/features/MarketData/utils/kalshi/marketSpecification.utils';
+
 export const KALSHI_SERIES_TICKER = 'KXBTC15M';
 export const KALSHI_OUTCOME_DEFINITION = 'kalshi-btc15m-brti-average-v1';
 export const KALSHI_RULES_URL = 'https://assets.kalshi.com/contract_terms/CRYPTO.pdf';
@@ -5,10 +11,6 @@ const BENCHMARK_HISTORY_WINDOW_MS = 60 * 60_000;
 const MARKET_TICKER = /^KXBTC15M-\d{2}[A-Z]{3}\d{6}-\d{2}$/;
 const EVENT_TICKER = /^KXBTC15M-\d{2}[A-Z]{3}\d{6}$/;
 const DECIMAL = /^\d+(?:\.\d+)?$/;
-const PRIMARY_RULE =
-  /^If the simple average of the sixty seconds of CF Benchmarks' BRTI before (.+) is at least the simple average of the sixty seconds of CF Benchmarks' BRTI before (.+), then the market resolves to Yes\.$/;
-const SECONDARY_RULE =
-  "Not all cryptocurrency price data is the same. While checking a source like Google or Coinbase may help guide your decision, the price used to determine this market is based on CF Benchmarks' corresponding Real Time Index (RTI). At the last minute before expiration, 60 RTI prices are collected. The official and final value is the average of these prices, rounded to the nearest 2 decimal places.";
 
 export class KalshiDataError extends Error {
   constructor(message, status = 502) {
@@ -25,10 +27,7 @@ export function assertKalshiTicker(ticker, { event = false } = {}) {
   return ticker;
 }
 
-function parseTime(value) {
-  const time = typeof value === 'string' && /Z$/.test(value) ? Date.parse(value) : NaN;
-  return Number.isSafeInteger(time) && time > 0 ? time : null;
-}
+const parseTime = parseKalshiUtcTimestamp;
 
 function parseDecimal(value, { zero = false } = {}) {
   if (typeof value !== 'number' && (typeof value !== 'string' || !DECIMAL.test(value))) {
@@ -43,34 +42,7 @@ function parseContractPrice(value) {
   return price !== null && price <= 1 ? price : null;
 }
 
-function ruleTimeMatches(value, timestamp) {
-  if (!timestamp) return false;
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-      timeZoneName: 'short',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    })
-      .formatToParts(timestamp)
-      .map(({ type, value: part }) => [type, part]),
-  );
-  const longMonth = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    month: 'long',
-  }).format(timestamp);
-  return [parts.month, longMonth].some(
-    (month) =>
-      value ===
-      `${parts.hour}:${parts.minute} ${parts.dayPeriod} ${parts.timeZoneName} on ${month} ${parts.day}, ${parts.year}`,
-  );
-}
-
-export function parseKalshiSeries(payload) {
+export const parseKalshiSeries = (payload) => {
   const series = payload?.series;
   if (
     series?.ticker !== KALSHI_SERIES_TICKER ||
@@ -81,16 +53,29 @@ export function parseKalshiSeries(payload) {
     throw new KalshiDataError('Kalshi returned invalid Bitcoin series metadata.');
   return {
     exchangeIndex: series.exchange_index,
+    specificationMetadata: {
+      ticker: series.ticker,
+      contractTermsUrl: series.contract_terms_url ?? null,
+      certificationUrl: series.contract_url ?? null,
+      frequency: series.frequency ?? null,
+      settlementSources: Array.isArray(series.settlement_sources)
+        ? series.settlement_sources.map((source) => ({ name: source?.name, url: source?.url }))
+        : [],
+      updatedAt: series.last_updated_ts ?? null,
+      feeType: series.fee_type ?? null,
+      feeMultiplier: series.fee_multiplier ?? null,
+    },
     rulesVerified:
       series.contract_terms_url === KALSHI_RULES_URL &&
       series.frequency === 'fifteen_min' &&
-      series.settlement_sources?.some((source) => source.name === 'CF Benchmarks'),
+      Array.isArray(series.settlement_sources) &&
+      series.settlement_sources.some((source) => source?.name === 'CF Benchmarks'),
   };
-}
+};
 
 // Match the supported contract template and the times in its actual rule text.
 // close_time is the observation deadline; expiration_time can be a week later.
-export function parseKalshiMarket(payload, series, receivedAt = Date.now()) {
+export const parseKalshiMarket = (payload, series, receivedAt = Date.now(), options = {}) => {
   const market = payload?.market ?? payload;
   assertKalshiTicker(market?.ticker);
   assertKalshiTicker(market?.event_ticker, { event: true });
@@ -102,31 +87,14 @@ export function parseKalshiMarket(payload, series, receivedAt = Date.now()) {
   const target = parseDecimal(market.floor_strike);
   const primary = typeof market.rules_primary === 'string' ? market.rules_primary : '';
   const secondary = typeof market.rules_secondary === 'string' ? market.rules_secondary : '';
-  const ruleMatch = PRIMARY_RULE.exec(primary);
-  // Future events publish the full rule text before the opening target and its
-  // machine-readable strike fields exist. The exact text already specifies both.
-  const isAwaitingStrike = ['initialized', 'unopened'].includes(market.status) && target === null;
-  const hasMatchingComparison =
-    market.strike_type === 'greater_or_equal' || (isAwaitingStrike && !market.strike_type);
-  const hasMatchingRounding =
-    String(market.custom_strike?.round_digits) === '2' ||
-    (isAwaitingStrike && market.custom_strike == null);
-  const rulesVerified = Boolean(
-    series.rulesVerified &&
-    market.market_type === 'binary' &&
-    hasMatchingComparison &&
-    hasMatchingRounding &&
-    startsAt &&
-    expiresAt &&
-    expiresAt - startsAt === 900_000 &&
-    startsAt % 900_000 === 0 &&
-    ruleMatch &&
-    ruleTimeMatches(ruleMatch[1], expiresAt) &&
-    ruleTimeMatches(ruleMatch[2], startsAt) &&
-    secondary === SECONDARY_RULE &&
-    Number.isSafeInteger(market.exchange_index) &&
-    market.exchange_index >= 0,
-  );
+  const rulesVerified = hasSupportedKalshiOutcomeRules(market, series);
+  const specification = createKalshiMarketSpecification({
+    market,
+    series,
+    receivedAt,
+    quantityRuleEvidence: options.quantityRuleEvidence,
+    roundingRuleEvidence: options.roundingRuleEvidence,
+  });
   const isFinal = ['finalized', 'settled'].includes(market.status);
   const result = isFinal && ['yes', 'no'].includes(market.result) ? market.result : null;
   return {
@@ -143,6 +111,7 @@ export function parseKalshiMarket(payload, series, receivedAt = Date.now()) {
     roundDigits: 2,
     rulesVerified,
     supported: rulesVerified,
+    specification,
     unsupportedReason: rulesVerified
       ? null
       : 'The current contract rules differ from the supported BRTI 60-second average contract.',
@@ -162,7 +131,7 @@ export function parseKalshiMarket(payload, series, receivedAt = Date.now()) {
     outcomeDefinition: KALSHI_OUTCOME_DEFINITION,
     receivedAt,
   };
-}
+};
 
 // /cfbenchmarks/values supplies the last hour of raw RTI values. Keep that history
 // for source-matched volatility instead of discarding all but the last 20 minutes.

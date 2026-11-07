@@ -4,6 +4,11 @@ import {
   getAdvisorSideLabel,
   hasFreshAdvisorAdvice,
 } from './advisorDisplay.utils';
+import {
+  getTradingSpecificationProblem,
+  isTradingPriceValid,
+  isTradingQuantityValid,
+} from '../../../utils/tradingSpecification.utils';
 
 export const ADVISOR_OPERATIONAL_REASONS = [
   'pending_execution',
@@ -152,6 +157,7 @@ const readinessLabels = {
   stale: 'Checking current prices',
   closed: 'Event closed',
   'unsupported-policy': 'Unsupported saved policy',
+  'unverified-market': 'Market rules unverified',
 };
 
 /** Display states are not order permissions. The collector still owns execution and all limits. */
@@ -170,6 +176,14 @@ export const getAdvisorPlanState = ({
       ? report.currentPlan
       : createAdvisorPlan(latest);
   const advice = plan?.advice ?? latest;
+  const specificationProblem =
+    getTradingSpecificationProblem(market) ||
+    (advice?.contract ? getTradingSpecificationProblem(advice.contract) : null) ||
+    (['buy', 'sell'].includes(advice?.action) &&
+    (!isTradingPriceValid(advice.limitPrice, market, advice.side) ||
+      !isTradingQuantityValid(advice.quantity, market))
+      ? 'invalid_market_price_or_quantity'
+      : null);
   const sourceId = plan?.adviceId ?? latest?.id;
   const activity = report?.recentActivity?.find(
     (item) =>
@@ -229,6 +243,9 @@ export const getAdvisorPlanState = ({
   if (hasUnsupportedPolicy) {
     readiness = 'unsupported-policy';
     explanation = policyCompatibility.reason;
+  } else if (specificationProblem) {
+    readiness = 'unverified-market';
+    explanation = getAdvisorReason(specificationProblem);
   } else if (isLoading) {
     readiness = 'confirmation';
     explanation = 'Loading the latest recorded assessment.';
@@ -282,6 +299,7 @@ export const getAdvisorPlanState = ({
     else if (now >= recorded.contract.expiresAt) lifecycle = 'closed';
     else if (filled) lifecycle = 'filled';
     else if (canceled) lifecycle = 'canceled';
+    else if (specificationProblem) lifecycle = 'unverified-market';
     else if (policyChanged || positionChanged) lifecycle = 'changed-account';
     else if (now >= recorded.contract.startsAt) lifecycle = 'active';
   }
@@ -314,6 +332,7 @@ export const getAdvisorPlanState = ({
     'changed-account': 'REVIEWING ACCOUNT',
     awaiting: 'Awaiting first assessment',
     'unsupported-policy': 'Saved policy unavailable',
+    'unverified-market': 'Market rules unverified',
   };
   const lifecycleExplanations = {
     filled: 'The paper order filled. Reviewing the resulting position for the next plan.',
@@ -323,6 +342,7 @@ export const getAdvisorPlanState = ({
     'changed-event': 'Reviewing the new event and its target.',
     'changed-account': 'The position or account settings changed. Reviewing the next plan.',
     'unsupported-policy': policyCompatibility?.reason,
+    'unverified-market': getAdvisorReason(specificationProblem),
   };
   const interrupted =
     isError ||

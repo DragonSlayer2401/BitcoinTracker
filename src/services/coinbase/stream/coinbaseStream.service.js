@@ -8,12 +8,13 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 const MAXIMUM_MESSAGE_BYTES = 20_000_000;
 const MAXIMUM_RECENT_TICKERS = 2000;
 
-export function createCoinbaseStream({
+export const createCoinbaseStream = ({
   onUpdate = () => {},
+  onCapture = null,
   WebSocketImpl = globalThis.WebSocket,
   now = Date.now,
   random = Math.random,
-} = {}) {
+} = {}) => {
   const book = createCoinbaseOrderBook();
   const trades = createCoinbaseTrades();
   let socket = null;
@@ -22,6 +23,7 @@ export function createCoinbaseStream({
   let reconnectTimer = null;
   let reconnectAttempt = 0;
   let reconnectCount = 0;
+  let connectionId = 0;
   let transportStatus = 'connecting';
   let transportReason = 'Connecting to Coinbase live trades and liquidity.';
   let connectedAt = null;
@@ -31,7 +33,7 @@ export function createCoinbaseStream({
   let recentTickers = [];
   let liquidity = book.getSnapshot(now());
 
-  function clearMarket() {
+  const clearMarket = () => {
     book.reset();
     trades.reset();
     ticker = null;
@@ -39,9 +41,9 @@ export function createCoinbaseStream({
     liquidity = book.getSnapshot(now());
     isSubscribed = false;
     connectedAt = null;
-  }
+  };
 
-  function closeSocket() {
+  const closeSocket = () => {
     if (!socket) return;
     const previous = socket;
     socket = null;
@@ -50,9 +52,28 @@ export function createCoinbaseStream({
     previous.onclose = null;
     previous.onerror = null;
     if (previous.readyState < 2) previous.close();
-  }
+  };
 
-  function getSnapshot(timestamp = now()) {
+  // Capture failures must stop recording rather than masquerade as a network reconnect.
+  const capture = (input) => {
+    if (!onCapture) return;
+    try {
+      onCapture({ ...input, connectionId });
+    } catch (error) {
+      stopped = true;
+      globalThis.clearInterval(publishTimer);
+      globalThis.clearTimeout(reconnectTimer);
+      publishTimer = null;
+      reconnectTimer = null;
+      closeSocket();
+      clearMarket();
+      transportStatus = 'unavailable';
+      transportReason = 'The live recording consumer failed.';
+      throw error;
+    }
+  };
+
+  const getSnapshot = (timestamp = now()) => {
     liquidity = book.getSnapshot(timestamp);
     const flow = trades.getSnapshot(timestamp, liquidity);
     const tradeQuality = trades.getQuality(timestamp);
@@ -98,13 +119,13 @@ export function createCoinbaseStream({
       flow,
       liquidity,
     };
-  }
+  };
 
-  function publish() {
+  const publish = () => {
     if (!stopped) onUpdate(getSnapshot());
-  }
+  };
 
-  function fail(reason) {
+  const fail = (reason) => {
     if (stopped || reconnectTimer !== null) return;
     closeSocket();
     clearMarket();
@@ -114,11 +135,19 @@ export function createCoinbaseStream({
     const delay =
       Math.min(30_000, 1000 * 2 ** Math.min(reconnectAttempt, 5)) * (0.8 + random() * 0.2);
     reconnectAttempt += 1;
+    capture({
+      kind: 'connection',
+      state: 'reconnecting',
+      receivedAt: now(),
+      reason,
+      retryDelayMs: delay,
+    });
+    if (stopped) return;
     reconnectTimer = globalThis.setTimeout(connect, delay);
     publish();
-  }
+  };
 
-  function acceptMessage(message, timestamp) {
+  const acceptMessage = (message, timestamp) => {
     if (message.type === 'error') throw new Error('Coinbase rejected a live channel subscription.');
     if (message.type === 'subscriptions') {
       if (
@@ -160,12 +189,15 @@ export function createCoinbaseStream({
       recentTickers.push(nextTicker);
       if (recentTickers.length > MAXIMUM_RECENT_TICKERS) recentTickers.shift();
     }
-  }
+  };
 
-  function connect() {
+  const connect = () => {
     reconnectTimer = null;
     if (stopped) return;
     connectionAttemptAt = now();
+    connectionId += 1;
+    capture({ kind: 'connection', state: 'connecting', receivedAt: connectionAttemptAt });
+    if (stopped) return;
     try {
       socket = new WebSocketImpl(WEBSOCKET_URL);
       const connection = socket;
@@ -173,19 +205,28 @@ export function createCoinbaseStream({
         if (socket !== connection || stopped) return;
         connectedAt = now();
         transportStatus = 'connected';
+        capture({ kind: 'connection', state: 'connected', receivedAt: connectedAt });
+        if (stopped) return;
         connection.send(
           JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channels: CHANNELS }),
         );
       };
       connection.onmessage = (event) => {
         if (socket !== connection || stopped) return;
+        const receivedAt = now();
+        capture({
+          kind: 'message',
+          receivedAt,
+          payload: typeof event.data === 'string' ? event.data : null,
+        });
+        if (stopped) return;
         try {
           if (typeof event.data !== 'string' || event.data.length > MAXIMUM_MESSAGE_BYTES)
             throw new Error('Invalid live market message.');
           const message = JSON.parse(event.data);
           if (!message || typeof message !== 'object' || Array.isArray(message))
             throw new Error('Invalid live market message.');
-          acceptMessage(message, now());
+          acceptMessage(message, receivedAt);
         } catch (error) {
           fail(error.message);
         }
@@ -199,21 +240,30 @@ export function createCoinbaseStream({
     } catch {
       fail('Unable to connect to the live market feed. Reconnecting.');
     }
-  }
+  };
 
-  function start() {
+  const start = () => {
     if (!stopped) return;
     stopped = false;
     if (typeof WebSocketImpl !== 'function') {
       transportStatus = 'unavailable';
       transportReason = 'This browser does not support the live market connection.';
+      capture({
+        kind: 'connection',
+        state: 'unavailable',
+        receivedAt: now(),
+        reason: transportReason,
+      });
       publish();
       return;
     }
     transportStatus = 'connecting';
     connect();
+    if (stopped) return;
     publishTimer = globalThis.setInterval(() => {
       const timestamp = now();
+      capture({ kind: 'clock', receivedAt: timestamp });
+      if (stopped) return;
       const quality = trades.getQuality(timestamp);
       if (socket && !isSubscribed && timestamp - connectionAttemptAt > HANDSHAKE_TIMEOUT_MS)
         fail('Live channel setup timed out. Reconnecting.');
@@ -237,9 +287,10 @@ export function createCoinbaseStream({
       publish();
     }, 1000);
     publish();
-  }
+  };
 
-  function stop() {
+  const stop = () => {
+    const wasStopped = stopped;
     stopped = true;
     globalThis.clearInterval(publishTimer);
     globalThis.clearTimeout(reconnectTimer);
@@ -247,7 +298,8 @@ export function createCoinbaseStream({
     reconnectTimer = null;
     closeSocket();
     clearMarket();
-  }
+    if (!wasStopped) capture({ kind: 'connection', state: 'stopped', receivedAt: now() });
+  };
 
   return {
     start,
@@ -256,4 +308,4 @@ export function createCoinbaseStream({
     getDeadlineOutcome: (expiresAt, timestamp = now()) =>
       trades.getDeadlineOutcome(expiresAt, timestamp),
   };
-}
+};

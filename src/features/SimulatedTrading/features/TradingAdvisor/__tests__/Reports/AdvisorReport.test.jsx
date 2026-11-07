@@ -221,7 +221,7 @@ test('saved checkpoint policy retains balances across research refreshes and reo
   );
 });
 
-test('current policy still shows its paper guidance and separately funded research accounts', async () => {
+test('current policy preserves accounts but withholds its saved BUY while current market rules are unverified', async () => {
   const user = userEvent.setup();
   const policy = createTradingAdvisorPolicy({
     allocation: 100,
@@ -236,7 +236,10 @@ test('current policy still shows its paper guidance and separately funded resear
   const researchDialog = within(
     await screen.findByRole('dialog', { name: 'Paper trading research' }),
   );
-  expect(await screen.findByRole('heading', { name: 'BUY UP' })).toBeVisible();
+  expect(await screen.findByRole('heading', { name: 'Market rules unverified' })).toBeVisible();
+  expect(screen.queryByRole('heading', { name: 'BUY UP' })).not.toBeInTheDocument();
+  expect(screen.queryByText('Fresh evaluation')).not.toBeInTheDocument();
+  expect(researchDialog.getByText('Recorded plan')).toBeVisible();
   expect(screen.queryByText(/The saved adviser policy is not supported/)).not.toBeInTheDocument();
   const performanceButton = researchDialog.getByRole('button', { name: 'Performance' });
   await user.click(performanceButton);
@@ -255,7 +258,7 @@ test('current policy still shows its paper guidance and separately funded resear
   );
   expect(await screen.findByRole('dialog', { name: 'Paper trading research' })).toBeVisible();
   expect(performanceButton).toHaveFocus();
-  expect(researchDialog.getByRole('heading', { name: 'BUY UP' })).toBeVisible();
+  expect(researchDialog.getByRole('heading', { name: 'Market rules unverified' })).toBeVisible();
   expect(reports[0].researchPolicy.id).toBe(`${policy.id}-research-one-contract-v1`);
   expect(await repository.readConfiguration()).toEqual(configuration);
   expect((await repository.readState(policy.id)).account).toEqual(account);

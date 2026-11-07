@@ -12,6 +12,19 @@ import {
   getAdvisorOpportunityBudget,
   isAdvisorV2Policy,
 } from './advisorPolicy.utils';
+import { formatDecimalUnits, parseDecimalUnits } from '@/utils/fixedPoint.utils';
+import {
+  getTradingAdverseFills,
+  getTradingActionProblem,
+  getTradingBookRulesProblem,
+  getTradingComplementPrice,
+  getTradingFillGrossUnits,
+  getTradingGridPrice,
+  getTradingPricePoints,
+  getTradingSpecificationProblem,
+  isTradingPriceValid,
+  isTradingQuantityValid,
+} from '../../../utils/tradingSpecification.utils';
 
 // A prospective experiment, not fitted or validated trading parameters.
 export const TRADING_ADVISOR_POLICY = Object.freeze({
@@ -108,7 +121,9 @@ export function isTradingAdvisorPolicy(policy) {
   );
 }
 
-function getBookProblem({ contract, book, probability = 0.5, now }) {
+const getBookProblem = ({ contract, book, probability = 0.5, now }) => {
+  const specificationProblem = getTradingBookRulesProblem(contract, book);
+  if (specificationProblem) return specificationProblem;
   if (
     !timestamp(book?.receivedAt) ||
     book.receivedAt > now ||
@@ -136,26 +151,33 @@ function getBookProblem({ contract, book, probability = 0.5, now }) {
   // The limit search requires monotone fee-inclusive cost/proceeds. Extreme multipliers do not.
   if (book.fee.multiplier > 1 / 0.07) return 'unsupported_fee_schedule';
   return null;
-}
+};
 
-function getQuoteAmounts(fills, action, fee, now) {
-  const gross = money(fills.reduce((sum, fill) => sum + fill.quantity * fill.price, 0));
+const getQuoteAmounts = (fills, action, fee, now) => {
+  const grossUnits = getTradingFillGrossUnits(fills);
+  if (grossUnits === null) return null;
+  const gross = Number(formatDecimalUnits(grossUnits, 6));
   const estimatedFee = getPurchaseFeeEstimate(fills, fee, 'direct', now);
   if (estimatedFee === null) return null;
+  const feeUnits = parseDecimalUnits(String(estimatedFee), 6);
+  if (feeUnits === null) return null;
   // Conservatively round a sale's credited balance down to the direct-account precision.
-  const netProceeds = money(Math.floor((gross - estimatedFee + 1e-10) * 10000) / 10000);
+  const revenueUnits = grossUnits - feeUnits;
+  const netUnits =
+    revenueUnits >= 0n ? (revenueUnits / 100n) * 100n : -((-revenueUnits + 99n) / 100n) * 100n;
+  const netProceeds = Number(formatDecimalUnits(netUnits, 6));
   return {
     cost: action === 'buy' ? gross : 0,
-    fee: action === 'buy' ? estimatedFee : money(gross - netProceeds),
-    totalCost: action === 'buy' ? money(gross + estimatedFee) : 0,
+    fee: action === 'buy' ? estimatedFee : Number(formatDecimalUnits(grossUnits - netUnits, 6)),
+    totalCost: action === 'buy' ? Number(formatDecimalUnits(grossUnits + feeUnits, 6)) : 0,
     proceeds: action === 'sell' ? gross : 0,
     netProceeds: action === 'sell' ? netProceeds : 0,
     averagePrice: gross / fills.reduce((sum, fill) => sum + fill.quantity, 0),
   };
-}
+};
 
 /** Price a complete quantity from displayed depth; a sell consumes bids, never asks. */
-export function getTradingExecutionQuote({
+export const getTradingExecutionQuote = ({
   action,
   side,
   quantity,
@@ -163,7 +185,7 @@ export function getTradingExecutionQuote({
   book,
   now,
   policy = TRADING_ADVISOR_POLICY,
-}) {
+}) => {
   const unavailable = (reason) => ({ available: false, reason, quantity: 0, fullyCovered: false });
   if (
     !isTradingAdvisorPolicy(policy) ||
@@ -177,33 +199,30 @@ export function getTradingExecutionQuote({
     return unavailable('invalid_execution_request');
   const problem = getBookProblem({ contract, book, now });
   if (problem) return unavailable(problem);
+  if (!isTradingQuantityValid(quantity, contract))
+    return unavailable('invalid_market_price_or_quantity');
   const levels =
     action === 'buy'
       ? book[`${side}Asks`]
       : book[`${side === 'yes' ? 'no' : 'yes'}Asks`].map((level) => ({
           ...level,
-          price: money(1 - level.price),
+          price: getTradingComplementPrice(level.price),
         }));
-  let remaining = quantity;
-  const fills = [];
-  for (const level of levels) {
-    const filled = Math.min(remaining, level.quantity);
-    const price =
-      action === 'buy'
-        ? Math.ceil((level.price + policy.slippagePerContract - 1e-10) * 10000) / 10000
-        : Math.floor((level.price - policy.slippagePerContract + 1e-10) * 10000) / 10000;
-    if (price <= 0 || price >= 1) break;
-    if (filled > 0) fills.push({ price, quantity: filled });
-    remaining = money(remaining - filled);
-    if (remaining <= 0) break;
-  }
-  if (remaining > 0) return unavailable('insufficient_execution_depth');
+  const fills = getTradingAdverseFills({
+    levels,
+    quantity,
+    slippage: policy.slippagePerContract,
+    contract,
+    side,
+    action,
+  });
+  if (!fills) return unavailable('insufficient_execution_depth');
   const amounts = getQuoteAmounts(fills, action, book.fee, now);
   if (!amounts) return unavailable('fees_unavailable');
   if (action === 'sell' && amounts.netProceeds <= 0)
     return unavailable('nonpositive_sale_proceeds');
   return { available: true, quantity, fills, fullyCovered: true, ...amounts };
-}
+};
 
 function getPortfolioProblem(portfolio) {
   if (
@@ -233,20 +252,24 @@ function getPortfolioProblem(portfolio) {
   return null;
 }
 
-/** Whole-cent limits are valid across Kalshi price structures; fees apply to the entire order. */
-function getOrderLimit({
+/** Search only prices on this market's verified side-specific grid. */
+const getOrderLimit = ({
   action,
+  contract,
+  side,
   quantity,
   valuePerContract,
   costBudget,
   fee,
   now,
   qualifiesAmount,
-}) {
-  let lower = 1;
-  let upper = 99;
-  const qualifies = (units) => {
-    const amounts = getQuoteAmounts([{ price: units / 100, quantity }], action, fee, now);
+}) => {
+  const prices = getTradingPricePoints(contract, side);
+  if (!prices.length || !isTradingQuantityValid(quantity, contract)) return null;
+  let lower = 0;
+  let upper = prices.length - 1;
+  const qualifies = (index) => {
+    const amounts = getQuoteAmounts([{ price: prices[index], quantity }], action, fee, now);
     return Boolean(
       amounts &&
       (!qualifiesAmount || qualifiesAmount(amounts)) &&
@@ -265,11 +288,11 @@ function getOrderLimit({
     } else if (action === 'buy') upper = middle - 1;
     else lower = middle + 1;
   }
-  return lower / 100;
-}
+  return prices[lower];
+};
 
 /** Calculate a fee-aware sale target for the exact quantity available to manage. */
-export function getTradingExitPlan({
+export const getTradingExitPlan = ({
   side,
   quantity,
   probability,
@@ -279,10 +302,18 @@ export function getTradingExitPlan({
   contract,
   costBasis = null,
   minimumLimitPrice = null,
-}) {
-  if (!Number.isSafeInteger(quantity) || quantity < 1) return null;
+}) => {
+  if (
+    !Number.isSafeInteger(quantity) ||
+    quantity < 1 ||
+    getTradingSpecificationProblem(contract) ||
+    !isTradingQuantityValid(quantity, contract)
+  )
+    return null;
   const holdingPrice = getOrderLimit({
     action: 'sell',
+    contract,
+    side,
     quantity,
     valuePerContract: probability + policy.probabilityReserve + policy.minimumExitAdvantage,
     fee: book.fee,
@@ -290,7 +321,9 @@ export function getTradingExitPlan({
   });
   const noHigherLimit = finite(minimumLimitPrice) && minimumLimitPrice >= 1;
   const price =
-    holdingPrice === null || noHigherLimit ? null : Math.max(holdingPrice, minimumLimitPrice ?? 0);
+    holdingPrice === null || noHigherLimit
+      ? null
+      : getTradingGridPrice(Math.max(holdingPrice, minimumLimitPrice ?? 0), contract, side, 'up');
   const amounts =
     price === null ? null : getQuoteAmounts([{ price, quantity }], 'sell', book.fee, now);
   const expiresAt =
@@ -314,7 +347,7 @@ export function getTradingExitPlan({
       expiresAt,
       costBasis,
       explanation: noHigherLimit
-        ? 'The current best bid leaves no higher whole-cent sell price below $1. Keep holding until the next assessment changes the plan.'
+        ? 'The current best bid leaves no higher permitted sell price below $1. Keep holding until the next assessment changes the plan.'
         : 'No sell price below $1 currently beats the estimated value of holding after fees and the caution margin.',
     };
   return price === null
@@ -339,21 +372,21 @@ export function getTradingExitPlan({
               estimatedProfit: finite(costBasis) ? money(amounts.netProceeds - costBasis) : null,
               expiresAt,
               explanation:
-                'This whole-cent sell limit covers estimated exit fees and pays more than the model’s estimated value of holding, including its caution margin.',
+                'This permitted sell limit covers estimated exit fees and pays more than the model’s estimated value of holding, including its caution margin.',
             }
           : {}),
       };
-}
+};
 
 /** Recommend an action for the recorded portfolio, with prices and uncertainty kept separate. */
-export function getTradingAdvice({
+export const getTradingAdvice = ({
   contract,
   forecast,
   book,
   portfolio,
   now,
   policy = TRADING_ADVISOR_POLICY,
-}) {
+}) => {
   if (!isTradingAdvisorPolicy(policy) || !timestamp(now))
     throw new Error('A valid advisor policy and evaluation time are required.');
   const base = {
@@ -379,9 +412,23 @@ export function getTradingAdvice({
     probability: null,
     forecastCapturedAt: forecast?.capturedAt ?? null,
   };
-  const result = (patch) => freeze({ ...base, ...patch });
+  const result = (patch) => {
+    const advice = { ...base, ...patch };
+    if (['buy', 'sell'].includes(advice.action)) {
+      const problem = getTradingActionProblem({
+        ...advice,
+        contract,
+        now,
+        position: portfolio?.positions?.find((position) => position.id === advice.positionId),
+      });
+      if (problem) return freeze({ ...base, reason: problem });
+    }
+    return freeze(advice);
+  };
   if (!base.contract || now < contract.startsAt || now >= contract.expiresAt)
     return result({ reason: 'outside_active_contract' });
+  const specificationProblem = getTradingSpecificationProblem(contract);
+  if (specificationProblem) return result({ reason: specificationProblem });
   if (
     !forecast?.available ||
     !finite(forecast.aboveProbability) ||
@@ -435,6 +482,7 @@ export function getTradingAdvice({
     let fullSaleQuote = null;
     let selected = null;
     for (let quantity = 1; quantity <= available; quantity += 1) {
+      if (!isTradingQuantityValid(quantity, contract)) continue;
       const quote = getTradingExecutionQuote({
         action: 'sell',
         side: position.side,
@@ -454,6 +502,8 @@ export function getTradingAdvice({
       if (conservativeExpectedNetValue < policy.minimumExitAdvantage * quantity - 1e-8) continue;
       const limitPrice = getOrderLimit({
         action: 'sell',
+        contract,
+        side: position.side,
         quantity,
         valuePerContract: probability + policy.probabilityReserve + policy.minimumExitAdvantage,
         fee: book.fee,
@@ -544,6 +594,7 @@ export function getTradingAdvice({
       quantity <= (policy.maxEntryContracts ?? policy.maxContracts);
       quantity += 1
     ) {
+      if (!isTradingQuantityValid(quantity, contract)) continue;
       const quote = getTradingExecutionQuote({
         action: 'buy',
         side,
@@ -582,6 +633,8 @@ export function getTradingAdvice({
       }
       const limitPrice = getOrderLimit({
         action: 'buy',
+        contract,
+        side,
         quantity,
         valuePerContract: cautiousProbability - policy.minimumEntryEdge,
         costBudget: budget,
@@ -590,9 +643,11 @@ export function getTradingAdvice({
         qualifiesAmount,
       });
       if (limitPrice === null || quote.fills.some((fill) => fill.price > limitPrice + 1e-8)) {
-        // Whole-cent limits can exceed capacity even when the displayed fractional price fits.
+        // A permitted grid price can exceed capacity even when the displayed price fits.
         const edgeLimitPrice = getOrderLimit({
           action: 'buy',
+          contract,
+          side,
           quantity,
           valuePerContract: cautiousProbability - policy.minimumEntryEdge,
           costBudget: Infinity,
@@ -651,10 +706,10 @@ export function getTradingAdvice({
   if (!hasAffordableEntry || hasCapacityBlockedEntry)
     return result({ reason: 'insufficient_loss_capacity' });
   return result({ reason: 'insufficient_entry_edge' });
-}
+};
 
 /** One later snapshot executes a saved recommendation; reserved capital/quantity is released only in this input portfolio. */
-export function simulateTradingExecution({
+export const simulateTradingExecution = ({
   advice,
   contract = advice?.contract,
   book,
@@ -662,7 +717,7 @@ export function simulateTradingExecution({
   now,
   decidedAt = advice?.evaluatedAt,
   policy = advice?.policy ?? TRADING_ADVISOR_POLICY,
-}) {
+}) => {
   if (
     !isTradingAdvisorPolicy(policy) ||
     !timestamp(now) ||
@@ -702,6 +757,13 @@ export function simulateTradingExecution({
       : {}),
   };
   const noFill = (reason) => freeze({ ...base, reason });
+  const specificationProblem = getTradingSpecificationProblem(contract);
+  if (specificationProblem) return noFill(specificationProblem);
+  if (
+    !isTradingPriceValid(advice.limitPrice, contract, advice.side) ||
+    !isTradingQuantityValid(advice.quantity, contract)
+  )
+    return noFill('invalid_market_price_or_quantity');
   if (now > decidedAt + policy.maximumFillDelayMs || now >= contract.expiresAt)
     return noFill('execution_window_expired');
   if (
@@ -768,6 +830,7 @@ export function simulateTradingExecution({
     let reason = 'insufficient_execution_depth';
     // A single later book is the entire opportunity. Any unfilled remainder is canceled.
     for (let quantity = 1; quantity <= advice.quantity; quantity += 1) {
+      if (!isTradingQuantityValid(quantity, contract)) continue;
       const quote = getTradingExecutionQuote({
         action: advice.action,
         side: advice.side,
@@ -887,4 +950,4 @@ export function simulateTradingExecution({
     price: quote.averagePrice,
     reason: 'delayed_snapshot_simulation',
   });
-}
+};

@@ -8,6 +8,16 @@ import {
   getKalshiPurchaseValue,
   getPurchaseFeeEstimate,
 } from '../../../utils/kalshiPurchaseValue.utils';
+import { formatDecimalUnits, parseDecimalUnits } from '@/utils/fixedPoint.utils';
+import {
+  getTradingAdverseFills,
+  getTradingBookRulesProblem,
+  getTradingFillGrossUnits,
+  getTradingPricePoints,
+  getTradingSpecificationProblem,
+  isTradingPriceValid,
+  isTradingQuantityValid,
+} from '../../../utils/tradingSpecification.utils';
 
 // These are experimental paper-account defaults, not fitted trading parameters.
 export const PAPER_TRADING_POLICY = Object.freeze({
@@ -129,7 +139,17 @@ function hasCrossedBook(book) {
   return finite(yesAsk) && finite(noAsk) && yesAsk + noAsk < 1 - 1e-8;
 }
 
-function getAdverseFills(asks, quantity, slippage) {
+const getAdverseFills = (asks, quantity, slippage, contract, side, isLegacyReplay) => {
+  if (!isLegacyReplay)
+    return getTradingAdverseFills({
+      levels: asks,
+      quantity,
+      slippage,
+      contract,
+      side,
+      action: 'buy',
+    });
+  // Preserve already saved executions; this branch is reachable only during archive validation.
   const fills = [];
   let remaining = quantity;
   for (const level of asks) {
@@ -141,39 +161,74 @@ function getAdverseFills(asks, quantity, slippage) {
     if (remaining <= 0) return fills;
   }
   return null;
-}
+};
 
-function getFillCost(fills, fee, now) {
-  const cost = money(fills.reduce((total, fill) => total + fill.price * fill.quantity, 0));
+const getFillCost = (fills, fee, now, isLegacyReplay = false) => {
+  const grossUnits = getTradingFillGrossUnits(fills);
+  if (grossUnits === null) return null;
+  const cost = isLegacyReplay
+    ? money(fills.reduce((total, fill) => total + fill.price * fill.quantity, 0))
+    : Number(formatDecimalUnits(grossUnits, 6));
   const exchangeFee = getPurchaseFeeEstimate(fills, fee, 'direct', now);
-  return exchangeFee === null
-    ? null
-    : { cost, fee: exchangeFee, totalCost: money(cost + exchangeFee) };
-}
+  if (exchangeFee === null) return null;
+  const feeUnits = parseDecimalUnits(String(exchangeFee), 6);
+  if (feeUnits === null) return null;
+  return {
+    cost,
+    fee: exchangeFee,
+    totalCost: isLegacyReplay
+      ? money(cost + exchangeFee)
+      : Number(formatDecimalUnits(grossUnits + feeUnits, 6)),
+  };
+};
 
-/** Largest four-decimal limit whose complete fee-inclusive loss fits the conservative edge. */
-function getLimitPrice(probability, policy, fee, now) {
+/** New limits use verified grids; archived decisions retain their original four-decimal search. */
+const getLimitPrice = (probability, policy, fee, now, contract, side, isLegacyReplay) => {
+  if (!isLegacyReplay) {
+    const prices = getTradingPricePoints(contract, side);
+    let lower = 0;
+    let upper = prices.length - 1;
+    const qualifies = (index) => {
+      const result = getFillCost([{ price: prices[index], quantity: policy.contracts }], fee, now);
+      return (
+        result && probability * policy.contracts - result.totalCost >= policy.minimumNetEdge - 1e-8
+      );
+    };
+    if (!prices.length || !qualifies(0)) return null;
+    while (lower < upper) {
+      const middle = Math.ceil((lower + upper) / 2);
+      if (qualifies(middle)) lower = middle;
+      else upper = middle - 1;
+    }
+    return prices[lower];
+  }
   let lower = 0;
   let upper = 9999;
   while (lower < upper) {
     const middle = Math.ceil((lower + upper) / 2);
-    const result = getFillCost([{ price: middle / 10000, quantity: policy.contracts }], fee, now);
+    const result = getFillCost(
+      [{ price: middle / 10000, quantity: policy.contracts }],
+      fee,
+      now,
+      true,
+    );
     if (result && probability * policy.contracts - result.totalCost >= policy.minimumNetEdge - 1e-8)
       lower = middle;
     else upper = middle - 1;
   }
   return lower / 10000;
-}
+};
 
 /** Immutable, causal opportunity record. Missing data is a recorded skip, never invented input. */
-export function createPaperDecision({
+const buildPaperDecision = ({
   contract,
   forecast,
   book,
   now,
   portfolio,
   policy = PAPER_TRADING_POLICY,
-}) {
+  isLegacyReplay = false,
+}) => {
   if (!isKalshiContract(contract) || !isPaperTradingPolicy(policy) || !timestamp(now)) {
     throw new Error('A verified contract, valid paper policy, and decision time are required.');
   }
@@ -185,6 +240,7 @@ export function createPaperDecision({
     dailyRealizedPnl: portfolio?.dailyRealizedPnl,
   });
   const decision = {
+    ...(isLegacyReplay ? {} : { version: 'paper-decision-v2' }),
     id: `${policy.id}:${contract.ticker}`,
     policyId: policy.id,
     contract: getKalshiContract(contract),
@@ -204,6 +260,12 @@ export function createPaperDecision({
     conservativeExpectedNetValue: null,
   };
   const skip = (reason) => deepFreeze({ ...decision, reason });
+  if (!isLegacyReplay) {
+    const specificationProblem = getTradingSpecificationProblem(contract);
+    if (specificationProblem) return skip(specificationProblem);
+    if (!isTradingQuantityValid(policy.contracts, contract))
+      return skip('invalid_market_price_or_quantity');
+  }
   const checkpointAt = contract.expiresAt - policy.checkpointMinutes * 60000;
   if (now < checkpointAt || now > checkpointAt + policy.captureGraceMs)
     return skip('outside_capture_window');
@@ -225,6 +287,10 @@ export function createPaperDecision({
   )
     return skip('forecast_unavailable_or_stale');
   if (!isCausalBook(savedBook, now)) return skip('book_unavailable_or_noncausal');
+  if (!isLegacyReplay) {
+    const bookProblem = getTradingBookRulesProblem(contract, savedBook);
+    if (bookProblem) return skip(bookProblem);
+  }
   const value = getKalshiPurchaseValue({
     book: savedBook,
     contract,
@@ -258,21 +324,34 @@ export function createPaperDecision({
         savedBook[`${side}Asks`],
         policy.contracts,
         policy.slippagePerContract,
+        contract,
+        side,
+        isLegacyReplay,
       );
       if (!fills) return [];
-      const purchase = getFillCost(fills, savedBook.fee, now);
+      const purchase = getFillCost(fills, savedBook.fee, now, isLegacyReplay);
       if (!purchase) return [];
       const expectedNetValue = money(probability * policy.contracts - purchase.totalCost);
       const conservativeExpectedNetValue = money(
         conservativeProbability * policy.contracts - purchase.totalCost,
       );
       if (conservativeExpectedNetValue < policy.minimumNetEdge - 1e-8) return [];
-      const limitPrice = getLimitPrice(conservativeProbability, policy, savedBook.fee, now);
+      const limitPrice = getLimitPrice(
+        conservativeProbability,
+        policy,
+        savedBook.fee,
+        now,
+        contract,
+        side,
+        isLegacyReplay,
+      );
+      if (limitPrice === null) return [];
       if (fills.some((fill) => fill.price > limitPrice + 1e-8)) return [];
       const maximum = getFillCost(
         [{ price: limitPrice, quantity: policy.contracts }],
         savedBook.fee,
         now,
+        isLegacyReplay,
       );
       return [
         {
@@ -292,28 +371,37 @@ export function createPaperDecision({
   if (savedPortfolio.openRisk + selected.reservedCapital > policy.maxOpenRisk + 1e-8)
     return skip('open_risk_limit');
   return deepFreeze({ ...decision, ...selected, status: 'intent', reason: 'conservative_edge' });
-}
+};
 
-export function isPaperDecision(decision) {
+export const createPaperDecision = (input) =>
+  buildPaperDecision({ ...input, isLegacyReplay: false });
+
+export const isPaperDecision = (decision) => {
   try {
+    if (
+      decision?.version !== 'paper-decision-v2' &&
+      (decision?.version !== undefined || decision?.contract?.specification !== undefined)
+    )
+      return false;
     return same(
       decision,
-      createPaperDecision({
+      buildPaperDecision({
         contract: decision.contract,
         forecast: decision.forecast,
         book: decision.book,
         now: decision.decidedAt,
         portfolio: decision.portfolio,
         policy: decision.policy,
+        isLegacyReplay: decision.version === undefined,
       }),
     );
   } catch {
     return false;
   }
-}
+};
 
 /** A delayed snapshot simulation, not a claim that an exchange would fill this order. */
-export function simulatePaperFill({ decision, book, now }) {
+const buildPaperFill = ({ decision, book, now, isLegacyReplay = false }) => {
   if (
     !isPaperDecision(decision) ||
     decision.status !== 'intent' ||
@@ -327,6 +415,7 @@ export function simulatePaperFill({ decision, book, now }) {
   if (now < earliest) return null;
   const savedBook = getBookSnapshot(book);
   const base = {
+    ...(isLegacyReplay ? {} : { version: 'paper-execution-v2' }),
     id: `${decision.id}:execution`,
     decisionId: decision.id,
     kind: 'no-fill',
@@ -342,6 +431,15 @@ export function simulatePaperFill({ decision, book, now }) {
     book: savedBook,
   };
   const noFill = (reason) => deepFreeze({ ...base, reason });
+  if (!isLegacyReplay) {
+    const specificationProblem = getTradingSpecificationProblem(decision.contract);
+    if (specificationProblem) return noFill(specificationProblem);
+    if (
+      !isTradingPriceValid(decision.limitPrice, decision.contract, decision.side) ||
+      !isTradingQuantityValid(decision.quantity, decision.contract)
+    )
+      return noFill('invalid_market_price_or_quantity');
+  }
   if (now > latest || now >= decision.contract.expiresAt) return noFill('execution_window_expired');
   if (
     !isCausalBook(savedBook, now) ||
@@ -349,6 +447,10 @@ export function simulatePaperFill({ decision, book, now }) {
     (savedBook.requestedAt !== undefined && savedBook.requestedAt < earliest)
   ) {
     return noFill('no_causal_execution_book');
+  }
+  if (!isLegacyReplay) {
+    const bookProblem = getTradingBookRulesProblem(decision.contract, savedBook);
+    if (bookProblem) return noFill(bookProblem);
   }
   const value = getKalshiPurchaseValue({
     book: savedBook,
@@ -364,10 +466,13 @@ export function simulatePaperFill({ decision, book, now }) {
     savedBook[`${decision.side}Asks`],
     decision.quantity,
     policy.slippagePerContract,
+    decision.contract,
+    decision.side,
+    isLegacyReplay,
   );
   if (!fills || fills.some((fill) => fill.price > decision.limitPrice + 1e-8))
     return noFill('limit_price_exceeded');
-  const purchase = getFillCost(fills, savedBook.fee, now);
+  const purchase = getFillCost(fills, savedBook.fee, now, isLegacyReplay);
   if (!purchase) return noFill('execution_fees_unavailable');
   if (purchase.totalCost > decision.reservedCapital + 1e-8)
     return noFill('reserved_capital_exceeded');
@@ -388,19 +493,29 @@ export function simulatePaperFill({ decision, book, now }) {
     ),
     fills,
   });
-}
+};
 
-export function isPaperExecutionEvent(event, decision) {
+export const simulatePaperFill = (input) => buildPaperFill({ ...input, isLegacyReplay: false });
+
+export const isPaperExecutionEvent = (event, decision) => {
   try {
+    const isLegacyReplay =
+      event?.version === undefined &&
+      decision?.version === undefined &&
+      decision?.contract?.specification === undefined;
     return Boolean(
       event &&
+      (isLegacyReplay || event.version === 'paper-execution-v2') &&
       ['fill', 'no-fill'].includes(event.kind) &&
-      same(event, simulatePaperFill({ decision, book: event.book, now: event.recordedAt })),
+      same(
+        event,
+        buildPaperFill({ decision, book: event.book, now: event.recordedAt, isLegacyReplay }),
+      ),
     );
   } catch {
     return false;
   }
-}
+};
 
 export function settlePaperPosition({ decision, fill, market, now }) {
   if (

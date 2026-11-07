@@ -5,6 +5,18 @@ const timestamp = (value) => Number.isSafeInteger(value) && value > 0;
 const price = (value) =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1e9;
 const ticker = (value) => typeof value === 'string' && /^KXBTC15M-[A-Z0-9-]{1,80}$/.test(value);
+const contractIdentityFields = [
+  'ticker',
+  'eventTicker',
+  'seriesTicker',
+  'target',
+  'startsAt',
+  'expiresAt',
+  'comparison',
+  'roundDigits',
+  'outcomeDefinition',
+  'rulesVerified',
+];
 
 /** Only the verified Bitcoin 15-minute contract is supported by this model. */
 export function isKalshiContract(market) {
@@ -28,23 +40,14 @@ export function isKalshiContract(market) {
 }
 
 /** Persist settlement identity, never mutable quotes or an eventual result in a decision. */
-export function getKalshiContract(market) {
+export const getKalshiContract = (market) => {
   if (!isKalshiContract(market)) return null;
-  return Object.fromEntries(
-    [
-      'ticker',
-      'eventTicker',
-      'seriesTicker',
-      'target',
-      'startsAt',
-      'expiresAt',
-      'comparison',
-      'roundDigits',
-      'outcomeDefinition',
-      'rulesVerified',
-    ].map((key) => [key, market[key]]),
-  );
-}
+  const contract = Object.fromEntries(contractIdentityFields.map((key) => [key, market[key]]));
+  // New captures retain rule/precision provenance; legacy records remain readable.
+  // Trading validates the specification independently and never upgrades a missing one.
+  if (market.specification !== undefined) contract.specification = market.specification;
+  return contract;
+};
 
 export function getKalshiOutcome(market, now) {
   const contract = getKalshiContract(market);
@@ -102,8 +105,11 @@ export function isVerifiedKalshiOutcome(outcome, contract, now) {
   );
 }
 
-export function isSameKalshiContract(left, right) {
+export const isSameKalshiContract = (left, right) => {
   const first = getKalshiContract(left);
   const second = getKalshiContract(right);
-  return Boolean(first && second && Object.keys(first).every((key) => first[key] === second[key]));
-}
+  // Metadata retrieval times and price grids can change without changing the settlement identity.
+  return Boolean(
+    first && second && contractIdentityFields.every((key) => first[key] === second[key]),
+  );
+};

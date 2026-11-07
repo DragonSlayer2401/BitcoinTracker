@@ -40,6 +40,14 @@ The current Kalshi target appears as an amber line with a price label on the Coi
 
 ## Data access
 
+For isolated append-only Coinbase BTC-USD capture, replay, status and retention, use
+`pnpm spot:capture --help`. See [spot capture](docs/spot-capture.md) for commands and
+data-quality limits. This command does not start the research collector.
+
+For read-only Kalshi market, order-book and official BRTI recording, use
+`pnpm kalshi:capture --help`. See [Kalshi ingestion](docs/kalshi-ingestion.md) for
+record/inspect commands, entitlement, reference provenance and archive limits.
+
 Public Kalshi contracts, quotes, results and Coinbase inputs need no API key. The browser streams Coinbase trades and liquidity; server routes fetch market history and Kalshi data.
 
 Official BRTI samples require server-only `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY`, plus Kalshi's benchmark entitlement. See [.env.example](.env.example). Without entitled access, probabilities use a clearly labeled Coinbase proxy and additional index uncertainty. The proxy cannot determine settlement.
@@ -78,3 +86,6 @@ No deployment or trading execution is included.
 
 Start with [AGENTS.md](AGENTS.md) for repository rules and documentation routing. Documentation under
 `docs/` is being rebuilt in reviewed phases.
+
+See [Bot implementation status](docs/BOT_IMPLEMENTATION_STATUS.md) for the current phase and Phase 1 audit,
+observed checks, existing capabilities, and remaining acceptance evidence.
