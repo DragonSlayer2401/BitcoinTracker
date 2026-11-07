@@ -4,7 +4,7 @@ import Icon from '@/components/Icon';
 import ResearchData from '@/features/ForecastResearch/features/ResearchData/ResearchData';
 import KalshiModelRules from '@/features/Forecasting/features/LiveEstimates/components/KalshiModelRules';
 
-const Methodology = ({ evidenceWarning, researchStatus, paperTrading }) => {
+const Methodology = ({ evidenceWarning, researchStatus }) => {
   const [showRules, setShowRules] = useState(false);
 
   return (
@@ -22,7 +22,6 @@ const Methodology = ({ evidenceWarning, researchStatus, paperTrading }) => {
           View model rules
         </Button>
         <ResearchData warning={evidenceWarning} researchStatus={researchStatus} />
-        {paperTrading}
       </div>
       {evidenceWarning && (
         <span className="small text-warning mt-1" role="status">

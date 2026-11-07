@@ -72,17 +72,15 @@ const TradingDashboard = () => {
   });
 
   return (
-    <div className="bitcoin-tracker advisor-dashboard">
+    <div className="bitcoin-tracker">
       <a className="skip-link" href="#main-content">
         Skip to tracker
       </a>
       <main id="main-content" tabIndex="-1">
         <Container fluid className="tracker-container">
-          <TrackerHeader
-            now={now}
-            benchmarkData={benchmarkData}
-            hasStreamTicker={hasStreamTicker}
-          />
+          <TrackerHeader now={now} benchmarkData={benchmarkData} hasStreamTicker={hasStreamTicker}>
+            <SimulatedTrading market={currentMarket} now={now} hasMarketError={hasContractError} />
+          </TrackerHeader>
           {hasRequestError && (
             <Alert
               variant="warning"
@@ -110,40 +108,34 @@ const TradingDashboard = () => {
           )}
           {storageWarning && <Alert variant="warning">{storageWarning}</Alert>}
           {settlement.warning && <Alert variant="warning">{settlement.warning}</Alert>}
-          <SimulatedTrading
-            market={currentMarket}
-            now={now}
-            hasMarketError={hasContractError}
-            chart={<MarketData marketData={marketData} now={now} />}
-            renderResearch={(paperTrading) => (
-              <>
-                <Forecasting
-                  now={now}
-                  marketData={marketData}
-                  journal={journal}
-                  selection={selection}
-                  checkpoints={checkpoints}
-                  estimates={estimates}
-                >
-                  <MarketFeeds
-                    ticker={ticker}
-                    quoteAge={quoteAge}
-                    isQuoteFresh={isQuoteFresh}
-                    historyAge={historyAge}
-                    forecast={estimates.forecast}
-                    stream={stream}
-                    derivatives={derivatives}
-                    conditions={estimates.marketConditions}
-                  />
-                </Forecasting>
-                <Methodology
-                  evidenceWarning={evidenceWarning ?? research.researchWarning}
-                  researchStatus={research.researchStatus}
-                  paperTrading={paperTrading}
-                />
-              </>
-            )}
-          />
+          <div className="tracker-workspace">
+            <div className="market-panel dashboard-panel">
+              <MarketData marketData={marketData} now={now} />
+            </div>
+            <Forecasting
+              now={now}
+              marketData={marketData}
+              journal={journal}
+              selection={selection}
+              checkpoints={checkpoints}
+              estimates={estimates}
+            >
+              <MarketFeeds
+                ticker={ticker}
+                quoteAge={quoteAge}
+                isQuoteFresh={isQuoteFresh}
+                historyAge={historyAge}
+                forecast={estimates.forecast}
+                stream={stream}
+                derivatives={derivatives}
+                conditions={estimates.marketConditions}
+              />
+            </Forecasting>
+            <Methodology
+              evidenceWarning={evidenceWarning ?? research.researchWarning}
+              researchStatus={research.researchStatus}
+            />
+          </div>
         </Container>
       </main>
     </div>

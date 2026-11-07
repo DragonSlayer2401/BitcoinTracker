@@ -1,6 +1,6 @@
 import { formatTime } from '@/utils/format.utils';
 
-export default function TrackerHeader({ now, benchmarkData, hasStreamTicker }) {
+const TrackerHeader = ({ now, benchmarkData, hasStreamTicker, children }) => {
   const feedStatusLabel = benchmarkData.isFresh
     ? 'BRTI live'
     : benchmarkData.current
@@ -20,7 +20,10 @@ export default function TrackerHeader({ now, benchmarkData, hasStreamTicker }) {
           Coinbase input · {hasStreamTicker ? 'Streaming' : 'REST fallback'}
         </span>
         <span className="local-clock small text-secondary">{formatTime(now)} local</span>
+        {children}
       </div>
     </div>
   );
-}
+};
+
+export default TrackerHeader;

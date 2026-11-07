@@ -1,21 +1,15 @@
 .bitcoin-tracker {
   .advisor-workspace {
     display: grid;
-    grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr);
-    grid-template-areas: 'account account' 'chart action' 'positions positions';
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas: 'account action' 'positions positions';
+    align-items: start;
     gap: 12px;
     min-height: 0;
-    flex: 1;
   }
 
   .advisor-account {
     grid-area: account;
-  }
-  .advisor-chart {
-    grid-area: chart;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
   }
   .advisor-action {
     grid-area: action;
@@ -30,7 +24,7 @@
 
   .advisor-account-values {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
     dt {
       font-size: 11px;
@@ -53,20 +47,7 @@
   .advisor-loss {
     color: var(--tracker-red);
   }
-  .advisor-countdown {
-    font-size: 25px;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.1;
-  }
-  .advisor-event {
-    border-bottom: 1px solid var(--tracker-border);
-    padding-bottom: 8px;
-  }
-  .advisor-target {
-    color: #f0c577;
-    font-variant-numeric: tabular-nums;
-  }
-  .advisor-action-call {
+  .advisor-action .advisor-action-call {
     border: 1px solid var(--tracker-border);
     background: linear-gradient(120deg, #1c2821, #17201d);
     border-radius: 8px;
@@ -138,35 +119,7 @@
     overflow: auto;
   }
 
-  .advisor-research-content {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    > .forecast-panel {
-      grid-column: 1 / -1;
-      grid-row: auto;
-    }
-    > .market-data,
-    > .journal-section,
-    > .methodology-section {
-      grid-column: auto;
-      grid-row: auto;
-    }
-    > .methodology-section {
-      grid-column: 1 / -1;
-    }
-  }
-
-  @media (min-width: 1200px) and (min-height: 700px) {
-    &.advisor-dashboard > main > .tracker-container {
-      height: 100svh;
-      min-height: 0;
-    }
-    .advisor-workspace {
-      grid-template-columns: minmax(0, 2.2fr) minmax(350px, 1fr);
-      grid-template-areas: 'chart account' 'chart action' 'positions positions';
-      grid-template-rows: auto minmax(0, 1fr) auto;
-    }
+  @media (min-width: 1200px) {
     .advisor-account-values {
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
@@ -178,32 +131,11 @@
     .advisor-account-time {
       font-size: 11px;
     }
-    .advisor-action,
-    .advisor-chart {
-      overflow: auto;
-      scrollbar-width: thin;
-    }
-    .advisor-positions {
-      max-height: 170px;
-      overflow: auto;
-      scrollbar-width: thin;
-    }
-    .advisor-chart {
-      overflow: hidden;
-    }
-  }
-  @media (max-width: 1199.98px) {
-    .advisor-workspace {
-      grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr);
-    }
-    .advisor-account-values {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
   }
   @media (max-width: 767.98px) {
     .advisor-workspace {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-areas: 'account' 'action' 'chart' 'positions';
+      grid-template-areas: 'account' 'action' 'positions';
     }
     .advisor-account-values {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -211,9 +143,6 @@
     }
     .advisor-account-values dd {
       font-size: 19px;
-    }
-    .advisor-research-content {
-      grid-template-columns: minmax(0, 1fr);
     }
   }
 }

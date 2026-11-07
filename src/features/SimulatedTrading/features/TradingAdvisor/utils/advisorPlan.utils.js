@@ -151,10 +151,19 @@ const readinessLabels = {
   canceled: 'Canceled',
   stale: 'Checking current prices',
   closed: 'Event closed',
+  'unsupported-policy': 'Unsupported saved policy',
 };
 
 /** Display states are not order permissions. The collector still owns execution and all limits. */
-export function getAdvisorPlanState({ report, market, now, isError = false, isLoading = false }) {
+export const getAdvisorPlanState = ({
+  report,
+  market,
+  now,
+  isError = false,
+  isLoading = false,
+}) => {
+  const policyCompatibility = report?.policyCompatibility;
+  const hasUnsupportedPolicy = policyCompatibility?.status === 'unsupported';
   const latest = report?.latestAdvice;
   const plan =
     report?.currentPlan?.version === 'advisor-plan-v1'
@@ -197,6 +206,7 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
   );
   const fresh =
     !isError &&
+    !hasUnsupportedPolicy &&
     plan &&
     matching &&
     !accountChanged &&
@@ -216,7 +226,10 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
     (isTime(report?.cooldownUntil) && now < report.cooldownUntil);
   let readiness = 'ready';
   let explanation = getAdvisorReason(plan?.reason ?? reason);
-  if (isLoading) {
+  if (hasUnsupportedPolicy) {
+    readiness = 'unsupported-policy';
+    explanation = policyCompatibility.reason;
+  } else if (isLoading) {
     readiness = 'confirmation';
     explanation = 'Loading the latest recorded assessment.';
   } else if (!report?.startedAt || report?.collector?.status === 'not-started') {
@@ -263,8 +276,8 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
   // A quote timeout is an execution boundary, not a change of strategy. Account
   // versions also advance on routine WAIT/HOLD writes, so only changed positions
   // or configuration invalidate the ongoing plan here. Exact versions still gate orders.
-  let lifecycle = 'awaiting';
-  if (recorded) {
+  let lifecycle = hasUnsupportedPolicy ? 'unsupported-policy' : 'awaiting';
+  if (recorded && !hasUnsupportedPolicy) {
     if (market && !matching) lifecycle = 'changed-event';
     else if (now >= recorded.contract.expiresAt) lifecycle = 'closed';
     else if (filled) lifecycle = 'filled';
@@ -300,6 +313,7 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
     'changed-event': 'REVIEWING NEW EVENT',
     'changed-account': 'REVIEWING ACCOUNT',
     awaiting: 'Awaiting first assessment',
+    'unsupported-policy': 'Saved policy unavailable',
   };
   const lifecycleExplanations = {
     filled: 'The paper order filled. Reviewing the resulting position for the next plan.',
@@ -308,6 +322,7 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
     closed: 'This event has ended. Waiting for its official result and the next event.',
     'changed-event': 'Reviewing the new event and its target.',
     'changed-account': 'The position or account settings changed. Reviewing the next plan.',
+    'unsupported-policy': policyCompatibility?.reason,
   };
   const interrupted =
     isError ||
@@ -350,4 +365,4 @@ export function getAdvisorPlanState({ report, market, now, isError = false, isLo
     assessedAt: displayed?.assessedAt ?? null,
     reviewAt: active?.reviewAt ?? null,
   };
-}
+};

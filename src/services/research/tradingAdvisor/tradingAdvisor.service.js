@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@libsql/client';
 import { getResearchDatabaseConfiguration } from '../research.repository';
+import { ResearchDataError } from '../researchDataError';
 import { createTradingAdvisorRepository } from './tradingAdvisor.repository';
 import {
   createAdvisorAccount,
@@ -21,6 +22,7 @@ import { getKalshiContract } from '@/features/MarketData/utils/kalshi/contract.u
 import {
   TRADING_ADVISOR_POLICY,
   getTradingAdvice,
+  isTradingAdvisorPolicy,
 } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/tradingAdvisor.utils';
 import { createAdvisorResearchPolicy } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorPolicy.utils';
 import { getAdvisorForecastReconciliation } from '@/features/SimulatedTrading/features/TradingAdvisor/utils/advisorForecast.utils';
@@ -561,21 +563,33 @@ export function createTradingAdvisorService({
 }
 
 /** Select a saved configuration without restarting collection or discarding account history. */
-export function createConfiguredTradingAdvisorService({
+export const createConfiguredTradingAdvisorService = ({
   repository,
   trialRepository,
   historyTrialRepository,
   now = Date.now,
   ...options
-}) {
+}) => {
   let current = null;
   let currentPolicyId = null;
   let currentResearchPolicyId = null;
   let updating = Promise.resolve();
-  async function select() {
+  const readSelection = async ({ requireSupportedPolicy = false } = {}) => {
     const configuration = await repository.readConfiguration();
     const policy = configuration.policy;
-    let researchPolicy = policy.version === 2 ? createAdvisorResearchPolicy(policy) : policy;
+    const isSupported = isTradingAdvisorPolicy(policy);
+    const policyCompatibility = {
+      status: isSupported ? 'supported' : 'unsupported',
+      reason: isSupported
+        ? null
+        : 'The saved adviser policy is not supported by the current trading engine. Existing balances and history remain available. New trading decisions are unavailable for this policy.',
+    };
+    if (requireSupportedPolicy && !isSupported)
+      throw new ResearchDataError(policyCompatibility.reason, 409);
+    // Frozen reports remain readable even when this engine cannot execute their policy.
+    // Never substitute today's defaults or enroll a different experiment during a read.
+    let researchPolicy =
+      isSupported && policy.version === 2 ? createAdvisorResearchPolicy(policy) : policy;
     let drainingTrials = false;
     if (researchPolicy.id !== policy.id) {
       const researchTrial = trialRepository
@@ -607,41 +621,56 @@ export function createConfiguredTradingAdvisorService({
         if (drainingTrials) researchPolicy = policy;
       }
     }
-    if (currentPolicyId !== policy.id || currentResearchPolicyId !== researchPolicy.id) {
-      if (current) await current.stop();
-      current = createTradingAdvisorService({
-        repository,
-        now,
-        ...options,
-        policy: configuration.policy,
-        researchPolicy,
-        historyTrials: historyTrialRepository
-          ? createAdvisorHistoryTrialService({
-              repository: historyTrialRepository,
-              policy: researchPolicy,
-              now,
-            })
+    return { configuration, researchPolicy, drainingTrials, policyCompatibility };
+  };
+  const createService = ({ configuration, researchPolicy }) =>
+    createTradingAdvisorService({
+      repository,
+      now,
+      ...options,
+      policy: configuration.policy,
+      researchPolicy,
+      historyTrials: historyTrialRepository
+        ? createAdvisorHistoryTrialService({
+            repository: historyTrialRepository,
+            policy: researchPolicy,
+            now,
+          })
+        : null,
+      trials:
+        configuration.policy.version === 2 && trialRepository
+          ? createTradingPolicyTrialService({ repository: trialRepository, now })
           : null,
-        trials:
-          configuration.policy.version === 2 && trialRepository
-            ? createTradingPolicyTrialService({ repository: trialRepository, now })
-            : null,
-      });
+    });
+  const select = async ({ removeDailyLossLimit = false } = {}) => {
+    let selection = await readSelection({ requireSupportedPolicy: true });
+    if (removeDailyLossLimit && selection.configuration.policy.dailyLossLimitEnabled !== false) {
+      await repository.ensureDailyLossLimitRemoved();
+      selection = await readSelection({ requireSupportedPolicy: true });
+    }
+    const { configuration, researchPolicy } = selection;
+    if (
+      currentPolicyId !== configuration.policy.id ||
+      currentResearchPolicyId !== researchPolicy.id
+    ) {
+      if (current) await current.stop();
+      current = createService(selection);
       currentPolicyId = configuration.policy.id;
       currentResearchPolicyId = researchPolicy.id;
     }
-    return { service: current, configuration, researchPolicy, drainingTrials };
-  }
-  function serial(operation) {
+    return { service: current, ...selection };
+  };
+  const serial = (operation) => {
     const result = updating.then(operation);
     updating = result.catch(() => {});
     return result;
-  }
+  };
   return {
     advance: (input) =>
       serial(async () => {
-        await repository.ensureDailyLossLimitRemoved();
-        const { service, configuration, drainingTrials } = await select();
+        const { service, configuration, drainingTrials } = await select({
+          removeDailyLossLimit: true,
+        });
         // Drain old intentions before rolling over, without replacing them with another
         // old-policy order that would keep the migration waiting indefinitely.
         return service.advance({
@@ -652,8 +681,14 @@ export function createConfiguredTradingAdvisorService({
     observeOutcome: (market) => serial(async () => (await select()).service.observeOutcome(market)),
     stop: (status) => serial(async () => current?.stop(status)),
     async getReport() {
-      const { configuration, service, researchPolicy, drainingTrials } = await select();
-      const report = await service.getReport();
+      const selection = await readSelection();
+      const { configuration, researchPolicy } = selection;
+      // A report request must not stop an active collector when configuration changes.
+      const reader =
+        currentPolicyId === configuration.policy.id && currentResearchPolicyId === researchPolicy.id
+          ? current
+          : createService(selection);
+      const report = await reader.getReport();
       if (report.trials && trialRepository) {
         report.trials.previousExperiments = (await trialRepository.getReports()).filter(
           (trial) => trial.policyId !== researchPolicy.id,
@@ -664,10 +699,10 @@ export function createConfiguredTradingAdvisorService({
           await historyTrialRepository.getReports()
         ).filter((trial) => trial.id !== report.historyTrials.id);
       }
-      return { ...report, configuration, researchPolicy, drainingTrials };
+      return { ...report, ...selection };
     },
   };
-}
+};
 
 let defaultStore;
 async function getAdvisorStore() {

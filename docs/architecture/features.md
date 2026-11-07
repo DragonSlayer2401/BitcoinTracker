@@ -72,9 +72,10 @@ that shares the clock and market observations across four domains.
   indicators, and drawings. Exchange requests and stream adapters live under `src/services/`.
 - [Forecasting](../../src/features/Forecasting) owns live estimates, checkpoint recording,
   scheduling, settlement, and the saved forecast journal. The application store registers its
-  reducer at `state.tracker`. Closing the research dialog leaves recording and settlement running.
+  reducer at `state.tracker`. Forecast controls and history render on the main dashboard; recording
+  and settlement stay mounted while the paper-trading research dialog opens and closes.
 - [ForecastResearch](../../src/features/ForecastResearch) owns evidence collection, replay, model
   evaluation, and pattern studies. Its ResearchData feature presents research reports and exports.
 - [SimulatedTrading](../../src/features/SimulatedTrading) owns the PaperTrading and TradingAdvisor
-  workflows. Advisor experiment rules live with TradingAdvisor. Account persistence and provider
-  calls live under `src/services/research/`.
+  workflows and their Research dialog. Advisor experiment rules live with TradingAdvisor.
+  Account persistence and provider calls live under `src/services/research/`.
